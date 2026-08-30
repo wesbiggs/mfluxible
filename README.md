@@ -72,19 +72,63 @@ cd client && python3 -m http.server 8000
 
 ### MCP tool (generate images from within Claude)
 
-`client/mcp_server.py` exposes a single tool, `generate_image(prompt, width, height, steps, seed)`, over MCP's stdio transport, forwarding each `thinking` step as an MCP progress update and returning the final image as inline content Claude can render directly in the conversation.
+`client/mcp_server.py` exposes a single tool, `generate_image(prompt, width, height, steps, seed)`, over MCP's stdio transport, forwarding each `thinking` step as an MCP progress update and returning the final image as inline content.
 
 ```bash
 pip install -r client/requirements-mcp.txt
 ```
 
-You still need the server from Quickstart running separately with the model loaded — this only proxies to it. Register the tool:
+You still need the server from Quickstart running separately with the model loaded — this only proxies to it.
+
+Two limits imposed by the MCP host shape this tool's defaults, and neither is something the server can lift on its own:
+
+- **A wall-clock timeout on each tool call.** Generation time scales with pixel count, and step count is not the useful lever — measured on an M2 Pro at 9 steps:
+
+  | Size | Time | PNG |
+  |---|---|---|
+  | 1024×1280 | 249s (~27.7s/step) | 1.75MB |
+  | 1024×1024 | 212s (~23.6s/step) | 1.50MB |
+  | 768×768 | 115s (~12.8s/step) | 0.85MB |
+
+  At ~27s/step even a 4-step run at 1024×1280 lands near 110s, so trimming steps doesn't rescue a large image. The tool therefore defaults to **768×768** rather than the HTTP API's 1024×1024. Each `thinking` step is forwarded as an MCP progress notification, which is the only lever the server has here — hosts that reset their timeout on progress will tolerate much longer runs, but that's the host's choice, not the server's. Raise `MFLUXIBLE_MCP_WIDTH`/`_HEIGHT` if your host is generous, or pass explicit `width`/`height` per call.
+- **A ~1MB cap on a single tool result.** MCP ships images as base64, which inflates bytes by 4/3, so the raw image has to land near 750KB. A full-resolution 1024×1280 PNG off this model is ~1.8MB (~2.4MB base64) — about 2.4× over. The tool now re-encodes to fit: PNG is returned untouched when it's already small enough, otherwise it steps down JPEG quality first and only then resolution. In practice quality alone is enough and resolution is never touched: a real 1024×1280 generation measured 1.75MB as PNG and 0.21MB as JPEG q85 at unchanged dimensions — comfortably inside the budget — and even a pathological 3.9MB noise PNG still fits at full size, at q70. So images come back at the resolution you asked for, just recompressed.
+
+Because the inline copy may be recompressed, the untouched full-resolution PNG (mflux metadata intact) is always written to `MFLUXIBLE_MCP_SAVE_DIR` (default `~/.cache/mfluxible/outputs`) first, and the tool returns that path alongside the image.
+
+The image is tagged with MCP's `annotations.audience`/`priority` display hints, which ask the host to surface it to the user rather than bury it in the collapsed tool-result block. Whether a host honors those hints is up to the host — the protocol has no way to *require* main-transcript rendering.
+
+Claude Code and Claude Desktop each keep their own MCP configuration and don't share a registry, so registering the tool with one has no effect on the other. Set up whichever you use, or both.
+
+#### Claude Code
 
 ```bash
 claude mcp add mfluxible --scope user -- /path/to/mfluxible/.venv/bin/python /path/to/mfluxible/client/mcp_server.py
 ```
 
-(`--scope user` makes it available in every project; drop it to register for just the current project.) Claude Code starts `mcp_server.py` itself when needed. If the server is on a different host/port, point the proxy at it with `MFLUXIBLE_URL` (defaults to `http://127.0.0.1:8420/v1/images/generations`).
+(`--scope user` makes it available in every project; drop it to register for just the current project.) This writes to `~/.claude.json`; `claude mcp list` shows what got registered and whether it connects. Claude Code starts `mcp_server.py` itself when needed.
+
+#### Claude Desktop
+
+`claude mcp add` does **not** register anything with Desktop — Desktop reads its own file, `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS. Open it via **Settings → Developer → Edit Config** and add:
+
+```json
+{
+  "mcpServers": {
+    "mfluxible": {
+      "command": "/path/to/mfluxible/.venv/bin/python",
+      "args": ["/path/to/mfluxible/client/mcp_server.py"]
+    }
+  }
+}
+```
+
+Merge that entry into the existing `mcpServers` object if the file already lists other servers. Both paths have to be absolute — Desktop launches stdio servers with a minimal environment that doesn't inherit your shell's `PATH`, so a bare `python` or a relative path fails to resolve. Then quit Desktop completely (⌘Q; closing the window leaves the process running) and reopen it.
+
+The tool appears under Developer/Extensions and in the composer's tool menu — not under **Connectors**, which lists remote OAuth connectors only, so a local stdio server like this one will never show up there.
+
+Desktop also reports `mfluxible` as connected as soon as `mcp_server.py` starts, which says nothing about whether the HTTP server it proxies to is up. If that server isn't running, you'll only find out when a `generate_image` call fails.
+
+Either way, if the server is on a different host/port, point the proxy at it with `MFLUXIBLE_URL` (defaults to `http://127.0.0.1:8420/v1/images/generations`): as `-e MFLUXIBLE_URL=...` on the `claude mcp add` command, or as an `"env"` object alongside `command`/`args` in Desktop's config.
 
 ## API
 
@@ -143,6 +187,19 @@ Environment variables for `server.py`, all optional.
 | `MFLUXIBLE_CORS_ORIGIN_REGEX` | `https?://(localhost\|127\.0\.0\.1)(:\d+)?` | Origins to reflect back in CORS (see [CORS](#cors)) |
 | `MFLUXIBLE_CORS_ORIGINS` | unset | Comma-separated exact-match origins, in addition to the regex |
 
+### MCP tool
+
+Environment variables for `client/mcp_server.py`, all optional. Set them where the tool is registered (`-e` on `claude mcp add`, or an `"env"` object in Claude Desktop's config).
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `MFLUXIBLE_URL` | `http://127.0.0.1:8420/v1/images/generations` | Which mfluxible server to proxy to |
+| `MFLUXIBLE_MCP_WIDTH` | `768` | Default width, kept below the API's own default to fit host tool-call timeouts |
+| `MFLUXIBLE_MCP_HEIGHT` | `768` | Default height, same reason |
+| `MFLUXIBLE_MCP_STEPS` | `9` | Default step count |
+| `MFLUXIBLE_MCP_MAX_BYTES` | `700000` | Raw-byte budget for the inline image, sized so base64 clears the host's ~1MB result cap |
+| `MFLUXIBLE_MCP_SAVE_DIR` | `~/.cache/mfluxible/outputs` | Where the untouched full-resolution PNG is written |
+
 ### Model cache
 
 Startup quantizes the raw downloaded weights and caches the result to `MFLUXIBLE_MODEL_DIR/z-image-turbo-q<bits>/` — a real, separate step from the Hugging Face download: HF already caches the raw weights locally, but quantizing them into MLX's packed format is nontrivial per-layer compute that would otherwise happen on every startup (mflux's `mflux-save` mechanism does the same thing via its own CLI; this just does it automatically here). Every startup after the first loads the pre-quantized weights directly and skips that step.
@@ -173,7 +230,7 @@ uvicorn server:app --app-dir server --host 0.0.0.0 --port 8420
 Then everything else just points at that host instead of `127.0.0.1`, no code changes needed:
 
 - `stream_client.py` / `stream_client.js`: `--url http://mac-mini.local:8420/v1/images/generations`
-- `mcp_server.py`: set `MFLUXIBLE_URL=http://mac-mini.local:8420/v1/images/generations` when registering it, e.g. `claude mcp add mfluxible --scope user -e MFLUXIBLE_URL=http://mac-mini.local:8420/v1/images/generations -- /path/to/mfluxible/.venv/bin/python /path/to/mfluxible/client/mcp_server.py`
+- `mcp_server.py`: set `MFLUXIBLE_URL=http://mac-mini.local:8420/v1/images/generations` when registering it, e.g. `claude mcp add mfluxible --scope user -e MFLUXIBLE_URL=http://mac-mini.local:8420/v1/images/generations -- /path/to/mfluxible/.venv/bin/python /path/to/mfluxible/client/mcp_server.py` — or, in Claude Desktop's config, `"env": {"MFLUXIBLE_URL": "http://mac-mini.local:8420/v1/images/generations"}` alongside `command`/`args`
 
 There's no authentication on the API — only bind it to `0.0.0.0` on a network you trust (home LAN, Tailscale/VPN), never expose it directly to the internet.
 
