@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>mfluxible harness</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    max-width: 720px;
+    margin: 2rem auto;
+    padding: 0 1rem;
+    line-height: 1.4;
+  }
+  h1 { font-size: 1.25rem; }
+  form { display: grid; gap: 0.75rem; }
+  label { display: grid; gap: 0.25rem; font-size: 0.9rem; }
+  input, textarea {
+    font: inherit;
+    padding: 0.4rem 0.5rem;
+    border: 1px solid #8888;
+    border-radius: 4px;
+    background: transparent;
+    color: inherit;
+  }
+  textarea { resize: vertical; min-height: 3.5rem; }
+  .row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.75rem; }
+  button {
+    font: inherit;
+    padding: 0.5rem 1rem;
+    border: none;
+    border-radius: 4px;
+    background: #2563eb;
+    color: white;
+    cursor: pointer;
+  }
+  button:disabled { background: #8888; cursor: default; }
+  #log {
+    font-family: ui-monospace, monospace;
+    font-size: 0.85rem;
+    white-space: pre-wrap;
+    background: #8881;
+    border-radius: 4px;
+    padding: 0.5rem 0.75rem;
+    min-height: 2rem;
+    max-height: 12rem;
+    overflow-y: auto;
+  }
+  #previewWrap, #finalWrap { margin-top: 1rem; }
+  #previewWrap img { max-width: 200px; border-radius: 4px; display: block; }
+  #finalWrap img { max-width: 100%; border-radius: 4px; display: block; }
+  #finalWrap a { display: inline-block; margin-top: 0.5rem; font-size: 0.9rem; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+
+<h1>mfluxible harness</h1>
+
+<form id="form">
+  <label>Server URL
+    <input type="text" id="url" value="http://127.0.0.1:8420/v1/images/generations">
+  </label>
+  <label>Prompt
+    <textarea id="prompt" required>a puffin standing on a cliff at sunset</textarea>
+  </label>
+  <div class="row">
+    <label>Width <input type="number" id="width" value="1024" step="8"></label>
+    <label>Height <input type="number" id="height" value="1024" step="8"></label>
+    <label>Steps <input type="number" id="steps" value="9"></label>
+    <label>Seed <input type="number" id="seed" placeholder="random"></label>
+  </div>
+  <label>Preview every N steps (0 disables)
+    <input type="number" id="previewEvery" value="0">
+  </label>
+  <button type="submit" id="submitBtn">Generate</button>
+</form>
+
+<div id="log"></div>
+
+<div id="previewWrap" class="hidden">
+  <strong>Latest preview</strong>
+  <img id="previewImg" alt="preview">
+</div>
+
+<div id="finalWrap" class="hidden">
+  <strong>Result</strong>
+  <img id="finalImg" alt="result">
+  <a id="downloadLink" download="output.png">Download PNG</a>
+</div>
+
+<script>
+const form = document.getElementById("form");
+const submitBtn = document.getElementById("submitBtn");
+const logEl = document.getElementById("log");
+const previewWrap = document.getElementById("previewWrap");
+const previewImg = document.getElementById("previewImg");
+const finalWrap = document.getElementById("finalWrap");
+const finalImg = document.getElementById("finalImg");
+const downloadLink = document.getElementById("downloadLink");
+
+function log(line) {
+  logEl.textContent += line + "\n";
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+async function generate(body, url) {
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    throw new Error(`request failed: ${resp.status} ${resp.statusText}`);
+  }
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let idx;
+    while ((idx = buffer.indexOf("\n\n")) !== -1) {
+      const rawEvent = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 2);
+      for (const line of rawEvent.split("\n")) {
+        if (!line.startsWith("data: ")) continue;
+        handleEvent(JSON.parse(line.slice("data: ".length)));
+      }
+    }
+  }
+}
+
+function handleEvent(event) {
+  switch (event.type) {
+    case "start":
+      log(`seed=${event.seed} steps=${event.total_steps}`);
+      break;
+    case "thinking":
+      log(`  step ${event.step}/${event.total_steps} (${event.elapsed_ms}ms)`);
+      if (event.preview) {
+        previewImg.src = `data:image/png;base64,${event.preview}`;
+        previewWrap.classList.remove("hidden");
+      }
+      break;
+    case "image": {
+      const dataUrl = `data:image/png;base64,${event.data}`;
+      finalImg.src = dataUrl;
+      downloadLink.href = dataUrl;
+      finalWrap.classList.remove("hidden");
+      log(`done (seed=${event.seed}, ${event.generation_time.toFixed(1)}s)`);
+      break;
+    }
+    case "error":
+      log(`error: ${event.message}`);
+      break;
+  }
+}
+
+form.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  logEl.textContent = "";
+  previewWrap.classList.add("hidden");
+  finalWrap.classList.add("hidden");
+  submitBtn.disabled = true;
+  submitBtn.textContent = "Generating...";
+
+  const seedVal = document.getElementById("seed").value;
+  const body = {
+    prompt: document.getElementById("prompt").value,
+    width: Number(document.getElementById("width").value),
+    height: Number(document.getElementById("height").value),
+    steps: Number(document.getElementById("steps").value),
+    seed: seedVal === "" ? null : Number(seedVal),
+    preview_every: Number(document.getElementById("previewEvery").value),
+    stream: true,
+  };
+
+  try {
+    await generate(body, document.getElementById("url").value);
+  } catch (err) {
+    log(`error: ${err.message}`);
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = "Generate";
+  }
+});
+</script>
+
+</body>
+</html>
