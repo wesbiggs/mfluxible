@@ -91,12 +91,12 @@ Two limits imposed by the MCP host shape this tool's defaults, and neither is so
   | 768×768 | 9 | 115s | 0.85MB |
   | 768×768 | 3 | 77s | |
 
-  Dividing those by step count overstates what a step costs. The two 768×768 rows pin the split: six fewer steps saved 38s, so the loop runs ~6.4s/step and ~57s is fixed cost outside it (text encoding, VAE decode) that no step count reduces — and 57 + 3 × 6.4 lands on the measured 77s. **Resolution, not step count, is the lever**: dropping 1024×1280 to 768×768 saves 134s, while going 9 steps to 3 saves 38s and costs quality. Hence the **768×768** default rather than the HTTP API's 1024×1024. Each `thinking` step is forwarded as an MCP progress notification, which is the only lever the server has here — hosts that reset their timeout on progress will tolerate much longer runs, but that's the host's choice, not the server's. Raise `MFLUXIBLE_MCP_WIDTH`/`_HEIGHT` if your host is generous, or pass explicit `width`/`height` per call.
+  Times vary somewhat with prompt content and thermal state — treat them as ballpark, not benchmarks. Dividing them by step count overstates what a step costs. The two 768×768 rows pin the split: six fewer steps saved 38s, so the loop runs ~6.4s/step and ~57s is fixed cost outside it (text encoding, VAE decode) that no step count reduces — and 57 + 3 × 6.4 lands on the measured 77s. **Resolution, not step count, is the lever**: dropping 1024×1280 to 768×768 saves 134s, while going 9 steps to 3 saves 38s and costs quality. Hence the **768×768** default rather than the HTTP API's 1024×1024. Each `thinking` step is forwarded as an MCP progress notification, which is the only lever the server has here — hosts that reset their timeout on progress will tolerate much longer runs, but that's the host's choice, not the server's. Raise `MFLUXIBLE_MCP_WIDTH`/`_HEIGHT` if your host is generous, or pass explicit `width`/`height` per call.
 - **A ~1MB cap on a single tool result.** MCP ships images as base64, which inflates bytes by 4/3, so the raw image has to land near 750KB. A full-resolution 1024×1280 PNG off this model is ~1.8MB (~2.4MB base64) — about 2.4× over. The tool now re-encodes to fit: PNG is returned untouched when it's already small enough, otherwise it steps down JPEG quality first and only then resolution. In practice quality alone is enough and resolution is never touched: a real 1024×1280 generation measured 1.75MB as PNG and 0.21MB as JPEG q85 at unchanged dimensions — comfortably inside the budget — and even a pathological 3.9MB noise PNG still fits at full size, at q70. So images come back at the resolution you asked for, just recompressed.
 
-Because the inline copy may be recompressed, the untouched full-resolution PNG (mflux metadata intact) is always written to `MFLUXIBLE_MCP_SAVE_DIR` (default `~/.cache/mfluxible/outputs`) first, and the tool returns that path alongside the image.
+Because the inline copy may be recompressed, the untouched full-resolution PNG (mflux metadata intact) is always written to `MFLUXIBLE_MCP_SAVE_DIR` (default `~/Pictures/mfluxible`) first, and the tool returns that path alongside the image.
 
-The image is tagged with MCP's `annotations.audience`/`priority` display hints, which ask the host to surface it to the user rather than bury it in the collapsed tool-result block. Whether a host honors those hints is up to the host — the protocol has no way to *require* main-transcript rendering.
+The image is tagged with MCP's `annotations.audience`/`priority` display hints, which ask the host to surface it to the user rather than bury it in the collapsed tool-result block. Claude Desktop has been observed honoring them and rendering the image in the main transcript. This is a hint, though, not a guarantee: the protocol has no way to *require* main-transcript rendering, so other hosts may still collapse it.
 
 Claude Code and Claude Desktop each keep their own MCP configuration and don't share a registry, so registering the tool with one has no effect on the other. Set up whichever you use, or both.
 
@@ -199,7 +199,7 @@ Environment variables for `client/mcp_server.py`, all optional. Set them where t
 | `MFLUXIBLE_MCP_HEIGHT` | `768` | Default height, same reason |
 | `MFLUXIBLE_MCP_STEPS` | `9` | Default step count |
 | `MFLUXIBLE_MCP_MAX_BYTES` | `700000` | Raw-byte budget for the inline image, sized so base64 clears the host's ~1MB result cap |
-| `MFLUXIBLE_MCP_SAVE_DIR` | `~/.cache/mfluxible/outputs` | Where the untouched full-resolution PNG is written |
+| `MFLUXIBLE_MCP_SAVE_DIR` | `~/Pictures/mfluxible` | Where the untouched full-resolution PNG is written |
 
 ### Model cache
 

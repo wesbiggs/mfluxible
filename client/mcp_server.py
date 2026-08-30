@@ -46,7 +46,9 @@ DEFAULT_STEPS = int(os.environ.get("MFLUXIBLE_MCP_STEPS", 9))
 
 # The returned image may be downscaled/recompressed to fit MAX_RESULT_BYTES, so the
 # untouched full-resolution PNG (metadata and all) is always written here first.
-SAVE_DIR = Path(os.environ.get("MFLUXIBLE_MCP_SAVE_DIR", "~/.cache/mfluxible/outputs")).expanduser()
+# Deliberately not under ~/.cache alongside MFLUXIBLE_MODEL_DIR: cache directories are
+# reasonably treated as disposable, and this is the only full-quality copy that exists.
+SAVE_DIR = Path(os.environ.get("MFLUXIBLE_MCP_SAVE_DIR", "~/Pictures/mfluxible")).expanduser()
 
 server = MCPServer(name="mfluxible")
 
