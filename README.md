@@ -84,13 +84,14 @@ Two limits imposed by the MCP host shape this tool's defaults, and neither is so
 
 - **A wall-clock timeout on each tool call.** Generation time scales with pixel count, and step count is not the useful lever — measured on an M2 Pro at 9 steps:
 
-  | Size | Time | PNG |
-  |---|---|---|
-  | 1024×1280 | 249s (~27.7s/step) | 1.75MB |
-  | 1024×1024 | 212s (~23.6s/step) | 1.50MB |
-  | 768×768 | 115s (~12.8s/step) | 0.85MB |
+  | Size | Steps | Time | PNG |
+  |---|---|---|---|
+  | 1024×1280 | 9 | 249s | 1.75MB |
+  | 1024×1024 | 9 | 212s | 1.50MB |
+  | 768×768 | 9 | 115s | 0.85MB |
+  | 768×768 | 3 | 77s | |
 
-  At ~27s/step even a 4-step run at 1024×1280 lands near 110s, so trimming steps doesn't rescue a large image. The tool therefore defaults to **768×768** rather than the HTTP API's 1024×1024. Each `thinking` step is forwarded as an MCP progress notification, which is the only lever the server has here — hosts that reset their timeout on progress will tolerate much longer runs, but that's the host's choice, not the server's. Raise `MFLUXIBLE_MCP_WIDTH`/`_HEIGHT` if your host is generous, or pass explicit `width`/`height` per call.
+  Dividing those by step count overstates what a step costs. The two 768×768 rows pin the split: six fewer steps saved 38s, so the loop runs ~6.4s/step and ~57s is fixed cost outside it (text encoding, VAE decode) that no step count reduces — and 57 + 3 × 6.4 lands on the measured 77s. **Resolution, not step count, is the lever**: dropping 1024×1280 to 768×768 saves 134s, while going 9 steps to 3 saves 38s and costs quality. Hence the **768×768** default rather than the HTTP API's 1024×1024. Each `thinking` step is forwarded as an MCP progress notification, which is the only lever the server has here — hosts that reset their timeout on progress will tolerate much longer runs, but that's the host's choice, not the server's. Raise `MFLUXIBLE_MCP_WIDTH`/`_HEIGHT` if your host is generous, or pass explicit `width`/`height` per call.
 - **A ~1MB cap on a single tool result.** MCP ships images as base64, which inflates bytes by 4/3, so the raw image has to land near 750KB. A full-resolution 1024×1280 PNG off this model is ~1.8MB (~2.4MB base64) — about 2.4× over. The tool now re-encodes to fit: PNG is returned untouched when it's already small enough, otherwise it steps down JPEG quality first and only then resolution. In practice quality alone is enough and resolution is never touched: a real 1024×1280 generation measured 1.75MB as PNG and 0.21MB as JPEG q85 at unchanged dimensions — comfortably inside the budget — and even a pathological 3.9MB noise PNG still fits at full size, at q70. So images come back at the resolution you asked for, just recompressed.
 
 Because the inline copy may be recompressed, the untouched full-resolution PNG (mflux metadata intact) is always written to `MFLUXIBLE_MCP_SAVE_DIR` (default `~/.cache/mfluxible/outputs`) first, and the tool returns that path alongside the image.
