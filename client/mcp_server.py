@@ -127,7 +127,7 @@ async def generate_image(
                 await ctx.report_progress(
                     event["step"],
                     event["total_steps"],
-                    f"step {event['step']}/{event['total_steps']}",
+                    f"step {event['step']}/{event['total_steps']} ({event['step_ms']}ms)",
                 )
             elif event["type"] == "image":
                 full = base64.b64decode(event["data"])

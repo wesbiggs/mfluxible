@@ -137,7 +137,19 @@ FastAPI auto-generates interactive docs for all of this at `/docs` (Swagger UI) 
 
 ### `GET /health`
 
-Returns `{"status": "ok", "model_loaded": true|false}`. Useful for waiting on startup (weight download + quantization can take a while the first time) before sending a generation request.
+Returns:
+
+```json
+{
+  "status": "ok",
+  "model_loaded": true,
+  "memory": {"active_bytes": 10307921920, "cache_bytes": 1073741824, "peak_bytes": 12884901888}
+}
+```
+
+`model_loaded` is useful for waiting on startup (weight download + quantization can take a while the first time) before sending a generation request.
+
+`memory` reports MLX's own byte counters for the server process. `active_bytes` is memory backing live arrays — near zero until the first generation, since weights are quantized lazily and only materialize when something first forces evaluation. `cache_bytes` is buffers MLX has freed but retains for reuse: reclaimable, but it counts toward the process's memory footprint just the same, so on a memory-tight machine it is worth watching between generations. `peak_bytes` is the high-water mark of active memory. All three are plain counters, so polling `/health` mid-generation is cheap and does not disturb the run.
 
 ### `POST /v1/images/generations`
 
@@ -158,14 +170,16 @@ Returns `{"status": "ok", "model_loaded": true|false}`. Useful for waiting on st
 ```
 data: {"type": "start", "seed": 123, "total_steps": 9}
 
-data: {"type": "thinking", "step": 1, "total_steps": 9, "elapsed_ms": 210}
+data: {"type": "thinking", "step": 1, "total_steps": 9, "step_ms": 210, "elapsed_ms": 210}
 
-data: {"type": "thinking", "step": 2, "total_steps": 9, "elapsed_ms": 400, "preview": "<base64 png>"}
+data: {"type": "thinking", "step": 2, "total_steps": 9, "step_ms": 190, "elapsed_ms": 400, "preview": "<base64 png>"}
 
 ...
 
 data: {"type": "image", "mime_type": "image/png", "data": "<base64 png>", "seed": 123, "generation_time": 14.2}
 ```
+
+A `thinking` event is emitted once step `step` has finished, carrying both `step_ms` (how long that one step took) and `elapsed_ms` (cumulative time since the denoising loop started, so the `step_ms` values sum to it). The first step's `step_ms` is normally much larger than the rest, and this is **per generation, not a one-time startup cost**: MLX defers all compute until something forces evaluation, so the first step's `mx.eval` pays for everything built lazily ahead of it (paging in and materializing the quantized weights, encoding the prompt) on top of its own denoising. Measured on an M2 Pro at 512×512, the first step reports 55–73s against ~3.3s for each later step, on every run, and is insensitive to both prompt length and step count. `generation_time` on the final `image` event is mflux's own measurement of the denoising loop, so it lands within a few ms of the last `elapsed_ms` — the final VAE decode and PNG encoding happen after it and are counted in neither. A preview decode is charged to the *next* step's `step_ms`, not the step it was requested on.
 
 `preview` is only present on steps where `preview_every` divides the step number, and — like `data` on the final `image` event — is always the full requested resolution; the server never downscales anything (that's a client concern — see [Clients](#clients) above). An `{"type": "error", "message": "..."}` event replaces the final `image` event if generation fails or is interrupted.
 
@@ -183,6 +197,8 @@ Environment variables for `server.py`, all optional.
 |---|---|---|
 | `MFLUXIBLE_QUANTIZE` | `8` | Quantization bits; try `4` for less memory, `none` for full precision |
 | `MFLUXIBLE_MODEL_DIR` | `~/.cache/mfluxible` | Where quantized weights are cached (see [Model cache](#model-cache)) |
+| `MFLUXIBLE_MLX_CACHE_LIMIT_MB` | `1024` | Cap on MLX's reusable buffer cache; `none` for MLX's own default (see [Memory](#memory)) |
+| `MFLUXIBLE_MLX_WIRED_LIMIT_MB` | unset | Wire this much memory so the OS cannot page the weights out (see [Memory](#memory)) |
 | `MFLUXIBLE_LORA_PATHS` | unset | Comma-separated local LoRA `.safetensors` files to bake in (see [LoRAs](#loras)) |
 | `MFLUXIBLE_LORA_SCALES` | `1.0` each | Comma-separated scales matching `MFLUXIBLE_LORA_PATHS` |
 | `MFLUXIBLE_CORS_ORIGIN_REGEX` | `https?://(localhost\|127\.0\.0\.1)(:\d+)?` | Origins to reflect back in CORS (see [CORS](#cors)) |
@@ -200,6 +216,22 @@ Environment variables for `client/mcp_server.py`, all optional. Set them where t
 | `MFLUXIBLE_MCP_STEPS` | `9` | Default step count |
 | `MFLUXIBLE_MCP_MAX_BYTES` | `700000` | Raw-byte budget for the inline image, sized so base64 clears the host's ~1MB result cap |
 | `MFLUXIBLE_MCP_SAVE_DIR` | `~/Pictures/mfluxible` | Where the untouched full-resolution PNG is written |
+
+### Memory
+
+The model is the smaller half of what this process holds. MLX also keeps buffers it has freed, so it can reuse them rather than asking Metal for new ones, and that cache counts toward the process footprint even though it is reclaimable. Left uncapped it roughly doubles the resident set, which is what pushes a machine with limited RAM into swapping — and once that happens, every generation pays to fault its weights back in before it can compute anything.
+
+Measured on a 32GB M2 Pro, q8 (10.1GB of weights), three consecutive 512×512 single-step generations in one server process:
+
+| | gen 1 | gen 2 | gen 3 | idle footprint |
+|---|---|---|---|---|
+| uncapped cache | 6.9s | 80.6s | 104.6s | 20 GB |
+| `MFLUXIBLE_MLX_CACHE_LIMIT_MB=1024` | 5.2s | 5.3s | 4.9s | 12 GB |
+| q4 + 1GB cache limit | 4.7s | 4.5s | 4.5s | 7 GB |
+
+The first generation is fast either way — a fresh process has not yet grown into the pressure. What the cap prevents is the process becoming slow, so it is the default. Note what this is *not*: it does not make the model faster, and on a machine with ample headroom for the weights there is nothing here to fix. Watch `memory` on [`/health`](#get-health) to see which situation you are in — if `cache_bytes` climbs while generations get slower, this is your knob.
+
+`MFLUXIBLE_MLX_WIRED_LIMIT_MB` goes further and asks the OS to keep that much memory unpageable, protecting the weights from pressure created by *other* processes. On an otherwise-quiet machine it measured no different from the cache cap alone (4.8–5.2s), so it is off by default; reach for it only if generations still degrade under load from elsewhere on the system. Keep any value above the model's resident size and well under `mx.device_info()["max_recommended_working_set_size"]` — wiring too much starves everything else.
 
 ### Model cache
 

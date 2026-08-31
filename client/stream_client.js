@@ -168,7 +168,9 @@ async function handleEvent(event, outPath) {
       console.log(`seed=${event.seed} steps=${event.total_steps}`);
       break;
     case "thinking":
-      console.log(`  step ${event.step}/${event.total_steps} (${event.elapsed_ms}ms)`);
+      console.log(
+        `  step ${event.step}/${event.total_steps} (${event.step_ms}ms, ${event.elapsed_ms}ms total)`,
+      );
       if (event.preview) {
         await showImage(Buffer.from(event.preview, "base64"));
       }

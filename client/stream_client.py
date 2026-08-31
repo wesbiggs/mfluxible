@@ -88,7 +88,10 @@ def main() -> None:
             if etype == "start":
                 print(f"seed={event['seed']} steps={event['total_steps']}")
             elif etype == "thinking":
-                print(f"  step {event['step']}/{event['total_steps']} ({event['elapsed_ms']}ms)")
+                print(
+                    f"  step {event['step']}/{event['total_steps']} "
+                    f"({event['step_ms']}ms, {event['elapsed_ms']}ms total)"
+                )
                 if "preview" in event:
                     show_image(base64.b64decode(event["preview"]))
             elif etype == "image":

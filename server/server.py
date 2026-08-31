@@ -4,6 +4,7 @@ import json
 import os
 from contextlib import asynccontextmanager
 
+import mlx.core as mx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -61,7 +62,22 @@ app.add_middleware(
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "model_loaded": engine.model is not None}
+    # MLX's own accounting, in bytes. `active` is memory currently backing live
+    # arrays (the model's weights, once something has forced them to
+    # materialize); `cache` is buffers MLX has freed but holds onto for reuse,
+    # which is reclaimable and counts toward the process footprint all the same;
+    # `peak` is the high-water mark of active since startup or the last reset.
+    # These are plain counters -- no graph work -- so they are safe to read from
+    # the event loop rather than the MLX worker thread.
+    return {
+        "status": "ok",
+        "model_loaded": engine.model is not None,
+        "memory": {
+            "active_bytes": mx.get_active_memory(),
+            "cache_bytes": mx.get_cache_memory(),
+            "peak_bytes": mx.get_peak_memory(),
+        },
+    }
 
 
 async def _sse(req: GenerateRequest):

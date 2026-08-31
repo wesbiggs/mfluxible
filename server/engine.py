@@ -27,6 +27,7 @@ import tempfile
 import time
 from pathlib import Path
 
+import mlx.core as mx
 from PIL import Image
 
 from mflux.models.z_image.latent_creator import ZImageLatentCreator
@@ -38,6 +39,30 @@ from schemas import GenerateRequest
 _DONE = object()
 
 DEFAULT_MODEL_CACHE_DIR = Path(os.environ.get("MFLUXIBLE_MODEL_DIR", "~/.cache/mfluxible")).expanduser()
+
+# MLX holds on to buffers it has freed so it can reuse them instead of asking
+# Metal for new ones. That cache is reclaimable, but it still counts toward the
+# process's memory footprint, and on a machine where the model already fills most
+# of RAM the extra headroom is what tips the system into swapping -- at which
+# point every generation pays to fault its weights back in.
+#
+# Measured, q8 at 512x512 on a 32GB M2 Pro: uncapped, the cache grew to 8.6GB on
+# top of 10.1GB of weights (19-20GB footprint) and generations went 6.9s -> 80.6s
+# -> 104.6s as the machine started thrashing. Capped at 1GB the footprint sits at
+# 12-13GB and the same three runs took 5.2s / 5.3s / 4.9s. The cap cost nothing
+# measurable in exchange -- 1GB is ample for reuse within a single generation.
+# Set to "none" for MLX's own (effectively uncapped) default.
+_raw_mlx_cache_limit = os.environ.get("MFLUXIBLE_MLX_CACHE_LIMIT_MB", "1024").strip()
+MLX_CACHE_LIMIT_BYTES = None if _raw_mlx_cache_limit.lower() == "none" else int(_raw_mlx_cache_limit) * 1024 * 1024
+
+# Wiring memory tells the OS it may not page these buffers out at all, which is a
+# stronger guarantee than merely fitting: it protects the weights from being
+# evicted by pressure from *other* processes between generations. Keep it above
+# the model's resident size but well under the GPU's recommended working set
+# (mx.device_info()["max_recommended_working_set_size"]) -- wiring too much
+# starves the rest of the system. Unset leaves the OS default in place.
+_raw_mlx_wired_limit = os.environ.get("MFLUXIBLE_MLX_WIRED_LIMIT_MB", "").strip()
+MLX_WIRED_LIMIT_BYTES = int(_raw_mlx_wired_limit) * 1024 * 1024 if _raw_mlx_wired_limit else None
 
 # The server always sends full-resolution images -- both step previews and the
 # final image -- at their true requested width/height. Deciding whether/how to
@@ -77,19 +102,36 @@ class _StreamCallback:
         self.preview_every = preview_every
         self.emit = emit
         self.start_ts = 0.0
+        self.last_ts = 0.0
 
     def call_before_loop(self, seed, prompt, latents, config, **kwargs):
-        self.start_ts = time.monotonic()
+        self.start_ts = self.last_ts = time.monotonic()
         self.emit({"type": "start", "seed": seed, "total_steps": config.num_inference_steps})
 
     def call_in_loop(self, t, seed, prompt, latents, config, time_steps):
+        # MLX is lazy, so this callback fires *before* step t has actually been
+        # computed: mflux builds the step's graph, calls in-loop subscribers, and
+        # only then runs its own mx.eval(latents) (see the denoising loop in
+        # mflux.models.z_image.variants.z_image). Timing without forcing
+        # evaluation first therefore attributes step t-1's compute to step t --
+        # step 1 reports ~10ms and every later timestamp lags a full step. This
+        # eval costs nothing, since mflux evaluates the same graph on its very
+        # next line; it just moves the wait to before the clock is read. Don't
+        # remove it, or the timings silently go back to being off by one.
+        mx.eval(latents)
+        now = time.monotonic()
         step = t + 1
         event = {
             "type": "thinking",
             "step": step,
             "total_steps": config.num_inference_steps,
-            "elapsed_ms": int((time.monotonic() - self.start_ts) * 1000),
+            "step_ms": int((now - self.last_ts) * 1000),
+            "elapsed_ms": int((now - self.start_ts) * 1000),
         }
+        # Re-baselined before the preview decode, not after, so a preview's cost
+        # lands in the next step's step_ms rather than vanishing -- that keeps the
+        # step_ms values summing to elapsed_ms.
+        self.last_ts = now
         if self.preview_every and step % self.preview_every == 0:
             event["preview"] = self.engine._decode_preview_b64(latents, config, seed, prompt)
         self.emit(event)
@@ -135,6 +177,10 @@ class ZImageEngine:
         return self.model_cache_dir / f"z-image-turbo-q{bits_label}{self._lora_cache_suffix()}"
 
     def _load_sync(self) -> None:
+        if MLX_CACHE_LIMIT_BYTES is not None:
+            mx.set_cache_limit(MLX_CACHE_LIMIT_BYTES)
+        if MLX_WIRED_LIMIT_BYTES is not None:
+            mx.set_wired_limit(MLX_WIRED_LIMIT_BYTES)
         saved_dir = self._saved_model_dir()
         marker = saved_dir / "transformer" / "model.safetensors.index.json" if saved_dir else None
 
