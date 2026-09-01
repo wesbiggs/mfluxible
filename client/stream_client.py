@@ -61,8 +61,14 @@ def main() -> None:
     parser.add_argument("--url", default="http://127.0.0.1:8420/v1/images/generations")
     parser.add_argument("--width", type=int, default=1024)
     parser.add_argument("--height", type=int, default=1024)
-    parser.add_argument("--steps", type=int, default=9)
+    # Left unset, steps/guidance are the server's decision: it knows which model it
+    # loaded and what that model's sensible default is (a step count tuned for
+    # Z-Image-Turbo is four times too small for FLUX.1-dev). Sending null asks for
+    # that default rather than overriding it with this script's guess.
+    parser.add_argument("--steps", type=int, default=None, help="default: the server model's own")
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--guidance", type=float, default=None, help="models that use guidance only")
+    parser.add_argument("--negative-prompt", default=None, help="Qwen-Image only")
     parser.add_argument("--preview-every", type=int, default=0, help="0 disables in-progress previews")
     parser.add_argument("--out", default="output.png")
     args = parser.parse_args()
@@ -73,12 +79,23 @@ def main() -> None:
         "height": args.height,
         "steps": args.steps,
         "seed": args.seed,
+        "guidance": args.guidance,
+        "negative_prompt": args.negative_prompt,
         "preview_every": args.preview_every,
         "stream": True,
     }
 
     with requests.post(args.url, json=body, stream=True) as resp:
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            # Worth unwrapping rather than raise_for_status()'ing: the server rejects
+            # --guidance/--negative-prompt on a model that can't act on them, and its
+            # message says which, where a bare "400 Client Error" says nothing.
+            try:
+                detail = resp.json().get("message") or resp.text
+            except ValueError:
+                detail = resp.text
+            print(f"error: {resp.status_code} {detail}", file=sys.stderr)
+            sys.exit(1)
         for line in resp.iter_lines(decode_unicode=True):
             if not line or not line.startswith("data: "):
                 continue

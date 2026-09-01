@@ -46,6 +46,7 @@
     max-height: 12rem;
     overflow-y: auto;
   }
+  #modelInfo { font-size: 0.85rem; opacity: 0.75; margin: -0.5rem 0 1rem; }
   #previewWrap, #finalWrap { margin-top: 1rem; }
   #previewWrap img { max-width: 200px; border-radius: 4px; display: block; }
   #finalWrap img { max-width: 100%; border-radius: 4px; display: block; }
@@ -57,6 +58,8 @@
 
 <h1>mfluxible harness</h1>
 
+<p id="modelInfo">checking which model the server is running&hellip;</p>
+
 <form id="form">
   <label>Server URL
     <input type="text" id="url" value="http://127.0.0.1:8420/v1/images/generations">
@@ -67,9 +70,15 @@
   <div class="row">
     <label>Width <input type="number" id="width" value="1024" step="8"></label>
     <label>Height <input type="number" id="height" value="1024" step="8"></label>
-    <label>Steps <input type="number" id="steps" value="9"></label>
+    <label>Steps <input type="number" id="steps" placeholder="model default"></label>
     <label>Seed <input type="number" id="seed" placeholder="random"></label>
   </div>
+  <label id="guidanceWrap" class="hidden">Guidance
+    <input type="number" id="guidance" step="0.1" placeholder="model default">
+  </label>
+  <label id="negativeWrap" class="hidden">Negative prompt
+    <textarea id="negativePrompt" placeholder="what to steer away from"></textarea>
+  </label>
   <label>Preview every N steps (0 disables)
     <input type="number" id="previewEvery" value="0">
   </label>
@@ -91,6 +100,13 @@
 
 <script>
 const form = document.getElementById("form");
+const urlEl = document.getElementById("url");
+const modelInfoEl = document.getElementById("modelInfo");
+const stepsEl = document.getElementById("steps");
+const guidanceEl = document.getElementById("guidance");
+const guidanceWrap = document.getElementById("guidanceWrap");
+const negativeEl = document.getElementById("negativePrompt");
+const negativeWrap = document.getElementById("negativeWrap");
 const submitBtn = document.getElementById("submitBtn");
 const logEl = document.getElementById("log");
 const previewWrap = document.getElementById("previewWrap");
@@ -104,6 +120,52 @@ function log(line) {
   logEl.scrollTop = logEl.scrollHeight;
 }
 
+// Which model the server loaded decides what this form should offer: the step
+// placeholder, and whether guidance / negative prompt are fields at all (the server
+// rejects them outright on a model that can't act on them). /health lives alongside
+// the generations endpoint, so it is derived from whatever URL is in the box.
+let modelInfo = null;
+
+function healthUrl(generationsUrl) {
+  const u = new URL(generationsUrl);
+  u.pathname = "/health";
+  u.search = "";
+  return u.toString();
+}
+
+async function refreshModel() {
+  let unknown;
+  try {
+    const resp = await fetch(healthUrl(urlEl.value));
+    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+    modelInfo = (await resp.json()).model || null;
+    // A 200 with no model block means a server predating this field, which is a
+    // different thing to report than an unreachable one -- and either way the
+    // placeholder must not be left sitting there as if the check never finished.
+    unknown = modelInfo ? null : "the server didn't say which model it runs (an older build?)";
+  } catch (err) {
+    modelInfo = null;
+    unknown = `couldn't reach the server (${err.message})`;
+  }
+
+  if (modelInfo) {
+    const guidance = modelInfo.supports_guidance ? `guidance ${modelInfo.default_guidance}` : "no guidance";
+    modelInfoEl.textContent =
+      `${modelInfo.label} at q${modelInfo.quantize ?? "full"} — ${modelInfo.default_steps} steps by default, ${guidance}`;
+  } else {
+    modelInfoEl.textContent = `${unknown} — showing every field; unsupported ones come back as an error`;
+  }
+
+  // With no model info, offer both rather than hide a field the server may well
+  // accept; a rejected one now comes back with a message saying why.
+  guidanceWrap.classList.toggle("hidden", modelInfo ? !modelInfo.supports_guidance : false);
+  negativeWrap.classList.toggle("hidden", modelInfo ? !modelInfo.supports_negative_prompt : false);
+  stepsEl.placeholder = modelInfo ? `model default (${modelInfo.default_steps})` : "model default";
+  guidanceEl.placeholder = modelInfo && modelInfo.default_guidance !== null
+    ? `model default (${modelInfo.default_guidance})`
+    : "model default";
+}
+
 async function generate(body, url) {
   const resp = await fetch(url, {
     method: "POST",
@@ -111,7 +173,13 @@ async function generate(body, url) {
     body: JSON.stringify(body),
   });
   if (!resp.ok) {
-    throw new Error(`request failed: ${resp.status} ${resp.statusText}`);
+    // The body carries the reason a request was refused (e.g. guidance sent to a
+    // guidance-distilled model), which the status line alone doesn't.
+    let detail = resp.statusText;
+    try {
+      detail = (await resp.json()).message || detail;
+    } catch (err) { /* non-JSON body: keep the status text */ }
+    throw new Error(`request failed: ${resp.status} ${detail}`);
   }
 
   const reader = resp.body.getReader();
@@ -161,6 +229,9 @@ function handleEvent(event) {
   }
 }
 
+urlEl.addEventListener("change", refreshModel);
+refreshModel();
+
 form.addEventListener("submit", async (e) => {
   e.preventDefault();
   logEl.textContent = "";
@@ -170,12 +241,18 @@ form.addEventListener("submit", async (e) => {
   submitBtn.textContent = "Generating...";
 
   const seedVal = document.getElementById("seed").value;
+  const stepsVal = stepsEl.value;
+  const guidanceVal = guidanceWrap.classList.contains("hidden") ? "" : guidanceEl.value;
+  const negativeVal = negativeWrap.classList.contains("hidden") ? "" : negativeEl.value.trim();
   const body = {
     prompt: document.getElementById("prompt").value,
     width: Number(document.getElementById("width").value),
     height: Number(document.getElementById("height").value),
-    steps: Number(document.getElementById("steps").value),
+    // Blank means "whatever this model's default is" -- the server fills it in.
+    steps: stepsVal === "" ? null : Number(stepsVal),
     seed: seedVal === "" ? null : Number(seedVal),
+    guidance: guidanceVal === "" ? null : Number(guidanceVal),
+    negative_prompt: negativeVal === "" ? null : negativeVal,
     preview_every: Number(document.getElementById("previewEvery").value),
     stream: true,
   };

@@ -1,4 +1,4 @@
-"""MCP server exposing mfluxible's Z-Image-Turbo generation as a tool Claude can call directly.
+"""MCP server exposing mfluxible's image generation as a tool Claude can call directly.
 
 Runs over stdio (the transport Claude Code/Desktop use to launch local MCP servers)
 and proxies to a already-running mfluxible HTTP server, forwarding step progress via
@@ -22,6 +22,8 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import urllib.parse
+
 import httpx
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -29,6 +31,15 @@ from mcp_types import Annotations, ImageContent, TextContent
 from PIL import Image as PILImage
 
 MFLUXIBLE_URL = os.environ.get("MFLUXIBLE_URL", "http://127.0.0.1:8420/v1/images/generations")
+
+# Which model the server loaded is the server's business, but this tool has to know two
+# things about it: what to tell the caller it generated, and whether guidance /
+# negative_prompt are arguments it will accept at all. /health answers both, and lives
+# alongside the generations endpoint, so it's derived from the same URL by default.
+MFLUXIBLE_HEALTH_URL = os.environ.get(
+    "MFLUXIBLE_HEALTH_URL",
+    urllib.parse.urlunsplit(urllib.parse.urlsplit(MFLUXIBLE_URL)._replace(path="/health", query="")),
+)
 
 # Claude caps a single tool result at ~1MB, and MCP ships images as base64, which
 # inflates bytes by 4/3. So the *raw* image has to come in around 750KB to clear
@@ -61,7 +72,13 @@ WAIT_SECONDS = float(os.environ.get("MFLUXIBLE_MCP_WAIT_SECONDS", 45))
 # than a correctness one. Ask for explicit width/height in the call to override.
 DEFAULT_WIDTH = int(os.environ.get("MFLUXIBLE_MCP_WIDTH", 768))
 DEFAULT_HEIGHT = int(os.environ.get("MFLUXIBLE_MCP_HEIGHT", 768))
-DEFAULT_STEPS = int(os.environ.get("MFLUXIBLE_MCP_STEPS", 9))
+
+# Unset on purpose: with no step count in the request the server uses whichever default
+# suits the model it actually loaded (9 for Z-Image-Turbo, 4 for FLUX.1-schnell, 25 for
+# FLUX.1-dev, 20 for Qwen-Image). Hardcoding one here would have meant every model
+# running at Z-Image-Turbo's step count. Set it only to override that per-model default.
+_raw_steps = os.environ.get("MFLUXIBLE_MCP_STEPS", "").strip()
+DEFAULT_STEPS = int(_raw_steps) if _raw_steps else None
 
 # The returned image may be downscaled/recompressed to fit MAX_RESULT_BYTES, so the
 # untouched full-resolution PNG (metadata and all) is always written here first.
@@ -85,7 +102,8 @@ class _Job:
     handle: str
     width: int
     height: int
-    steps: int
+    steps: int | None  # None = whatever the server's model defaults to
+    model: str  # label from /health, "" if it couldn't be read
     started: float  # time.monotonic()
     step: int = 0
     total_steps: int = 0
@@ -174,8 +192,11 @@ def _build_content(job: _Job, event: dict) -> list[TextContent | ImageContent]:
         saved = f"Full-resolution PNG could not be saved to {SAVE_DIR} ({exc})"
 
     data, mime, note = _fit_result(full)
+    # total_steps comes off the server's own `start` event, so it is right even when
+    # the request left `steps` unset and the model's default decided it.
     caption = (
-        f"{job.width}x{job.height}, {job.steps} steps, seed {event['seed']}, "
+        f"{job.model + ', ' if job.model else ''}"
+        f"{job.width}x{job.height}, {job.total_steps or job.steps} steps, seed {event['seed']}, "
         f"{event['generation_time']:.1f}s. {saved}"
     )
     if note:
@@ -209,7 +230,17 @@ async def _run(job: _Job, body: dict) -> None:
     """
     try:
         async with httpx.AsyncClient(timeout=None) as client, client.stream("POST", MFLUXIBLE_URL, json=body) as resp:
-            resp.raise_for_status()
+            if resp.status_code != 200:
+                # Not raise_for_status(): the server refuses guidance/negative_prompt on
+                # a model that can't act on them and says which in the body, which
+                # raise_for_status() would throw away. A streamed response has to be
+                # read before its body is available at all.
+                await resp.aread()
+                try:
+                    detail = resp.json().get("message") or resp.text
+                except ValueError:
+                    detail = resp.text
+                raise RuntimeError(f"mfluxible returned {resp.status_code}: {detail}")
             async for line in resp.aiter_lines():
                 if not line.startswith("data: "):
                     continue
@@ -277,21 +308,55 @@ def _result(job: _Job) -> list[TextContent | ImageContent]:
     ]
 
 
+_MODEL: dict | None = None
+
+
+async def _model_info() -> dict | None:
+    """The server's /health `model` block, cached after the first successful read.
+
+    Best-effort by design: an unreachable server, or one predating this field, just
+    means no local check and no model name in the caption -- the generation request
+    that follows reports the real problem. Only a successful read is cached, so a
+    server that starts later is picked up on the next call.
+    """
+    global _MODEL
+    if _MODEL is None:
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                resp = await client.get(MFLUXIBLE_HEALTH_URL)
+                resp.raise_for_status()
+                _MODEL = resp.json().get("model")
+        except Exception:  # noqa: BLE001 -- advisory only; the generation call reports failures
+            return None
+    return _MODEL
+
+
 @server.tool()
 async def generate_image(
     prompt: str,
     width: int = DEFAULT_WIDTH,
     height: int = DEFAULT_HEIGHT,
-    steps: int = DEFAULT_STEPS,
+    steps: int | None = DEFAULT_STEPS,
     seed: int | None = None,
+    guidance: float | None = None,
+    negative_prompt: str | None = None,
     ctx: Context | None = None,
 ) -> list[TextContent | ImageContent]:
-    """Generate an image from a text prompt using Z-Image-Turbo.
+    """Generate an image from a text prompt.
+
+    Which model runs is the server's choice, not this tool's: Z-Image-Turbo by
+    default, or FLUX.1-schnell, FLUX.1-dev or Qwen-Image if it was started that way.
+
+    Leave steps unset and the server uses that model's own default (9 for
+    Z-Image-Turbo, 4 for FLUX.1-schnell, 25 for FLUX.1-dev, 20 for Qwen-Image) --
+    prefer that to guessing, since a step count that suits one model is wrong for
+    another. guidance applies only to models that use it (FLUX.1-dev, Qwen-Image) and
+    negative_prompt only to Qwen-Image; sending either to a model that cannot act on
+    it is an error naming the model, so leave both unset unless you know otherwise.
 
     width/height must be divisible by 8. Generation time scales with pixel count and
     can take minutes, so prefer the defaults unless the user asks for a specific size.
-    Z-Image-Turbo's normal step range is single digits (default 9). Leave seed unset
-    for a random one.
+    Leave seed unset for a random one.
 
     Returns the image directly if it finishes quickly. Otherwise it returns a handle
     and keeps generating in the background: call check_image with that handle to
@@ -300,12 +365,25 @@ async def generate_image(
     The full-resolution PNG is always saved to disk and its path returned; the inline
     copy may be recompressed to fit the host's tool-result size cap.
     """
+    # Checked here rather than left to the server so a request that was never going to
+    # work fails immediately, with the model's name in the message, instead of after a
+    # round trip. Missing keys mean an unknown server -- defer to it and let it decide.
+    info = await _model_info()
+    if info is not None:
+        if guidance is not None and not info.get("supports_guidance", True):
+            raise ToolError(f"{info.get('label', 'this model')} does not use guidance; omit the guidance argument.")
+        if negative_prompt is not None and not info.get("supports_negative_prompt", True):
+            raise ToolError(
+                f"{info.get('label', 'this model')} has no negative-prompt branch; omit the negative_prompt argument."
+            )
+
     _prune_jobs()
     job = _Job(
         handle=uuid.uuid4().hex[:8],
         width=width,
         height=height,
         steps=steps,
+        model=(info or {}).get("label", ""),
         started=time.monotonic(),
     )
     _JOBS[job.handle] = job
@@ -318,6 +396,8 @@ async def generate_image(
                 "height": height,
                 "steps": steps,
                 "seed": seed,
+                "guidance": guidance,
+                "negative_prompt": negative_prompt,
                 "preview_every": 0,
                 "stream": True,
             },

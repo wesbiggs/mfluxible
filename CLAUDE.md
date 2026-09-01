@@ -2,7 +2,7 @@
 
 ## Layout
 
-`server/` (server.py, engine.py, schemas.py, requirements.txt) is the model + HTTP API. `client/` (stream_client.py, stream_client.js, harness.html, mcp_server.py, requirements.txt, requirements-mcp.txt) is everything that talks to it over HTTP. They're independent dependency-wise -- installing one's requirements.txt doesn't pull in the other's. server.py/engine.py/schemas.py import each other as flat sibling modules (`from engine import ...`), not a package, so `server/` must stay on `sys.path` when running (e.g. `uvicorn server:app --app-dir server`) -- don't add an `__init__.py` or turn this into a `server.*` package without updating those imports and the run command together.
+`server/` (server.py, engine.py, models.py, schemas.py, requirements.txt) is the model + HTTP API. `client/` (stream_client.py, stream_client.js, harness.html, mcp_server.py, requirements.txt, requirements-mcp.txt) is everything that talks to it over HTTP. They're independent dependency-wise -- installing one's requirements.txt doesn't pull in the other's. server.py/engine.py/models.py/schemas.py import each other as flat sibling modules (`from engine import ...`), not a package, so `server/` must stay on `sys.path` when running (e.g. `uvicorn server:app --app-dir server`) -- don't add an `__init__.py` or turn this into a `server.*` package without updating those imports and the run command together.
 
 ## API changes
 
@@ -10,7 +10,7 @@ Always update `README.md` when changing the API (endpoints, request/response sha
 
 ## mflux is a fast-moving dependency
 
-`server/engine.py` reaches into mflux internals that aren't public API: `model.callbacks.before_loop/in_loop/interrupt` are mutated directly, since `CallbackRegistry` has no `unregister()` as of mflux 0.19.1. The VAE-decode branching in `_decode_preview_b64` mirrors mflux's own `StepwiseHandler` on purpose. If `pip install -U mflux` breaks this file, check `mflux/callbacks/callback_registry.py` and `mflux/callbacks/instances/stepwise_handler.py` in the installed package first — that's where this was reverse-engineered from (mflux ships no public docs for the callback system).
+`server/engine.py` reaches into mflux internals that aren't public API: `model.callbacks.before_loop/in_loop/interrupt` are mutated directly, since `CallbackRegistry` has no `unregister()` as of mflux 0.19.1. The VAE-decode branching in `_decode_preview_b64` mirrors mflux's own `StepwiseHandler` on purpose, with one deliberate deviation: the non-packed branch goes through `VAEUtil.decode` rather than calling `vae.decode()` directly the way `StepwiseHandler` does. Qwen-Image's VAE is a 3D (video) decoder returning `(B, C, 1, H, W)` and `ImageUtil.to_image` wants 4D — `VAEUtil.decode` is what drops the singleton frame axis, and it's the same call each variant's own final decode makes, so previews and final images stay on identical handling. Calling `vae.decode()` bare here works for Z-Image and FLUX and breaks only on Qwen previews. If `pip install -U mflux` breaks this file, check `mflux/callbacks/callback_registry.py` and `mflux/callbacks/instances/stepwise_handler.py` in the installed package first — that's where this was reverse-engineered from (mflux ships no public docs for the callback system).
 
 ## mcp SDK also moved fast: FastMCP -> MCPServer
 
@@ -48,17 +48,30 @@ That distinction is the difference between the model being able to tell the user
 HTTP server isn't running and it being told nothing at all, so anything a caller could
 act on -- upstream errors, unknown handles -- must go out as `ToolError`.
 
+## One model per process, and every per-model difference lives in models.py
+
+`server/models.py` is the whole multi-model story: which mflux variant class, which `ModelConfig`, which latent creator, the default step count, and whether `guidance`/`negative_prompt` mean anything. `engine.py` has no per-model branching and shouldn't grow any — mflux's ZImage, Flux1 and QwenImage happen to share a constructor signature, a `generate_image()` signature, a `save_model(base_path)` and a `callbacks` registry, which is the only reason this works.
+
+Two things in that file are load-bearing rather than stylistic:
+
+- **The mflux imports are deferred into each spec's `load()` function**, so naming four models costs nothing. mflux downloads weights inside the variant's constructor (`WeightLoader.load` → `PathResolution.resolve` → HF snapshot download), never at import, so a process only ever fetches/quantizes/caches the one model `MFLUXIBLE_MODEL` selected. Don't hoist those imports to module level "for tidiness" — it wouldn't download anything, but it would drag every model's module graph into every process and quietly make that guarantee depend on mflux never doing work at import time.
+- **`model_config` must be passed on the cached-load branch too** (`_load_sync`). A saved directory holds weights and tokenizers, not the model's scheduler/sequence-length settings, and each variant's own default would otherwise win — `Flux1` defaults to *schnell*, so a `flux-dev` cache dir would silently load as schnell.
+
+The clients deliberately send `steps` (and `guidance`) as null rather than a number of their own: whichever model is loaded decides, so none of them needs reconfiguring when the server switches models. Don't "fix" a missing default back into `stream_client.*`, `harness.html` or `mcp_server.py` — a step count that suits Z-Image-Turbo is four times too small for FLUX.1-dev. `harness.html` and `mcp_server.py` additionally read `/health` to learn what the loaded model accepts; both treat a failed or model-less `/health` as "unknown, let the server decide" rather than an error, so they keep working against a server that predates that field.
+
+Guidance and negative prompts are rejected with a 400 on models that can't act on them rather than accepted and dropped, because mflux accepts both arguments on every variant and silently ignores them (its own CLIs print a warning instead). `check_request` runs in the endpoint, *before* `StreamingResponse` starts: raising inside the generator would mean a 200 status line already on the wire and a torn body.
+
 ## Quantized-weight cache marker is a heuristic, not an integrity check
 
-`ZImageEngine.load()` treats the existence of `<saved_dir>/transformer/model.safetensors.index.json` as "this quantization level was already saved, load it instead of re-quantizing." It doesn't verify the save actually completed or matches the current mflux version — an interrupted `save_model()` call (e.g. killed mid-write) would leave a directory that looks cached but loads incorrectly. If a cached load ever misbehaves, delete `~/.cache/mfluxible/z-image-turbo-q<bits>/` and let it re-save.
+`MfluxEngine.load()` treats the existence of `<saved_dir>/transformer/model.safetensors.index.json` as "this quantization level was already saved, load it instead of re-quantizing." It doesn't verify the save actually completed or matches the current mflux version — an interrupted `save_model()` call (e.g. killed mid-write) would leave a directory that looks cached but loads incorrectly. If a cached load ever misbehaves, delete `~/.cache/mfluxible/<model>-q<bits>/` and let it re-save. That marker path is the same for all three variants — every weight definition names its transformer's subdir `transformer` — which is what lets one heuristic cover them all; check the model's `*WeightDefinition` before assuming it holds for a newly added model.
 
 ## LoRA baking and the quantized-weight cache must stay in lockstep
 
-LoRA weights get permanently merged into the model at load time (mflux's own `bake_lora=True` default) — there is no "unbake" step. `_load_sync` only passes `lora_paths`/`lora_scales` to `ZImage(...)` on a *fresh* load; the cached-load branch (`model_path=str(saved_dir)`) must never pass them, or a LoRA already baked into that saved checkpoint gets applied a second time on top of itself. This is only safe because `_saved_model_dir()` folds a hash of the exact LoRA config into the cache dir name (`_lora_cache_suffix()`) — different LoRA setups can never collide on the same "is this already saved?" marker file. If you ever change what goes into a saved checkpoint (e.g. new bake-time options), make sure it's reflected in that hash too, or a stale cache dir will silently serve the wrong weights.
+LoRA weights get permanently merged into the model at load time (mflux's own `bake_lora=True` default) — there is no "unbake" step. `_load_sync` only passes `lora_paths`/`lora_scales` to the variant constructor on a *fresh* load; the cached-load branch (`model_path=str(saved_dir)`) must never pass them, or a LoRA already baked into that saved checkpoint gets applied a second time on top of itself. This is only safe because `_saved_model_dir()` folds a hash of the exact LoRA config into the cache dir name (`_lora_cache_suffix()`), and the model key into the front of it — different LoRA setups, and different models, can never collide on the same "is this already saved?" marker file. If you ever change what goes into a saved checkpoint (e.g. new bake-time options), make sure it's reflected in that hash too, or a stale cache dir will silently serve the wrong weights.
 
 ## Single global model, single in-flight generation
 
-`ZImageEngine` loads one model at startup and serializes generations behind an `asyncio.Lock`. Don't add concurrency here without checking whether MLX/Metal tolerates concurrent `generate_image()` calls against one model instance — it wasn't designed for that, and the shared callback-list mutation isn't thread-safe across overlapping generations (confirmed empirically, not just in theory — see the next point).
+`MfluxEngine` loads one model at startup and serializes generations behind an `asyncio.Lock`. Don't add concurrency here without checking whether MLX/Metal tolerates concurrent `generate_image()` calls against one model instance — it wasn't designed for that, and the shared callback-list mutation isn't thread-safe across overlapping generations (confirmed empirically, not just in theory — see the next point).
 
 ## A disconnected client does not stop generation, and cleanup must wait for it anyway
 

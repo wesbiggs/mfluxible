@@ -1,4 +1,8 @@
-"""FastAPI server exposing a streaming image-generation endpoint over mflux's Z-Image-Turbo."""
+"""FastAPI server exposing a streaming image-generation endpoint over mflux.
+
+One process runs one model, chosen at startup with MFLUXIBLE_MODEL (see models.py
+for the table). Weights are only fetched for the model actually selected.
+"""
 
 import json
 import os
@@ -9,8 +13,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from engine import ZImageEngine
+from engine import MfluxEngine
+from models import MODELS
 from schemas import GenerateRequest
+
+MODEL = os.environ.get("MFLUXIBLE_MODEL", "z-image-turbo")
 
 _raw_quantize = os.environ.get("MFLUXIBLE_QUANTIZE", "8")
 QUANTIZE = None if _raw_quantize.strip().lower() == "none" else int(_raw_quantize)
@@ -29,7 +36,9 @@ if LORA_PATHS and _raw_lora_scales:
 else:
     LORA_SCALES = None
 
-engine = ZImageEngine(quantize=QUANTIZE, lora_paths=LORA_PATHS, lora_scales=LORA_SCALES)
+# An unknown MFLUXIBLE_MODEL raises here, at import, listing the valid names -- before
+# lifespan starts a multi-gigabyte download for something that was never going to run.
+engine = MfluxEngine(model=MODEL, quantize=QUANTIZE, lora_paths=LORA_PATHS, lora_scales=LORA_SCALES)
 
 
 @asynccontextmanager
@@ -69,9 +78,24 @@ async def health():
     # `peak` is the high-water mark of active since startup or the last reset.
     # These are plain counters -- no graph work -- so they are safe to read from
     # the event loop rather than the MLX worker thread.
+    spec = engine.spec
     return {
         "status": "ok",
         "model_loaded": engine.model is not None,
+        # What this process is running and which request fields it will accept, so a
+        # client can pick sane defaults without knowing how the server was configured.
+        # `available` is the whole table; only `name` was ever downloaded.
+        "model": {
+            "name": spec.key,
+            "label": spec.label,
+            "repo": spec.repo,
+            "quantize": engine.quantize,
+            "default_steps": spec.default_steps,
+            "supports_guidance": spec.supports_guidance,
+            "default_guidance": spec.default_guidance,
+            "supports_negative_prompt": spec.supports_negative_prompt,
+            "available": [m.key for m in MODELS],
+        },
         "memory": {
             "active_bytes": mx.get_active_memory(),
             "cache_bytes": mx.get_cache_memory(),
@@ -87,6 +111,13 @@ async def _sse(req: GenerateRequest):
 
 @app.post("/v1/images/generations")
 async def generate(req: GenerateRequest):
+    # Checked before the response begins: for a stream, raising once StreamingResponse
+    # has started would mean a torn body with a 200 already on the wire.
+    try:
+        engine.check_request(req)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"type": "error", "message": str(exc)})
+
     if req.stream:
         return StreamingResponse(_sse(req), media_type="text/event-stream")
 

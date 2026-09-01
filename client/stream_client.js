@@ -90,8 +90,19 @@ function postSSE(url, body, onEvent) {
       },
       (res) => {
         if (res.statusCode !== 200) {
-          res.resume();
-          reject(new Error(`request failed: ${res.statusCode} ${res.statusMessage}`));
+          // Read the body before giving up rather than res.resume()-ing it away: the
+          // server rejects --guidance/--negative-prompt on a model that can't act on
+          // them, and its message says which, where the status line says nothing.
+          let errBody = "";
+          res.setEncoding("utf8");
+          res.on("data", (chunk) => (errBody += chunk));
+          res.on("end", () => {
+            let detail = errBody;
+            try {
+              detail = JSON.parse(errBody).message || errBody;
+            } catch {}
+            reject(new Error(`request failed: ${res.statusCode} ${detail || res.statusMessage}`));
+          });
           return;
         }
 
@@ -136,8 +147,14 @@ async function main() {
       url: { type: "string", default: "http://127.0.0.1:8420/v1/images/generations" },
       width: { type: "string", default: "1024" },
       height: { type: "string", default: "1024" },
-      steps: { type: "string", default: "9" },
+      // No default for steps/guidance: left unset they're the server's decision, and
+      // it knows which model it loaded (a step count tuned for Z-Image-Turbo is four
+      // times too small for FLUX.1-dev). Sending null asks for that model's own
+      // default rather than overriding it with this script's guess.
+      steps: { type: "string" },
       seed: { type: "string" },
+      guidance: { type: "string" },
+      "negative-prompt": { type: "string" },
       "preview-every": { type: "string", default: "0" },
       out: { type: "string", default: "output.png" },
     },
@@ -145,7 +162,7 @@ async function main() {
 
   const prompt = positionals[0];
   if (!prompt) {
-    console.error("usage: stream_client.js <prompt> [--url URL] [--width N] [--height N] [--steps N] [--seed N] [--preview-every N] [--out FILE]");
+    console.error("usage: stream_client.js <prompt> [--url URL] [--width N] [--height N] [--steps N] [--seed N] [--guidance F] [--negative-prompt TEXT] [--preview-every N] [--out FILE]");
     process.exit(1);
   }
 
@@ -153,8 +170,10 @@ async function main() {
     prompt,
     width: Number(values.width),
     height: Number(values.height),
-    steps: Number(values.steps),
+    steps: values.steps !== undefined ? Number(values.steps) : null,
     seed: values.seed !== undefined ? Number(values.seed) : null,
+    guidance: values.guidance !== undefined ? Number(values.guidance) : null,
+    negative_prompt: values["negative-prompt"] ?? null,
     preview_every: Number(values["preview-every"]),
     stream: true,
   };
@@ -190,6 +209,9 @@ async function handleEvent(event, outPath) {
 }
 
 main().catch((err) => {
-  console.error(err);
+  // Message only, no stack: a refused request (guidance on a model that ignores it,
+  // server not running) is ordinary CLI input feedback, not a crash to debug -- and
+  // it matches what stream_client.py prints for the same cases.
+  console.error(`error: ${err.message || err}`);
   process.exit(1);
 });

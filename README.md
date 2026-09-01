@@ -1,6 +1,6 @@
 # mfluxible
 
-A minimal streaming HTTP API for Z-Image-Turbo image generation on Apple Silicon, built on [mflux](https://github.com/filipstrand/mflux).
+A minimal streaming HTTP API for image generation on Apple Silicon, built on [mflux](https://github.com/filipstrand/mflux). Runs Z-Image-Turbo (the default), FLUX.1-schnell, FLUX.1-dev, or Qwen-Image — one model per server process, picked at startup (see [Models](#models)).
 
 Rather than a full node-graph tool (ComfyUI) or a proprietary format (Draw Things), this exposes a small API in the same spirit as a chat-completions endpoint: each denoising step streams as a "thinking" event while generation happens, with optional in-progress preview images (Draw Things-style), followed by the final image.
 
@@ -23,7 +23,9 @@ pip install -r server/requirements.txt
 uvicorn server:app --app-dir server --host 127.0.0.1 --port 8420
 ```
 
-The model loads on startup, before the server accepts any requests. On first run this downloads the Z-Image-Turbo weights from Hugging Face ([Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo)) — expect a sizable one-time download — then quantizes them and caches the quantized copy (see [Model cache](#model-cache) below); both only happen once.
+The model loads on startup, before the server accepts any requests. On first run this downloads its weights from Hugging Face — expect a sizable one-time download — then quantizes them and caches the quantized copy (see [Model cache](#model-cache) below); both only happen once.
+
+The default model is Z-Image-Turbo ([Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo)). To run something else, set `MFLUXIBLE_MODEL` — `flux-schnell`, `flux-dev`, or `qwen-image` — before starting the server; only the model you select is ever downloaded. See [Models](#models) for what differs between them.
 
 Once it's running:
 
@@ -49,6 +51,8 @@ python client/stream_client.py "a puffin on a cliff at sunset" --preview-every 2
 node client/stream_client.js "a puffin on a cliff at sunset" --preview-every 2 --out puffin.png
 ```
 
+Both take `--steps`, `--seed`, `--guidance` and `--negative-prompt`, and leave all four to the server when you don't pass them — so `--steps` is only worth setting to override the loaded model's own default. `--guidance` and `--negative-prompt` are refused (with a message naming the model) on models that can't act on them; see [Models](#models).
+
 Both render the exact full-resolution bytes returned by the server — no downscaling, no recompression, nothing client-side touches the image data. They use the iTerm2 inline-image protocol's chunked `MultipartFile` variant (also works in WezTerm; in an unsupported terminal the escape codes are just ignored, and the saved file and progress text still work either way), the same variant iTerm2's own [`imgcat`](https://github.com/gnachman/iTerm2-shell-integration/blob/master/utilities/imgcat) reference tool uses by default: the base64 payload is split into `FilePart=` sequences behind a metadata-only header and a `FileEnd` marker, rather than one giant `File=...:<base64>` sequence.
 
 This matters because iTerm2's own source caps how much data it'll accumulate for a *single* OSC escape sequence at 1,048,576 bytes ([`VT100XtermParser.m`](https://github.com/gnachman/iTerm2/blob/master/sources/VT100/VT100XtermParser.m)) — past that it truncates rather than cleanly dropping the sequence, which can corrupt what renders afterward too, not just fail to show the one image. Diffusion output is detailed/photographic content that a full-resolution PNG can realistically approach or cross that limit for. Chunking (500,000 bytes/chunk here — `imgcat`'s own 200-byte default exists specifically to survive tmux, which doesn't apply since neither script wraps for tmux) means no image, at any size or detail level, can hit that cap.
@@ -59,7 +63,7 @@ Not tmux-aware — iTerm2's protocol needs extra passthrough wrapping inside tmu
 
 ### Browser
 
-`client/harness.html` is a small, dependency-free page (plain HTML/CSS/JS, no build step) with a form for prompt/width/height/steps/seed/preview_every that calls the streaming endpoint directly from the browser via `fetch`, parsing the SSE stream the same way the terminal clients do, and renders previews and the final image as `<img>` elements (via `data:` URLs) plus a download link for the final PNG.
+`client/harness.html` is a small, dependency-free page (plain HTML/CSS/JS, no build step) with a form for prompt/width/height/steps/seed/preview_every that calls the streaming endpoint directly from the browser via `fetch`, reads [`/health`](#get-health) on load to show which model the server is running (leaving Steps blank uses that model's default, and Guidance / Negative prompt appear only if it accepts them), parsing the SSE stream the same way the terminal clients do, and renders previews and the final image as `<img>` elements (via `data:` URLs) plus a download link for the final PNG.
 
 It needs to be served over HTTP, not opened as a `file://` URL — the browser's `Origin` header for a local file is `null`, which the server's default CORS config won't match:
 
@@ -72,7 +76,7 @@ cd client && python3 -m http.server 8000
 
 ### MCP tool (generate images from within Claude)
 
-`client/mcp_server.py` exposes two tools over MCP's stdio transport: `generate_image(prompt, width, height, steps, seed)`, which forwards each `thinking` step as an MCP progress update and returns the image as inline content, and `check_image(handle)`, which collects an image from a `generate_image` call that outlived its tool-call timeout (see below).
+`client/mcp_server.py` exposes two tools over MCP's stdio transport: `generate_image(prompt, width, height, steps, seed, guidance, negative_prompt)`, which forwards each `thinking` step as an MCP progress update and returns the image as inline content, and `check_image(handle)`, which collects an image from a `generate_image` call that outlived its tool-call timeout (see below).
 
 ```bash
 pip install -r client/requirements-mcp.txt
@@ -147,11 +151,24 @@ Returns:
 {
   "status": "ok",
   "model_loaded": true,
+  "model": {
+    "name": "z-image-turbo",
+    "label": "Z-Image-Turbo",
+    "repo": "Tongyi-MAI/Z-Image-Turbo",
+    "quantize": 8,
+    "default_steps": 9,
+    "supports_guidance": false,
+    "default_guidance": null,
+    "supports_negative_prompt": false,
+    "available": ["z-image-turbo", "flux-schnell", "flux-dev", "qwen-image"]
+  },
   "memory": {"active_bytes": 10307921920, "cache_bytes": 1073741824, "peak_bytes": 12884901888}
 }
 ```
 
 `model_loaded` is useful for waiting on startup (weight download + quantization can take a while the first time) before sending a generation request.
+
+`model` describes what this process is running and which request fields it will accept, so a client can fill in sensible defaults without being told how the server was configured: `default_steps` is what `steps` falls back to, and `supports_guidance` / `supports_negative_prompt` say whether `guidance` / `negative_prompt` are accepted or rejected with a 400. `available` lists every model this build knows how to run — all but `name` would need a restart (and a download) to use.
 
 `memory` reports MLX's own byte counters for the server process. `active_bytes` is memory backing live arrays — near zero until the first generation, since weights are quantized lazily and only materialize when something first forces evaluation. `cache_bytes` is buffers MLX has freed but retains for reuse: reclaimable, but it counts toward the process's memory footprint just the same, so on a memory-tight machine it is worth watching between generations. `peak_bytes` is the high-water mark of active memory. All three are plain counters, so polling `/health` mid-generation is cheap and does not disturb the run.
 
@@ -162,8 +179,10 @@ Returns:
 | `prompt` | string | required | |
 | `width` | int | 1024 | must be divisible by 8 |
 | `height` | int | 1024 | must be divisible by 8 |
-| `steps` | int | 9 | Z-Image-Turbo's normal range is single digits |
+| `steps` | int or null | the model's own default | 9 for Z-Image-Turbo, 4 for FLUX.1-schnell, 25 for FLUX.1-dev, 20 for Qwen-Image; see `default_steps` on [`/health`](#get-health) |
 | `seed` | int or null | random | echoed back in the response so a run can be reproduced |
+| `guidance` | float or null | the model's own default | only on models that use guidance (3.5 for FLUX.1-dev and Qwen-Image). A **400** on guidance-distilled models rather than a silently ignored field — see [Models](#models) |
+| `negative_prompt` | string or null | unset | Qwen-Image only; a **400** elsewhere, for the same reason |
 | `preview_every` | int | 0 | decode and stream an in-progress preview every N steps; 0 disables previews. Each preview is a full VAE decode, so this trades speed for visibility |
 | `stream` | bool | true | SSE stream vs a single JSON response |
 
@@ -191,7 +210,7 @@ The final image's PNG bytes (`data` on the `image` event) carry embedded metadat
 
 ### Non-streaming response (`stream: false`)
 
-Returns the same `image` event object as a single JSON body (or a 500 with the `error` object on failure).
+Returns the same `image` event object as a single JSON body (or a 500 with the `error` object on failure). A request the configured model cannot honour — `guidance` or `negative_prompt` where it has no effect — is rejected up front with a 400 carrying the same `error` object, in both modes: for a stream that check has to happen before the first byte, since by then the status line is already sent.
 
 ## Configuration
 
@@ -199,6 +218,7 @@ Environment variables for `server.py`, all optional.
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `MFLUXIBLE_MODEL` | `z-image-turbo` | Which model to run: `z-image-turbo`, `flux-schnell`, `flux-dev`, `qwen-image` (see [Models](#models)) |
 | `MFLUXIBLE_QUANTIZE` | `8` | Quantization bits; try `4` for less memory, `none` for full precision |
 | `MFLUXIBLE_MODEL_DIR` | `~/.cache/mfluxible` | Where quantized weights are cached (see [Model cache](#model-cache)) |
 | `MFLUXIBLE_MLX_CACHE_LIMIT_MB` | `1024` | Cap on MLX's reusable buffer cache; `none` for MLX's own default (see [Memory](#memory)) |
@@ -215,9 +235,10 @@ Environment variables for `client/mcp_server.py`, all optional. Set them where t
 | Variable | Default | Purpose |
 |---|---|---|
 | `MFLUXIBLE_URL` | `http://127.0.0.1:8420/v1/images/generations` | Which mfluxible server to proxy to |
+| `MFLUXIBLE_HEALTH_URL` | `/health` on the same host | Read once to name the model and reject arguments it can't act on; only needed if `/health` isn't alongside the generations endpoint |
 | `MFLUXIBLE_MCP_WIDTH` | `768` | Default width, kept below the API's own default so most generations finish in one round-trip |
 | `MFLUXIBLE_MCP_HEIGHT` | `768` | Default height, same reason |
-| `MFLUXIBLE_MCP_STEPS` | `9` | Default step count |
+| `MFLUXIBLE_MCP_STEPS` | unset | Step count to send. Unset lets the server use its model's own default, which is normally what you want |
 | `MFLUXIBLE_MCP_WAIT_SECONDS` | `45` | How long one tool call blocks before handing back a `check_image` handle; keep it under the host's tool-call timeout |
 | `MFLUXIBLE_MCP_JOB_RETENTION_S` | `900` | How long a finished generation stays collectable by handle |
 | `MFLUXIBLE_MCP_MAX_BYTES` | `700000` | Raw-byte budget for the inline image, sized so base64 clears the host's ~1MB result cap |
@@ -241,7 +262,7 @@ The first generation is fast either way — a fresh process has not yet grown in
 
 ### Model cache
 
-Startup quantizes the raw downloaded weights and caches the result to `MFLUXIBLE_MODEL_DIR/z-image-turbo-q<bits>/` — a real, separate step from the Hugging Face download: HF already caches the raw weights locally, but quantizing them into MLX's packed format is nontrivial per-layer compute that would otherwise happen on every startup (mflux's `mflux-save` mechanism does the same thing via its own CLI; this just does it automatically here). Every startup after the first loads the pre-quantized weights directly and skips that step.
+Startup quantizes the raw downloaded weights and caches the result to `MFLUXIBLE_MODEL_DIR/<model>-q<bits>/` (e.g. `z-image-turbo-q8`, `qwen-image-q4`) — a real, separate step from the Hugging Face download: HF already caches the raw weights locally, but quantizing them into MLX's packed format is nontrivial per-layer compute that would otherwise happen on every startup (mflux's `mflux-save` mechanism does the same thing via its own CLI; this just does it automatically here). Every startup after the first loads the pre-quantized weights directly and skips that step.
 
 This means a second, smaller copy of the weights lives on disk alongside HF's cache of the original — once you've confirmed a cached startup works, the original HF cache entry (under `~/.cache/huggingface`) is no longer needed and can be deleted to reclaim space.
 
@@ -281,9 +302,32 @@ Only one generation runs at a time (there's a lock) — MLX/Metal generation aga
 
 Preview images are decoded the same way mflux's own `--stepwise-image-output-dir` CLI flag does internally (see `mflux.callbacks.instances.stepwise_handler.StepwiseHandler`), just streamed instead of written to disk.
 
-## Model
+## Models
 
-Currently hardcoded to Z-Image-Turbo (`mflux.models.z_image.variants.z_image.ZImage`). mflux also supports FLUX and Qwen-Image; adding one here means swapping the model class in `server/engine.py` — not done yet since only Z-Image-Turbo was needed for this project.
+One server process runs one model, chosen at startup with `MFLUXIBLE_MODEL`:
+
+| `MFLUXIBLE_MODEL` | Weights | Default steps | Guidance | Negative prompt |
+|---|---|---|---|---|
+| `z-image-turbo` (default) | [Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | 9 | — | — |
+| `flux-schnell` | [black-forest-labs/FLUX.1-schnell](https://huggingface.co/black-forest-labs/FLUX.1-schnell) | 4 | — | — |
+| `flux-dev` | [black-forest-labs/FLUX.1-dev](https://huggingface.co/black-forest-labs/FLUX.1-dev) | 25 | default 3.5 | — |
+| `qwen-image` | [Qwen/Qwen-Image-2512](https://huggingface.co/Qwen/Qwen-Image-2512) | 20 | default 3.5 | yes |
+
+mflux's own aliases work too (`schnell`, `dev`, `qwen`, `zimage`, …), and an unrecognised name fails at startup with the list of valid ones — before anything is downloaded.
+
+**Only the model you select is ever fetched.** All four are named in `server/models.py`, but an entry there is inert data: its mflux imports are deferred into a loader function that runs at load time, and mflux downloads weights inside the model's constructor, not at import. The three you aren't running cost nothing beyond their row in that table.
+
+Switching models means restarting the server, the same way `MFLUXIBLE_QUANTIZE` and LoRAs do. Each model + quantization + LoRA combination keeps its own quantized cache directory, so switching back doesn't re-quantize.
+
+What differs per model, beyond the step count:
+
+- **Guidance.** Z-Image-Turbo and FLUX.1-schnell are guidance-distilled: mflux forces guidance to 0 on the former and builds no guidance embedder at all on the latter, so a value has nowhere to go. Sending `guidance` to those is a 400 rather than a field quietly dropped. FLUX.1-dev takes distilled guidance; Qwen-Image runs true classifier-free guidance.
+- **Negative prompts.** Only Qwen-Image has a negative branch. That branch is also why its steps are expensive: it runs the transformer twice per step, conditional and unconditional, whether or not you send a `negative_prompt`.
+- **Size.** Z-Image-Turbo is the smallest of the four and Qwen-Image much the largest (a ~20B transformer alongside a multimodal text encoder). For scale, Z-Image-Turbo alone occupies 10GB of quantized weights at `MFLUXIBLE_QUANTIZE=8` and 5.5GB at `4`. On a 32GB machine, expect to want `4` or lower for Qwen-Image, and read [Memory](#memory) first — running out of headroom doesn't fail loudly, it just makes every generation slow.
+
+All the bundled clients leave `steps` to the server unless you set it, so they follow whichever model is loaded without reconfiguration. The MCP tool and the browser harness go further and read [`/health`](#get-health): the harness only shows Guidance and Negative prompt when the model accepts them, and the MCP tool refuses those arguments up front rather than spending a round trip to be told no.
+
+Adding another mflux model is a new entry in `server/models.py` and nothing else: the three variants already share a constructor signature, a `generate_image()` signature and a `save_model()`, which is what keeps `server/engine.py` free of per-model branching.
 
 ## License
 
