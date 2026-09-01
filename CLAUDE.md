@@ -16,6 +16,38 @@ Always update `README.md` when changing the API (endpoints, request/response sha
 
 `client/mcp_server.py` targets `mcp` 2.x, where `mcp.server.fastmcp.FastMCP` (the commonly-documented v1 API) was renamed to `mcp.server.mcpserver.MCPServer`. Importing the old path raises a `ModuleNotFoundError` with a migration pointer, it doesn't just silently break — if that happens, you're looking at v1-flavored example code (`FastMCP(...)`) against a v2 install. `Context`, `Image`, and the `@server.tool()` decorator are all still there, just re-exported from `mcp.server.mcpserver` instead.
 
+## Progress notifications do not reliably hold a host's tool-call timeout open
+
+This is why `client/mcp_server.py` runs generation in a background task and hands back a
+`check_image` handle instead of just blocking. Measured 2026-08-31 against a live Claude
+Code session: a `generate_image` call died at ~60s with the MCP SDK's default
+`Request timed out` while the server was sending a progress notification every ~8s. The
+notification stream was working -- verified separately by driving the server over real
+stdio JSON-RPC with a `progressToken` and watching `notifications/progress` arrive -- the
+host simply doesn't rearm on it.
+
+Other hosts do. Reading the Claude Code CLI binary (Homebrew cask 2.1.236) shows a
+per-call *hard* timeout (per-server `timeout` -> `MCP_TOOL_TIMEOUT` -> a ~1e8ms default)
+that progress explicitly does not extend, plus a separate *idle* watchdog (stdio default
+30 min) that every progress notification does rearm, plus auto-backgrounding of any call
+still running at 120s. Note the interaction: setting `MCP_TOOL_TIMEOUT` lowers the idle
+watchdog too, since idle is clamped to at most the hard timeout. The point isn't the
+specific numbers -- they're one host's build and will move -- it's that they differ per
+host and per version, so the server can't depend on any of them. Keep `WAIT_SECONDS`
+under the *shortest* timeout you care about; blocking longer only converts a working
+handle into a failed call.
+
+## mcp 2.x strips the message off any exception that isn't ToolError
+
+`raise RuntimeError("mflux said X")` inside a tool reaches the model as a bare
+`Error executing tool generate_image` -- the SDK wraps anything unrecognized in
+`UnexpectedToolError` and drops the text (`mcp/server/mcpserver/tools/base.py`). Raising
+`mcp.server.mcpserver.exceptions.ToolError` instead keeps it:
+`Error executing tool generate_image: ConnectError: All connection attempts failed`.
+That distinction is the difference between the model being able to tell the user the
+HTTP server isn't running and it being told nothing at all, so anything a caller could
+act on -- upstream errors, unknown handles -- must go out as `ToolError`.
+
 ## Quantized-weight cache marker is a heuristic, not an integrity check
 
 `ZImageEngine.load()` treats the existence of `<saved_dir>/transformer/model.safetensors.index.json` as "this quantization level was already saved, load it instead of re-quantizing." It doesn't verify the save actually completed or matches the current mflux version — an interrupted `save_model()` call (e.g. killed mid-write) would leave a directory that looks cached but loads incorrectly. If a cached load ever misbehaves, delete `~/.cache/mfluxible/z-image-turbo-q<bits>/` and let it re-save.

@@ -72,7 +72,7 @@ cd client && python3 -m http.server 8000
 
 ### MCP tool (generate images from within Claude)
 
-`client/mcp_server.py` exposes a single tool, `generate_image(prompt, width, height, steps, seed)`, over MCP's stdio transport, forwarding each `thinking` step as an MCP progress update and returning the final image as inline content.
+`client/mcp_server.py` exposes two tools over MCP's stdio transport: `generate_image(prompt, width, height, steps, seed)`, which forwards each `thinking` step as an MCP progress update and returns the image as inline content, and `check_image(handle)`, which collects an image from a `generate_image` call that outlived its tool-call timeout (see below).
 
 ```bash
 pip install -r client/requirements-mcp.txt
@@ -80,9 +80,13 @@ pip install -r client/requirements-mcp.txt
 
 You still need the server from Quickstart running separately with the model loaded — this only proxies to it.
 
-Two limits imposed by the MCP host shape this tool's defaults, and neither is something the server can lift on its own:
+Two limits imposed by the MCP host shape this tool, and neither is something the server can lift on its own:
 
-- **A wall-clock timeout on each tool call.** Generation time scales with pixel count, and step count is not the useful lever — measured on an M2 Pro at 9 steps:
+- **A wall-clock timeout on each tool call**, shorter than a generation. Measured against a live Claude Code session on 2026-08-31, a `generate_image` call died at ~60s with the MCP SDK's default `Request timed out` — *despite* this server sending a progress notification every ~8s throughout. Progress notifications are worth sending (some hosts do reset on them; the Claude Code CLI runs a separate 30-minute idle watchdog that they rearm) but a server that relies on them is betting on the host, and that bet loses on at least one real host today.
+
+  So generation runs in a background task and `generate_image` blocks on it for at most `MFLUXIBLE_MCP_WAIT_SECONDS` (default 45, comfortably under that 60s). A generation that beats the window returns its image from the first call, exactly as before. A slower one returns a handle instead, and `check_image(handle)` collects it — that call blocks for the same window and returns the image the moment it's ready, so the model calls it again if it comes back "still generating" rather than spinning. **The generation itself is never cancelled by a host giving up**: it keeps running, the full-resolution PNG still lands on disk, and the result stays collectable under its handle for 15 minutes (`MFLUXIBLE_MCP_JOB_RETENTION_S`).
+
+  How many round-trips that costs is a question of resolution, not step count — measured on an M2 Pro at 9 steps:
 
   | Size | Steps | Time | PNG |
   |---|---|---|---|
@@ -91,7 +95,7 @@ Two limits imposed by the MCP host shape this tool's defaults, and neither is so
   | 768×768 | 9 | 115s | 0.85MB |
   | 768×768 | 3 | 77s | |
 
-  Times vary somewhat with prompt content and thermal state — treat them as ballpark, not benchmarks. Dividing them by step count overstates what a step costs. The two 768×768 rows pin the split: six fewer steps saved 38s, so the loop runs ~6.4s/step and ~57s is fixed cost outside it (text encoding, VAE decode) that no step count reduces — and 57 + 3 × 6.4 lands on the measured 77s. **Resolution, not step count, is the lever**: dropping 1024×1280 to 768×768 saves 134s, while going 9 steps to 3 saves 38s and costs quality. Hence the **768×768** default rather than the HTTP API's 1024×1024. Each `thinking` step is forwarded as an MCP progress notification, which is the only lever the server has here — hosts that reset their timeout on progress will tolerate much longer runs, but that's the host's choice, not the server's. Raise `MFLUXIBLE_MCP_WIDTH`/`_HEIGHT` if your host is generous, or pass explicit `width`/`height` per call.
+  Times vary somewhat with prompt content and thermal state — treat them as ballpark, not benchmarks. Dividing them by step count overstates what a step costs. The two 768×768 rows pin the split: six fewer steps saved 38s, so the loop runs ~6.4s/step and ~57s is fixed cost outside it (text encoding, VAE decode) that no step count reduces — and 57 + 3 × 6.4 lands on the measured 77s. **Resolution, not step count, is the lever**: dropping 1024×1280 to 768×768 saves 134s, while going 9 steps to 3 saves 38s and costs quality. Hence the **768×768** default rather than the HTTP API's 1024×1024 — now a latency default rather than a correctness one, since a long generation costs extra `check_image` calls instead of failing. Raise `MFLUXIBLE_MCP_WIDTH`/`_HEIGHT` (or `MFLUXIBLE_MCP_WAIT_SECONDS`, if your host's timeout is generous) to trade round-trips back for size, or pass explicit `width`/`height` per call.
 - **A ~1MB cap on a single tool result.** MCP ships images as base64, which inflates bytes by 4/3, so the raw image has to land near 750KB. A full-resolution 1024×1280 PNG off this model is ~1.8MB (~2.4MB base64) — about 2.4× over. The tool now re-encodes to fit: PNG is returned untouched when it's already small enough, otherwise it steps down JPEG quality first and only then resolution. In practice quality alone is enough and resolution is never touched: a real 1024×1280 generation measured 1.75MB as PNG and 0.21MB as JPEG q85 at unchanged dimensions — comfortably inside the budget — and even a pathological 3.9MB noise PNG still fits at full size, at q70. So images come back at the resolution you asked for, just recompressed.
 
 Because the inline copy may be recompressed, the untouched full-resolution PNG (mflux metadata intact) is always written to `MFLUXIBLE_MCP_SAVE_DIR` (default `~/Pictures/mfluxible`) first, and the tool returns that path alongside the image.
@@ -211,9 +215,11 @@ Environment variables for `client/mcp_server.py`, all optional. Set them where t
 | Variable | Default | Purpose |
 |---|---|---|
 | `MFLUXIBLE_URL` | `http://127.0.0.1:8420/v1/images/generations` | Which mfluxible server to proxy to |
-| `MFLUXIBLE_MCP_WIDTH` | `768` | Default width, kept below the API's own default to fit host tool-call timeouts |
+| `MFLUXIBLE_MCP_WIDTH` | `768` | Default width, kept below the API's own default so most generations finish in one round-trip |
 | `MFLUXIBLE_MCP_HEIGHT` | `768` | Default height, same reason |
 | `MFLUXIBLE_MCP_STEPS` | `9` | Default step count |
+| `MFLUXIBLE_MCP_WAIT_SECONDS` | `45` | How long one tool call blocks before handing back a `check_image` handle; keep it under the host's tool-call timeout |
+| `MFLUXIBLE_MCP_JOB_RETENTION_S` | `900` | How long a finished generation stays collectable by handle |
 | `MFLUXIBLE_MCP_MAX_BYTES` | `700000` | Raw-byte budget for the inline image, sized so base64 clears the host's ~1MB result cap |
 | `MFLUXIBLE_MCP_SAVE_DIR` | `~/Pictures/mfluxible` | Where the untouched full-resolution PNG is written |
 
