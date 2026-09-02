@@ -151,6 +151,7 @@ Returns:
 {
   "status": "ok",
   "model_loaded": true,
+  "available": ["z-image-turbo", "flux-schnell", "flux-dev", "qwen-image"],
   "model": {
     "name": "z-image-turbo",
     "label": "Z-Image-Turbo",
@@ -159,8 +160,7 @@ Returns:
     "default_steps": 9,
     "supports_guidance": false,
     "default_guidance": null,
-    "supports_negative_prompt": false,
-    "available": ["z-image-turbo", "flux-schnell", "flux-dev", "qwen-image"]
+    "supports_negative_prompt": false
   },
   "memory": {"active_bytes": 10307921920, "cache_bytes": 1073741824, "peak_bytes": 12884901888}
 }
@@ -168,7 +168,7 @@ Returns:
 
 `model_loaded` is useful for waiting on startup (weight download + quantization can take a while the first time) before sending a generation request.
 
-`model` describes what this process is running and which request fields it will accept, so a client can fill in sensible defaults without being told how the server was configured: `default_steps` is what `steps` falls back to, and `supports_guidance` / `supports_negative_prompt` say whether `guidance` / `negative_prompt` are accepted or rejected with a 400. `available` lists every model this build knows how to run — all but `name` would need a restart (and a download) to use.
+`model` describes what this process is running and which request fields it will accept, so a client can fill in sensible defaults without being told how the server was configured: `default_steps` is what `steps` falls back to, and `supports_guidance` / `supports_negative_prompt` say whether `guidance` / `negative_prompt` are accepted or rejected with a 400. `available` lists every model this build knows how to run — all but `model.name` would need a restart (and a download) to use.
 
 `memory` reports MLX's own byte counters for the server process. `active_bytes` is memory backing live arrays — near zero until the first generation, since weights are quantized lazily and only materialize when something first forces evaluation. `cache_bytes` is buffers MLX has freed but retains for reuse: reclaimable, but it counts toward the process's memory footprint just the same, so on a memory-tight machine it is worth watching between generations. `peak_bytes` is the high-water mark of active memory. All three are plain counters, so polling `/health` mid-generation is cheap and does not disturb the run.
 

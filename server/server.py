@@ -84,7 +84,8 @@ async def health():
         "model_loaded": engine.model is not None,
         # What this process is running and which request fields it will accept, so a
         # client can pick sane defaults without knowing how the server was configured.
-        # `available` is the whole table; only `name` was ever downloaded.
+        # `available` is the whole table; only `model.name` was ever downloaded.
+        "available": [m.key for m in MODELS],
         "model": {
             "name": spec.key,
             "label": spec.label,
@@ -94,7 +95,6 @@ async def health():
             "supports_guidance": spec.supports_guidance,
             "default_guidance": spec.default_guidance,
             "supports_negative_prompt": spec.supports_negative_prompt,
-            "available": [m.key for m in MODELS],
         },
         "memory": {
             "active_bytes": mx.get_active_memory(),
