@@ -62,7 +62,7 @@
 
 <form id="form">
   <label>Server URL
-    <input type="text" id="url" value="http://127.0.0.1:8420/v1/images/generations">
+    <input type="text" id="url" value="/v1/images/generations">
   </label>
   <label>Prompt
     <textarea id="prompt" required>a puffin standing on a cliff at sunset</textarea>
@@ -127,7 +127,9 @@ function log(line) {
 let modelInfo = null;
 
 function healthUrl(generationsUrl) {
-  const u = new URL(generationsUrl);
+  // Base against the page's own location so a relative Server URL (the default,
+  // now that the server can serve this page itself at /harness.html) still resolves.
+  const u = new URL(generationsUrl, window.location.href);
   u.pathname = "/health";
   u.search = "";
   return u.toString();

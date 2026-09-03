@@ -7,11 +7,12 @@ for the table). Weights are only fetched for the model actually selected.
 import json
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import mlx.core as mx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from engine import MfluxEngine
 from models import MODELS
@@ -67,6 +68,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# server/ and client/ live in the same repo checkout but stay dependency-independent
+# (see CLAUDE.md) -- this reaches across that boundary only to serve a static file, not
+# to import anything, so it doesn't compromise that separation.
+HARNESS_PATH = Path(__file__).resolve().parent.parent / "client" / "harness.html"
+
+
+@app.get("/harness.html")
+async def harness():
+    return FileResponse(HARNESS_PATH, media_type="text/html")
 
 
 @app.get("/health")
