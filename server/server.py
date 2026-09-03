@@ -6,6 +6,7 @@ for the table). Weights are only fetched for the model actually selected.
 
 import json
 import os
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -14,9 +15,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
+import chat_stub
 from engine import MfluxEngine
 from models import MODELS
-from schemas import GenerateRequest
+from schemas import ChatCompletionRequest, GenerateRequest, OpenAIImageGenerationRequest
 
 MODEL = os.environ.get("MFLUXIBLE_MODEL", "z-image-turbo")
 
@@ -42,9 +44,18 @@ else:
 engine = MfluxEngine(model=MODEL, quantize=QUANTIZE, lora_paths=LORA_PATHS, lora_scales=LORA_SCALES)
 
 
+# Set once lifespan's engine.load() finishes -- used as the `created` timestamp on
+# GET /v1/models, since OpenAI's schema requires one and "when this process actually
+# started serving this model" is the only real value there is to give it (there's no
+# meaningful weight-publish date to report instead).
+MODEL_LOADED_AT: int = 0
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global MODEL_LOADED_AT
     await engine.load()
+    MODEL_LOADED_AT = int(time.time())
     yield
     engine.shutdown()
 
@@ -121,7 +132,25 @@ async def _sse(req: GenerateRequest):
         yield f"data: {json.dumps(event)}\n\n"
 
 
-@app.post("/v1/images/generations")
+async def _collect_final_image(req: GenerateRequest) -> dict:
+    """Runs a generation to completion and returns the final `image` event. Raises
+    RuntimeError (carrying the engine's own message) if generation ends in an `error`
+    event instead -- both endpoints below turn that into their own error shape rather
+    than sharing a response type, since the native and OpenAI-compat contracts
+    disagree on what an error body looks like."""
+    async for event in engine.generate_stream(req):
+        if event["type"] == "image":
+            return event
+        if event["type"] == "error":
+            raise RuntimeError(event["message"])
+    raise RuntimeError("generation ended without an image or error event")
+
+
+# This is mfluxible's own API -- streaming `thinking` events with step timings and
+# previews, guidance/negative_prompt, etc. -- moved off /v1/images/generations so that
+# path can be a genuine OpenAI-compatible endpoint instead (see below). Every bundled
+# client (harness.html, stream_client.py/js, mcp_server.py) targets this path.
+@app.post("/mfluxible/v1/images/generations")
 async def generate(req: GenerateRequest):
     # Checked before the response begins: for a stream, raising once StreamingResponse
     # has started would mean a torn body with a 200 already on the wire.
@@ -133,10 +162,148 @@ async def generate(req: GenerateRequest):
     if req.stream:
         return StreamingResponse(_sse(req), media_type="text/event-stream")
 
-    final = None
+    try:
+        return await _collect_final_image(req)
+    except RuntimeError as exc:
+        return JSONResponse(status_code=500, content={"type": "error", "message": str(exc)})
+
+
+def _openai_error(
+    status_code: int, message: str, error_type: str = "invalid_request_error", code: str | None = None
+) -> JSONResponse:
+    # https://platform.openai.com/docs/guides/error-codes -- an OpenAI client's error
+    # handling reads .error.message, not the mfluxible native shape's top-level .message.
+    return JSONResponse(
+        status_code=status_code,
+        content={"error": {"message": message, "type": error_type, "param": None, "code": code}},
+    )
+
+
+def _parse_openai_size(size: str) -> tuple[int, int]:
+    if size.strip().lower() == "auto":
+        return 1024, 1024
+    parts = size.lower().split("x")
+    if len(parts) != 2 or not all(p.isdigit() for p in parts):
+        raise ValueError(f"size must look like '1024x1024', got {size!r}")
+    return int(parts[0]), int(parts[1])
+
+
+def _openai_to_generate_request(req: OpenAIImageGenerationRequest) -> GenerateRequest:
+    width, height = _parse_openai_size(req.size)
+    # OpenAI's partial_images is a total count, not a stride -- approximated by
+    # spacing previews evenly across the model's default step count, since the OpenAI
+    # request shape has no `steps` field for a client to have overridden it with (see
+    # OpenAIImageGenerationRequest's docstring; `steps` is left unset below for the
+    # same reason mfluxible's own bundled clients leave it null -- whichever model is
+    # loaded picks its own default, see CLAUDE.md).
+    preview_every = max(1, engine.spec.default_steps // req.partial_images) if req.partial_images else 0
+    return GenerateRequest(prompt=req.prompt, width=width, height=height, preview_every=preview_every, stream=req.stream)
+
+
+async def _openai_sse(req: GenerateRequest, created: int):
+    partial_index = 0
     async for event in engine.generate_stream(req):
-        if event["type"] == "image":
-            final = event
+        if event["type"] == "thinking" and "preview" in event:
+            yield f"data: {json.dumps({'type': 'image_generation.partial_image', 'b64_json': event['preview'], 'partial_image_index': partial_index, 'created_at': created})}\n\n"
+            partial_index += 1
+        elif event["type"] == "image":
+            yield f"data: {json.dumps({'type': 'image_generation.completed', 'b64_json': event['data'], 'created_at': created})}\n\n"
         elif event["type"] == "error":
-            return JSONResponse(status_code=500, content=event)
-    return final
+            yield f"data: {json.dumps({'error': {'message': event['message'], 'type': 'api_error', 'param': None, 'code': None}})}\n\n"
+    # Deliberately no trailing [DONE] sentinel: unlike chat completions streaming,
+    # OpenAI's own image-generation stream ending on `image_generation.completed`
+    # without one isn't independently confirmed here (their public docs don't show
+    # the raw wire format) -- don't add one on a guess.
+
+
+def _openai_model_object() -> dict:
+    return {
+        "id": engine.spec.key,
+        "object": "model",
+        "created": MODEL_LOADED_AT,
+        "owned_by": "mfluxible",
+    }
+
+
+@app.get("/v1/models")
+async def openai_list_models():
+    # https://platform.openai.com/docs/api-reference/models/list -- always exactly one
+    # entry, since one model runs per process (see the module docstring). `owned_by`
+    # has no real mfluxible equivalent to OpenAI's org-id convention; "mfluxible" names
+    # what's actually serving it rather than leaving it blank or fabricating an org.
+    return {"object": "list", "data": [_openai_model_object()]}
+
+
+@app.get("/v1/models/{model_id}")
+async def openai_retrieve_model(model_id: str):
+    # https://platform.openai.com/docs/api-reference/models/retrieve -- only the one
+    # ID that GET /v1/models just listed resolves; anything else 404s the same way
+    # OpenAI's own API does for an unknown model, "model_not_found" code included,
+    # rather than a generic 404 a client's error handling might not recognize.
+    if model_id != engine.spec.key:
+        return _openai_error(
+            404,
+            f"The model '{model_id}' does not exist -- this server is running "
+            f"{engine.spec.key!r} ({engine.spec.label}); see GET /v1/models.",
+            code="model_not_found",
+        )
+    return _openai_model_object()
+
+
+@app.post("/v1/chat/completions")
+async def openai_chat_completions(req: ChatCompletionRequest):
+    # No model to validate `req.model` against the way the other endpoints do -- this
+    # isn't the diffusion model responding, so there's nothing to check compatibility
+    # with; see chat_stub.py for what this is actually for and why it's deliberately
+    # not a real chat model.
+    if req.stream:
+        return StreamingResponse(chat_stub.stream_response_lines(req), media_type="text/event-stream")
+    return chat_stub.non_streaming_response(req)
+
+
+# A genuine OpenAI Images-API-compatible endpoint (see
+# https://platform.openai.com/docs/api-reference/images/create), for pointing an
+# existing OpenAI-client-based tool (e.g. Open WebUI's "OpenAI" image engine, which
+# takes an arbitrary base URL) at this server without modifying it. Deliberately a
+# strict subset: fields mflux has no equivalent for (quality, style, background,
+# output_format, output_compression, moderation, user) are accepted and ignored
+# rather than faked, and requests this can't honestly satisfy (model mismatch, n > 1,
+# a `url` response_format this server can't host) are rejected with a 400 rather than
+# silently approximated.
+@app.post("/v1/images/generations")
+async def openai_generate(req: OpenAIImageGenerationRequest):
+    if req.model != engine.spec.key:
+        return _openai_error(
+            400,
+            f"model {req.model!r} is not loaded -- this server is running "
+            f"{engine.spec.key!r} ({engine.spec.label}); one model runs per process (see /health).",
+        )
+    if req.n != 1:
+        return _openai_error(400, "n must be 1 -- mfluxible generates one image per request.")
+    if req.response_format != "b64_json":
+        return _openai_error(
+            400,
+            f"response_format {req.response_format!r} is not supported -- only 'b64_json' is "
+            "(mfluxible does not host images for a 'url' response).",
+        )
+
+    try:
+        gen_req = _openai_to_generate_request(req)
+    except ValueError as exc:
+        return _openai_error(400, str(exc))
+
+    try:
+        engine.check_request(gen_req)
+    except ValueError as exc:
+        return _openai_error(400, str(exc))
+
+    created = int(time.time())
+    if gen_req.stream:
+        return StreamingResponse(_openai_sse(gen_req, created), media_type="text/event-stream")
+
+    try:
+        final = await _collect_final_image(gen_req)
+    except RuntimeError as exc:
+        return _openai_error(500, str(exc), error_type="api_error")
+
+    return {"created": created, "data": [{"b64_json": final["data"]}]}

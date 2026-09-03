@@ -144,7 +144,7 @@ async function main() {
     args: process.argv.slice(2),
     allowPositionals: true,
     options: {
-      url: { type: "string", default: "http://127.0.0.1:8420/v1/images/generations" },
+      url: { type: "string", default: "http://127.0.0.1:8420/mfluxible/v1/images/generations" },
       width: { type: "string", default: "1024" },
       height: { type: "string", default: "1024" },
       // No default for steps/guidance: left unset they're the server's decision, and

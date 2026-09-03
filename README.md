@@ -30,7 +30,7 @@ The default model is Z-Image-Turbo ([Tongyi-MAI/Z-Image-Turbo](https://huggingfa
 Once it's running:
 
 ```bash
-curl -N -X POST http://127.0.0.1:8420/v1/images/generations \
+curl -N -X POST http://127.0.0.1:8420/mfluxible/v1/images/generations \
   -H 'Content-Type: application/json' \
   -d '{"prompt": "a puffin on a cliff at sunset", "preview_every": 2}'
 ```
@@ -65,7 +65,7 @@ Not tmux-aware — iTerm2's protocol needs extra passthrough wrapping inside tmu
 
 `client/harness.html` is a small, dependency-free page (plain HTML/CSS/JS, no build step) with a form for prompt/width/height/steps/seed/preview_every that calls the streaming endpoint directly from the browser via `fetch`, reads [`/health`](#get-health) on load to show which model the server is running (leaving Steps blank uses that model's default, and Guidance / Negative prompt appear only if it accepts them), parsing the SSE stream the same way the terminal clients do, and renders previews and the final image as `<img>` elements (via `data:` URLs) plus a download link for the final PNG.
 
-The server itself serves this page, at `GET /harness.html` — just open `http://localhost:8420/harness.html` (or whichever host/port `server.py` is bound to) once it's up. The Server URL field defaults to the relative path `/v1/images/generations`, which resolves against whatever origin served the page, so no configuration is needed for this same-origin case.
+The server itself serves this page, at `GET /harness.html` — just open `http://localhost:8420/harness.html` (or whichever host/port `server.py` is bound to) once it's up. The Server URL field defaults to the relative path `/mfluxible/v1/images/generations`, which resolves against whatever origin served the page, so no configuration is needed for this same-origin case.
 
 If you'd rather host the page separately (e.g. to point one harness at multiple servers, or to exercise the CORS path), it still works opened from any static file server — just not as a `file://` URL, since the browser's `Origin` header for a local file is `null`, which the server's default CORS config won't match:
 
@@ -92,16 +92,7 @@ Two limits imposed by the MCP host shape this tool, and neither is something the
 
   So generation runs in a background task and `generate_image` blocks on it for at most `MFLUXIBLE_MCP_WAIT_SECONDS` (default 45, comfortably under that 60s). A generation that beats the window returns its image from the first call, exactly as before. A slower one returns a handle instead, and `check_image(handle)` collects it — that call blocks for the same window and returns the image the moment it's ready, so the model calls it again if it comes back "still generating" rather than spinning. **The generation itself is never cancelled by a host giving up**: it keeps running, the full-resolution PNG still lands on disk, and the result stays collectable under its handle for 15 minutes (`MFLUXIBLE_MCP_JOB_RETENTION_S`).
 
-  How many round-trips that costs is a question of resolution, not step count — measured on an M2 Pro at 9 steps:
-
-  | Size | Steps | Time | PNG |
-  |---|---|---|---|
-  | 1024×1280 | 9 | 249s | 1.75MB |
-  | 1024×1024 | 9 | 212s | 1.50MB |
-  | 768×768 | 9 | 115s | 0.85MB |
-  | 768×768 | 3 | 77s | |
-
-  Times vary somewhat with prompt content and thermal state — treat them as ballpark, not benchmarks. Dividing them by step count overstates what a step costs. The two 768×768 rows pin the split: six fewer steps saved 38s, so the loop runs ~6.4s/step and ~57s is fixed cost outside it (text encoding, VAE decode) that no step count reduces — and 57 + 3 × 6.4 lands on the measured 77s. **Resolution, not step count, is the lever**: dropping 1024×1280 to 768×768 saves 134s, while going 9 steps to 3 saves 38s and costs quality. Hence the **768×768** default rather than the HTTP API's 1024×1024 — now a latency default rather than a correctness one, since a long generation costs extra `check_image` calls instead of failing. Raise `MFLUXIBLE_MCP_WIDTH`/`_HEIGHT` (or `MFLUXIBLE_MCP_WAIT_SECONDS`, if your host's timeout is generous) to trade round-trips back for size, or pass explicit `width`/`height` per call.
+  How many round-trips that costs is a question of resolution more than step count: a chunk of fixed cost outside the per-step loop (text encoding, VAE decode) scales with pixel count, not step count, so trimming resolution buys back more wall-clock time than trimming steps does — and at less cost to output quality than cutting steps. Hence the **768×768** default rather than the HTTP API's 1024×1024 — a latency default, not a correctness one, since a long generation here costs extra `check_image` calls rather than failing outright. Raise `MFLUXIBLE_MCP_WIDTH`/`_HEIGHT` (or `MFLUXIBLE_MCP_WAIT_SECONDS`, if your host's timeout is generous) to trade round-trips back for size, or pass explicit `width`/`height` per call. Actual timings are worth measuring on your own machine and model rather than trusting a hardcoded figure here — watch `step_ms`/`elapsed_ms` on `thinking` events (see [Streaming response](#streaming-response-stream-true-default)) for a live read.
 - **A ~1MB cap on a single tool result.** MCP ships images as base64, which inflates bytes by 4/3, so the raw image has to land near 750KB. A full-resolution 1024×1280 PNG off this model is ~1.8MB (~2.4MB base64) — about 2.4× over. The tool now re-encodes to fit: PNG is returned untouched when it's already small enough, otherwise it steps down JPEG quality first and only then resolution. In practice quality alone is enough and resolution is never touched: a real 1024×1280 generation measured 1.75MB as PNG and 0.21MB as JPEG q85 at unchanged dimensions — comfortably inside the budget — and even a pathological 3.9MB noise PNG still fits at full size, at q70. So images come back at the resolution you asked for, just recompressed.
 
 Because the inline copy may be recompressed, the untouched full-resolution PNG (mflux metadata intact) is always written to `MFLUXIBLE_MCP_SAVE_DIR` (default `~/Pictures/mfluxible`) first, and the tool returns that path alongside the image.
@@ -139,7 +130,13 @@ The tool appears under Developer/Extensions and in the composer's tool menu — 
 
 Desktop also reports `mfluxible` as connected as soon as `mcp_server.py` starts, which says nothing about whether the HTTP server it proxies to is up. If that server isn't running, you'll only find out when a `generate_image` call fails.
 
-Either way, if the server is on a different host/port, point the proxy at it with `MFLUXIBLE_URL` (defaults to `http://127.0.0.1:8420/v1/images/generations`): as `-e MFLUXIBLE_URL=...` on the `claude mcp add` command, or as an `"env"` object alongside `command`/`args` in Desktop's config.
+Either way, if the server is on a different host/port, point the proxy at it with `MFLUXIBLE_URL` (defaults to `http://127.0.0.1:8420/mfluxible/v1/images/generations`): as `-e MFLUXIBLE_URL=...` on the `claude mcp add` command, or as an `"env"` object alongside `command`/`args` in Desktop's config.
+
+### OpenAI-compatible frontends
+
+None of the above are this — they're the bundled clients, and they all speak mfluxible's own native API. But `POST /v1/images/generations` (see [API](#api) below) is a genuine [OpenAI Images API](https://platform.openai.com/docs/api-reference/images/create)-compatible endpoint, so any tool built against that API can point at this server directly, with no code changes on its side. For example, [Open WebUI](https://docs.openwebui.com/features/chat-conversations/image-generation-and-editing/openai/)'s Settings → Admin → Images panel takes an arbitrary `IMAGES_OPENAI_API_BASE_URL` and a free-text model name — set the base URL to `http://127.0.0.1:8420/v1` and the model name to whatever `model.name` reports on [`/health`](#get-health) (e.g. `z-image-turbo`), and Open WebUI's own chat UI becomes a frontend for this server.
+
+Open WebUI's *Native* (agentic) mode also needs an actual chat model behind the connection to decide when to call the image tool — normally a separate LLM. If you'd rather not run one just for that, point Open WebUI's chat connection at mfluxible's own `POST /v1/chat/completions` (same base URL) too — see [that section](#post-v1chatcompletions) below for what it does and, importantly, doesn't do.
 
 ## API
 
@@ -178,7 +175,9 @@ Returns:
 
 Serves [`client/harness.html`](#browser) as-is — see the Browser section above. Lets you open the harness straight from the running server (`http://localhost:8420/harness.html`) instead of standing up a separate static file server for it.
 
-### `POST /v1/images/generations`
+### `POST /mfluxible/v1/images/generations`
+
+mfluxible's own, native endpoint — everything below (step-by-step `thinking` events, previews, `guidance`, `negative_prompt`) is specific to it. Every bundled client targets this path. See [`POST /v1/images/generations`](#post-v1imagesgenerations) below for the separate OpenAI-compatible endpoint.
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
@@ -218,6 +217,77 @@ The final image's PNG bytes (`data` on the `image` event) carry embedded metadat
 
 Returns the same `image` event object as a single JSON body (or a 500 with the `error` object on failure). A request the configured model cannot honour — `guidance` or `negative_prompt` where it has no effect — is rejected up front with a 400 carrying the same `error` object, in both modes: for a stream that check has to happen before the first byte, since by then the status line is already sent.
 
+### `POST /v1/images/generations`
+
+A genuine [OpenAI Images API](https://platform.openai.com/docs/api-reference/images/create)-compatible endpoint, so an existing OpenAI-client-based tool can point its base URL at this server unmodified — e.g. [Open WebUI](https://docs.openwebui.com/features/chat-conversations/image-generation-and-editing/openai/)'s "OpenAI" image-generation engine, which already takes an arbitrary `IMAGES_OPENAI_API_BASE_URL` and a free-text model name. This is a separate, additive endpoint — it does not replace [`/mfluxible/v1/images/generations`](#post-mfluxiblev1imagesgenerations) above, which every bundled client still uses.
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `prompt` | string | required | |
+| `model` | string | required | must equal the loaded model's key (see `model.name` on [`/health`](#get-health)) — one model runs per process, so this is validated, not routed on; a mismatch is a 400 naming what's actually loaded |
+| `size` | string | `"1024x1024"` | `"<width>x<height>"`, both divisible by 8; `"auto"` maps to `1024x1024` |
+| `n` | int | 1 | must be 1 — a 400 otherwise, rather than silently generating just one |
+| `response_format` | string | `"b64_json"` | only `"b64_json"` is supported — a 400 for `"url"`, since this server doesn't host images |
+| `stream` | bool | false | |
+| `partial_images` | int | 0 | 0–3; how many in-progress previews to emit while streaming. OpenAI's semantics are a *total count*; mflux's `preview_every` is a *stride*, so this is translated by dividing it into the loaded model's `default_steps` — an approximation, not an exact per-step mapping |
+
+Every other field OpenAI's schema defines (`quality`, `style`, `background`, `output_format`, `output_compression`, `moderation`, `user`) is accepted and silently ignored — there's no mflux equivalent to act on it with, and OpenAI clients send these with their own defaults regardless of whether the server does anything with them.
+
+Non-streaming response:
+
+```json
+{"created": 1735689600, "data": [{"b64_json": "<base64 png>"}]}
+```
+
+Streaming response (`stream: true`), same SSE transport as the native endpoint but OpenAI's event names and payload shape:
+
+```
+data: {"type": "image_generation.partial_image", "b64_json": "<base64 png>", "partial_image_index": 0, "created_at": 1735689600}
+
+data: {"type": "image_generation.completed", "b64_json": "<base64 png>", "created_at": 1735689600}
+```
+
+`partial_image` events only appear when `partial_images` > 0. The stream ends after `image_generation.completed` with no trailing `[DONE]` sentinel — OpenAI's own raw wire format for this isn't documented anywhere publicly to confirm one either way, so none is fabricated here.
+
+Errors use OpenAI's envelope rather than the native endpoint's: `{"error": {"message": "...", "type": "invalid_request_error", "param": null, "code": null}}`, with a 400 for a bad request (wrong `model`, `n != 1`, unsupported `response_format`, malformed `size`) and a 500 (`type: "api_error"`) if generation itself fails.
+
+### `GET /v1/models`
+
+For frontends that discover models rather than taking a free-text name — [list format](https://platform.openai.com/docs/api-reference/models/list) with exactly one entry, the loaded model:
+
+```json
+{
+  "object": "list",
+  "data": [
+    {"id": "z-image-turbo", "object": "model", "created": 1735689600, "owned_by": "mfluxible"}
+  ]
+}
+```
+
+`id` is what `model` on [`POST /v1/images/generations`](#post-v1imagesgenerations) must equal. `created` is when this process finished loading the model (there's no meaningful weight-publish date to report instead).
+
+`GET /v1/models/{id}` ([retrieve format](https://platform.openai.com/docs/api-reference/models/retrieve)) works the same way for the one `id` that list just returned, returning that same object un-wrapped:
+
+```json
+{"id": "z-image-turbo", "object": "model", "created": 1735689600, "owned_by": "mfluxible"}
+```
+
+Any other `id` is a 404 with OpenAI's own `model_not_found` error code, the same way `api.openai.com` responds to an unknown model.
+
+### `POST /v1/chat/completions`
+
+Not a chat model — a stub that exists so a frontend requiring an actual "chat model" behind its Native/agentic tool-calling mode (Open WebUI is the motivating case) can point that connection at mfluxible too, instead of running a separate LLM (Ollama, `llama-server`, ...) just to decide "yes, call the image tool" on every message. See [`server/chat_stub.py`](server/chat_stub.py) for the full rationale; the short version is there's no reasoning to replace, so there's nothing an LLM gets right that a hardcoded rule doesn't get right for free, at zero extra memory (it's pure Python in the same process as the diffusion model — no weights, no inference).
+
+It plays exactly one deterministic turn of OpenAI's function-calling protocol:
+
+- A request whose last message is a plain user turn, with a `generate_image` function offered in `tools` → responds with a `tool_calls` message invoking it, `{"prompt": "<the user's message>"}` as the arguments.
+- A request whose last message is a `tool` result (i.e. the caller already ran `generate_image` and is asking for a closing reply) → responds with a short fixed acknowledgment, `finish_reason: "stop"`.
+- A request with no `generate_image` tool offered at all → responds with fixed text explaining why (most likely cause in Open WebUI: Capabilities or Builtin Tools → Image Generation isn't enabled for this model).
+
+It only ever recognizes a tool literally named `generate_image` — the name [Open WebUI's own builtin tool uses](https://github.com/open-webui/open-webui/blob/main/backend/open_webui/tools/builtin.py) — offered in that specific request's `tools` list; it never guesses at one that wasn't offered. There's no general conversation, no other tools, no multi-turn reasoning — if that's what's needed, point the chat connection at a real model instead.
+
+Both streaming and non-streaming (`stream: true`/`false`) are supported, in OpenAI's own chat-completion / chat-completion-chunk shapes. `model` in the request isn't validated against anything — unlike the image endpoints, there's no real model here to be inconsistent with.
+
 ## Configuration
 
 Environment variables for `server.py`, all optional.
@@ -240,7 +310,7 @@ Environment variables for `client/mcp_server.py`, all optional. Set them where t
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `MFLUXIBLE_URL` | `http://127.0.0.1:8420/v1/images/generations` | Which mfluxible server to proxy to |
+| `MFLUXIBLE_URL` | `http://127.0.0.1:8420/mfluxible/v1/images/generations` | Which mfluxible server to proxy to |
 | `MFLUXIBLE_HEALTH_URL` | `/health` on the same host | Read once to name the model and reject arguments it can't act on; only needed if `/health` isn't alongside the generations endpoint |
 | `MFLUXIBLE_MCP_WIDTH` | `768` | Default width, kept below the API's own default so most generations finish in one round-trip |
 | `MFLUXIBLE_MCP_HEIGHT` | `768` | Default height, same reason |
@@ -306,10 +376,16 @@ uvicorn server:app --app-dir server --host 0.0.0.0 --port 8420
 
 Then everything else just points at that host instead of `127.0.0.1`, no code changes needed:
 
-- `stream_client.py` / `stream_client.js`: `--url http://mac-mini.local:8420/v1/images/generations`
-- `mcp_server.py`: set `MFLUXIBLE_URL=http://mac-mini.local:8420/v1/images/generations` when registering it, e.g. `claude mcp add mfluxible --scope user -e MFLUXIBLE_URL=http://mac-mini.local:8420/v1/images/generations -- /path/to/mfluxible/.venv/bin/python /path/to/mfluxible/client/mcp_server.py` — or, in Claude Desktop's config, `"env": {"MFLUXIBLE_URL": "http://mac-mini.local:8420/v1/images/generations"}` alongside `command`/`args`
+- `stream_client.py` / `stream_client.js`: `--url http://mac-mini.local:8420/mfluxible/v1/images/generations`
+- `mcp_server.py`: set `MFLUXIBLE_URL=http://mac-mini.local:8420/mfluxible/v1/images/generations` when registering it, e.g. `claude mcp add mfluxible --scope user -e MFLUXIBLE_URL=http://mac-mini.local:8420/mfluxible/v1/images/generations -- /path/to/mfluxible/.venv/bin/python /path/to/mfluxible/client/mcp_server.py` — or, in Claude Desktop's config, `"env": {"MFLUXIBLE_URL": "http://mac-mini.local:8420/mfluxible/v1/images/generations"}` alongside `command`/`args`
 
 There's no authentication on the API — only bind it to `0.0.0.0` on a network you trust (home LAN, Tailscale/VPN), never expose it directly to the internet.
+
+## Troubleshooting
+
+### `WARNING: Invalid HTTP request received.`
+
+This is uvicorn's own log line (not mfluxible's) for a connection that sent bytes it couldn't parse as HTTP at all — most commonly something pointed at this server with `https://` instead of `http://` (mfluxible has no TLS of its own; a TLS ClientHello hitting the plaintext port is exactly the kind of thing that produces this), but also a health-checker or proxy speaking a different protocol at the port, or a stray port scan. uvicorn discards the actual reason and the offending bytes, logging only this fixed message, so there's no way to tell which of those it was from the log line alone — check every URL that points at this server (a reverse proxy config, a client's base-URL setting, ...) for a stray `https://` first; that's the single most common cause in practice.
 
 ## How it works
 

@@ -58,7 +58,7 @@ def show_image(png_bytes: bytes, width: str = "auto") -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate an image via mfluxible, showing progress inline.")
     parser.add_argument("prompt")
-    parser.add_argument("--url", default="http://127.0.0.1:8420/v1/images/generations")
+    parser.add_argument("--url", default="http://127.0.0.1:8420/mfluxible/v1/images/generations")
     parser.add_argument("--width", type=int, default=1024)
     parser.add_argument("--height", type=int, default=1024)
     # Left unset, steps/guidance are the server's decision: it knows which model it

@@ -85,7 +85,7 @@ async def test_no_preview_key_when_preview_every_is_zero(toy_engine):
 async def test_check_request_failure_propagates_before_any_event(toy_engine):
     # check_request runs synchronously at the top of generate_stream and isn't
     # caught there -- callers that want a clean 400 instead of a raised exception
-    # (the /v1/images/generations endpoint) call check_request themselves first.
+    # (the /mfluxible/v1/images/generations endpoint) call check_request themselves first.
     # See test_server_api.py::test_generate_rejects_unsupported_guidance.
     with pytest.raises(ValueError, match="guidance"):
         await _collect(toy_engine, GenerateRequest(prompt="x", guidance=1.0))

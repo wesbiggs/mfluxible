@@ -2,7 +2,7 @@
 
 ## Layout
 
-`server/` (server.py, engine.py, models.py, schemas.py, requirements.txt) is the model + HTTP API. `client/` (stream_client.py, stream_client.js, harness.html, mcp_server.py, requirements.txt, requirements-mcp.txt) is everything that talks to it over HTTP. They're independent dependency-wise -- installing one's requirements.txt doesn't pull in the other's. server.py/engine.py/models.py/schemas.py import each other as flat sibling modules (`from engine import ...`), not a package, so `server/` must stay on `sys.path` when running (e.g. `uvicorn server:app --app-dir server`) -- don't add an `__init__.py` or turn this into a `server.*` package without updating those imports and the run command together.
+`server/` (server.py, engine.py, models.py, schemas.py, chat_stub.py, requirements.txt) is the model + HTTP API. `client/` (stream_client.py, stream_client.js, harness.html, mcp_server.py, requirements.txt, requirements-mcp.txt) is everything that talks to it over HTTP. They're independent dependency-wise -- installing one's requirements.txt doesn't pull in the other's. server.py/engine.py/models.py/schemas.py/chat_stub.py import each other as flat sibling modules (`from engine import ...`), not a package, so `server/` must stay on `sys.path` when running (e.g. `uvicorn server:app --app-dir server`) -- don't add an `__init__.py` or turn this into a `server.*` package without updating those imports and the run command together.
 
 ## API changes
 
@@ -11,6 +11,28 @@ Always update `README.md` when changing the API (endpoints, request/response sha
 ## mflux is a fast-moving dependency
 
 `server/engine.py` reaches into mflux internals that aren't public API: `model.callbacks.before_loop/in_loop/interrupt` are mutated directly, since `CallbackRegistry` has no `unregister()` as of mflux 0.19.1. The VAE-decode branching in `_decode_preview_b64` mirrors mflux's own `StepwiseHandler` on purpose, with one deliberate deviation: the non-packed branch goes through `VAEUtil.decode` rather than calling `vae.decode()` directly the way `StepwiseHandler` does. Qwen-Image's VAE is a 3D (video) decoder returning `(B, C, 1, H, W)` and `ImageUtil.to_image` wants 4D — `VAEUtil.decode` is what drops the singleton frame axis, and it's the same call each variant's own final decode makes, so previews and final images stay on identical handling. Calling `vae.decode()` bare here works for Z-Image and FLUX and breaks only on Qwen previews. If `pip install -U mflux` breaks this file, check `mflux/callbacks/callback_registry.py` and `mflux/callbacks/instances/stepwise_handler.py` in the installed package first — that's where this was reverse-engineered from (mflux ships no public docs for the callback system).
+
+## server/chat_stub.py hardcodes a specific tool name, confirmed against one caller
+
+`POST /v1/chat/completions` only ever emits a tool call for a tool literally named
+`generate_image` (see `GENERATE_IMAGE_TOOL_NAME` in `server/chat_stub.py`) if the
+caller's request actually offers one by that name in `tools` -- it never fabricates a
+tool call for a name it wasn't handed. That name isn't part of any OpenAI spec (tool
+names are caller-defined) and isn't necessarily Open WebUI's own coinage either --
+`generate_image` is an obvious enough name for this that other tool-calling systems may
+independently land on the same one. What's actually confirmed, by reading the source, is
+that Open WebUI's builtin tool uses exactly this name with `prompt` as its only public
+argument (`backend/open_webui/tools/builtin.py::generate_image`) -- the same
+read-the-actual-source approach as the mflux and mcp SDK notes elsewhere in this file,
+not a guess from behavior. If a caller's tool is named anything else, this stub falls
+back to its "no generate_image tool was offered" response rather than silently doing
+nothing (see `_NO_TOOL_OFFERED_TEXT`) -- so a different caller using a different name is
+a visible failure, not a silent one, even though `GENERATE_IMAGE_TOOL_NAME` would still
+need updating (or generalizing past a single hardcoded name) to actually work with it.
+
+The rest of chat_stub.py -- the request/response shapes, the streaming chunk format --
+is the actual OpenAI chat-completions function-calling spec, not caller-specific, so
+that part isn't expected to need chasing the way the tool name might.
 
 ## mcp SDK also moved fast: FastMCP -> MCPServer
 

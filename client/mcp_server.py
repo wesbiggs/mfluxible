@@ -30,7 +30,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp_types import Annotations, ImageContent, TextContent
 from PIL import Image as PILImage
 
-MFLUXIBLE_URL = os.environ.get("MFLUXIBLE_URL", "http://127.0.0.1:8420/v1/images/generations")
+MFLUXIBLE_URL = os.environ.get("MFLUXIBLE_URL", "http://127.0.0.1:8420/mfluxible/v1/images/generations")
 
 # Which model the server loaded is the server's business, but this tool has to know two
 # things about it: what to tell the caller it generated, and whether guidance /
