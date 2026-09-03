@@ -65,11 +65,13 @@ Not tmux-aware — iTerm2's protocol needs extra passthrough wrapping inside tmu
 
 `client/harness.html` is a small, dependency-free page (plain HTML/CSS/JS, no build step) with a form for prompt/width/height/steps/seed/preview_every that calls the streaming endpoint directly from the browser via `fetch`, reads [`/health`](#get-health) on load to show which model the server is running (leaving Steps blank uses that model's default, and Guidance / Negative prompt appear only if it accepts them), parsing the SSE stream the same way the terminal clients do, and renders previews and the final image as `<img>` elements (via `data:` URLs) plus a download link for the final PNG.
 
-It needs to be served over HTTP, not opened as a `file://` URL — the browser's `Origin` header for a local file is `null`, which the server's default CORS config won't match:
+The server itself serves this page, at `GET /harness.html` — just open `http://localhost:8420/harness.html` (or whichever host/port `server.py` is bound to) once it's up. The Server URL field defaults to the relative path `/v1/images/generations`, which resolves against whatever origin served the page, so no configuration is needed for this same-origin case.
+
+If you'd rather host the page separately (e.g. to point one harness at multiple servers, or to exercise the CORS path), it still works opened from any static file server — just not as a `file://` URL, since the browser's `Origin` header for a local file is `null`, which the server's default CORS config won't match:
 
 ```bash
 cd client && python3 -m http.server 8000
-# then open http://localhost:8000/harness.html
+# then open http://localhost:8000/harness.html and point Server URL at the API host
 ```
 
 (CORS is on by default and reflects back any `http(s)://localhost:<any port>` or `127.0.0.1:<any port>` origin, so this works with no server-side configuration — see [CORS](#cors) below if you need something different.)
@@ -171,6 +173,10 @@ Returns:
 `model` describes what this process is running and which request fields it will accept, so a client can fill in sensible defaults without being told how the server was configured: `default_steps` is what `steps` falls back to, and `supports_guidance` / `supports_negative_prompt` say whether `guidance` / `negative_prompt` are accepted or rejected with a 400. `available` lists every model this build knows how to run — all but `model.name` would need a restart (and a download) to use.
 
 `memory` reports MLX's own byte counters for the server process. `active_bytes` is memory backing live arrays — near zero until the first generation, since weights are quantized lazily and only materialize when something first forces evaluation. `cache_bytes` is buffers MLX has freed but retains for reuse: reclaimable, but it counts toward the process's memory footprint just the same, so on a memory-tight machine it is worth watching between generations. `peak_bytes` is the high-water mark of active memory. All three are plain counters, so polling `/health` mid-generation is cheap and does not disturb the run.
+
+### `GET /harness.html`
+
+Serves [`client/harness.html`](#browser) as-is — see the Browser section above. Lets you open the harness straight from the running server (`http://localhost:8420/harness.html`) instead of standing up a separate static file server for it.
 
 ### `POST /v1/images/generations`
 
@@ -278,6 +284,17 @@ LoRA weights are applied and permanently merged ("baked") into the model at load
 ### CORS
 
 On by default, reflecting back any `http(s)://localhost:<any port>` or `127.0.0.1:<any port>` origin — so a local static server on either hostname, any port (e.g. for `harness.html`) can call the API with no extra configuration. `MFLUXIBLE_CORS_ORIGIN_REGEX` overrides the pattern entirely; `MFLUXIBLE_CORS_ORIGINS` adds specific exact-match origins on top of it (e.g. for a deployed frontend on a real domain).
+
+## Testing
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+The suite runs entirely against a fake, weight-free model (`tests/doubles/toy_model.py`) that always renders a solid color instead of doing real diffusion — no download, no GPU work, and it's fast enough for every push. It's wired in by passing a `ModelSpec` instance straight to `MfluxEngine(model=...)`, which skips `models.py`'s registry entirely (see `MfluxEngine.__init__` in `server/engine.py`), so no production code has to know it exists.
+
+Runs on GitHub Actions on every push/PR (`.github/workflows/tests.yml`). Since `mlx` (mflux's own dependency) has no Linux or Intel build, that workflow — and any other CI you point at this repo — has to run on an Apple Silicon macOS runner (`macos-14` on GitHub-hosted); `ubuntu-latest` will fail to install.
 
 ## Running on a dedicated machine
 

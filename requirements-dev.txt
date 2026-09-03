@@ -1,0 +1,11 @@
+# Test-only dependencies, on top of the server's own runtime requirements. Split out
+# rather than merged into server/requirements.txt so a production install of the
+# server doesn't pull in test tooling it'll never use.
+-r server/requirements.txt
+
+pytest>=8.0
+pytest-asyncio>=0.24
+# fastapi.testclient.TestClient needs httpx at runtime; it's on the machine today only
+# as a transitive dep of huggingface_hub (via mflux), which isn't a contract this
+# suite should rely on.
+httpx>=0.27

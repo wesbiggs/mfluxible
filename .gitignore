@@ -2,3 +2,8 @@
 __pycache__/
 *.pyc
 .DS_Store
+.pytest_cache/
+
+# Local model/LoRA weight files -- large binaries that belong in ~/.cache/mfluxible
+# or wherever MFLUXIBLE_LORA_PATHS points, never in the repo.
+*.safetensors
