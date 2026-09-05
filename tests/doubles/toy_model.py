@@ -36,8 +36,10 @@ from mflux.utils.image_util import ImageUtil
 from models import ModelSpec
 
 # A fictitious ModelConfig for the toy model. supports_guidance/requires_sigma_shift
-# are both False so nothing here ever needs a real scheduler (Config.scheduler is
-# never touched by engine.py or by ToyModel itself).
+# are both False, so the schedule stays a plain linspace and nothing here ever pays for
+# a real one -- neither engine.py nor ToyModel reads Config.scheduler (a request asking
+# for a fractional start is recorded as last_scheduler, not acted on: the schedule it
+# selects is covered directly in tests/test_schedulers.py, against a real ModelConfig).
 TOY_MODEL_CONFIG = ModelConfig(
     priority=0,
     aliases=["toy"],
@@ -111,6 +113,7 @@ class ToyModel:
         self.last_image_path: str | None = None
         self.last_image_strength: float | None = None
         self.last_image_path_existed: bool | None = None
+        self.last_scheduler: str | None = None
 
     def generate_image(
         self,
@@ -123,10 +126,12 @@ class ToyModel:
         negative_prompt: str | None = None,
         image_path: str | None = None,
         image_strength: float | None = None,
+        scheduler: str | None = None,
         **_ignored,
     ):
         self.last_image_path = image_path
         self.last_image_strength = image_strength
+        self.last_scheduler = scheduler
         if image_path is not None:
             # Recorded now, not just the path string: engine.py's finally block unlinks
             # this file once generate_image() returns, so "did the file exist while
@@ -138,6 +143,15 @@ class ToyModel:
             height=height,
             width=width,
             guidance=guidance or 0.0,
+            # Passed through so config.init_time_step is computed the same way it is in
+            # a real generation -- that's what engine.py reports as start_step, and what
+            # makes the loop below skip the front of the schedule for img2img.
+            image_path=image_path,
+            image_strength=image_strength,
+            # Real variants default this to "linear" rather than passing None through
+            # (see e.g. mflux's Flux1.generate_image), so mirror that: engine.py only
+            # sets scheduler= when a request asks for a fractional start.
+            scheduler=scheduler or "linear",
         )
 
         r, g, b = _seed_color(seed)
@@ -150,8 +164,10 @@ class ToyModel:
         ctx.before_loop(latents)
         # A plain range, passed explicitly, so GenerationContext.in_loop doesn't fall
         # back to config.time_steps (a real tqdm progress bar) -- nothing here reads
-        # it, and skipping it keeps test output quiet.
-        steps = range(num_inference_steps)
+        # it, and skipping it keeps test output quiet. It starts at init_time_step for
+        # the same reason config.time_steps does: img2img begins partway down the
+        # schedule, so steps 1..init_time_step never fire an in-loop callback at all.
+        steps = range(config.init_time_step, num_inference_steps)
         for t in steps:
             # No real denoising: the "answer" is already in `latents`, so each step
             # just gives engine.py's in-loop callback something to fire against.

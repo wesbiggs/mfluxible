@@ -12,6 +12,27 @@ Always update `README.md` when changing the API (endpoints, request/response sha
 
 `server/engine.py` reaches into mflux internals that aren't public API: `model.callbacks.before_loop/in_loop/interrupt` are mutated directly, since `CallbackRegistry` has no `unregister()` as of mflux 0.19.1. The VAE-decode branching in `_decode_preview_b64` mirrors mflux's own `StepwiseHandler` on purpose, with one deliberate deviation: the non-packed branch goes through `VAEUtil.decode` rather than calling `vae.decode()` directly the way `StepwiseHandler` does. Qwen-Image's VAE is a 3D (video) decoder returning `(B, C, 1, H, W)` and `ImageUtil.to_image` wants 4D — `VAEUtil.decode` is what drops the singleton frame axis, and it's the same call each variant's own final decode makes, so previews and final images stay on identical handling. Calling `vae.decode()` bare here works for Z-Image and FLUX and breaks only on Qwen previews. If `pip install -U mflux` breaks this file, check `mflux/callbacks/callback_registry.py` and `mflux/callbacks/instances/stepwise_handler.py` in the installed package first — that's where this was reverse-engineered from (mflux ships no public docs for the callback system).
 
+## server/schedulers.py depends on mflux conditioning the model on sigmas, not on the step index
+
+`fractional_start` works by moving `sigmas[init_time_step]` off the grid, so the input
+image is noised to a level that lies *between* two schedule rungs while the loop still
+starts on a whole step. That is only coherent because all three variants derive the
+transformer's time conditioning from `sigmas[t]` itself -- `z_image.py` computes
+`timestep = 1 - sigmas[t]` inline, and `flux_transformer/transformer.py` and
+`qwen_transformer.py` both index `config.scheduler.sigmas[...]`. If a future mflux
+conditioned on the step index (or on `LinearScheduler._get_timesteps`, which returns a
+bare `arange` nothing currently reads), the latents and the model's idea of where they
+are would silently desync, and the failure would look like bad images rather than an
+error. The module's docstring carries the rest: why `LinearScheduler` is the right base
+for every model in `models.py`, and why the interpolation is done on the request's own
+shifted schedule rather than by re-deriving mflux's shift math.
+
+The scheduler is selected by handing mflux a dotted import path
+(`Config` -> `try_import_external_scheduler`), which resolves only because `server/` is
+on `sys.path` as flat modules. That path must never be built from request data -- it is
+an arbitrary module import in the server process -- which is why the API takes a bool
+and `SCHEDULER_PATH` is a constant.
+
 ## server/chat_stub.py hardcodes a specific tool name, confirmed against one caller
 
 `POST /v1/chat/completions` only ever emits a tool call for a tool literally named

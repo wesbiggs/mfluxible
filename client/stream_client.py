@@ -83,10 +83,23 @@ def main() -> None:
             "Server default (0.4) applies if --image is given without this."
         ),
     )
+    parser.add_argument(
+        "--fractional-start",
+        action="store_true",
+        help=(
+            "only with --image; place the input's noise level exactly where --image-strength "
+            "asks instead of flooring it to a whole step. Strength otherwise quantizes to "
+            "1/steps -- at 9 steps, 0.35 and 0.4 give the same image. Same step count, same "
+            "speed, different pixels for a given strength."
+        ),
+    )
     args = parser.parse_args()
 
     if args.image_strength is not None and args.image is None:
         print("error: --image-strength requires --image", file=sys.stderr)
+        sys.exit(1)
+    if args.fractional_start and args.image is None:
+        print("error: --fractional-start requires --image", file=sys.stderr)
         sys.exit(1)
 
     body = {
@@ -101,6 +114,7 @@ def main() -> None:
         "stream": True,
         "image": base64.b64encode(Path(args.image).read_bytes()).decode("ascii") if args.image else None,
         "image_strength": args.image_strength,
+        "fractional_start": args.fractional_start,
     }
 
     with requests.post(args.url, json=body, stream=True) as resp:

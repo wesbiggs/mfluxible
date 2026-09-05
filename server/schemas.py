@@ -56,6 +56,21 @@ class GenerateRequest(BaseModel):
         ),
     )
 
+    fractional_start: bool = Field(
+        default=False,
+        description=(
+            "Start image-to-image between two steps of the sigma schedule instead of "
+            "flooring to one. image_strength normally reaches the model only as an int "
+            "(mflux's init_time_step), quantizing it to 1/steps -- at 9 steps, 0.35 and "
+            "0.4 are the same image. With this set, the noise level the input is blended "
+            "to is placed at the exact position the strength names, while the loop still "
+            "starts on -- and runs -- the same whole steps, so finer strength control "
+            "costs no extra compute. Only meaningful, and only accepted, alongside image. "
+            "Off by default: it changes the pixels a given strength produces, so an "
+            "existing seed/strength pair keeps reproducing its old image unless asked."
+        ),
+    )
+
 
 class OpenAIImageGenerationRequest(BaseModel):
     """Request body for the OpenAI-compatible `POST /v1/images/generations` endpoint

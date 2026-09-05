@@ -342,6 +342,7 @@ async def generate_image(
     negative_prompt: str | None = None,
     image_path: str | None = None,
     image_strength: float | None = None,
+    fractional_start: bool = False,
     ctx: Context | None = None,
 ) -> list[TextContent | ImageContent]:
     """Generate an image from a text prompt, optionally seeded from an existing image.
@@ -356,9 +357,10 @@ async def generate_image(
     negative_prompt only to Qwen-Image; sending either to a model that cannot act on
     it is an error naming the model, so leave both unset unless you know otherwise.
 
-    width/height must be divisible by 8. Generation time scales with pixel count and
-    can take minutes, so prefer the defaults unless the user asks for a specific size.
-    Leave seed unset for a random one.
+    width/height must be divisible by 16 (the server floors them to a multiple of 16,
+    so anything else silently generates up to 15px smaller). Generation time scales with
+    pixel count and can take minutes, so prefer the defaults unless the user asks for a
+    specific size. Leave seed unset for a random one.
 
     image_path is a local file path (read from disk, not a URL) to an image-to-image
     input -- unlike guidance/negative_prompt, every model this server can run accepts
@@ -368,6 +370,11 @@ async def generate_image(
     the output MORE (closer to unchanged, possibly with few or even zero denoising
     steps actually run), and 0.0 means the image has no influence at all (plain
     text-to-image). Don't assume the opposite-convention meaning.
+
+    fractional_start (only with image_path) makes image_strength continuous. Without
+    it, strength is quantized to 1/steps -- at 9 steps, 0.35 and 0.4 are the same
+    image -- so set it when the user wants to tune a strength finely, or is asking why
+    a small change to it did nothing. It costs no extra time.
 
     Returns the image directly if it finishes quickly. Otherwise it returns a handle
     and keeps generating in the background: call check_image with that handle to
@@ -398,6 +405,8 @@ async def generate_image(
             raise ToolError(f"could not read image_path {image_path!r}: {exc}")
     elif image_strength is not None:
         raise ToolError("image_strength requires image_path to also be set.")
+    elif fractional_start:
+        raise ToolError("fractional_start requires image_path to also be set.")
 
     _prune_jobs()
     job = _Job(
@@ -424,6 +433,7 @@ async def generate_image(
                 "stream": True,
                 "image": image_b64,
                 "image_strength": image_strength,
+                "fractional_start": fractional_start,
             },
         )
     )

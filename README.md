@@ -53,7 +53,7 @@ node client/stream_client.js "a puffin on a cliff at sunset" --preview-every 2 -
 
 Both take `--steps`, `--seed`, `--guidance` and `--negative-prompt`, and leave all four to the server when you don't pass them — so `--steps` is only worth setting to override the loaded model's own default. `--guidance` and `--negative-prompt` are refused (with a message naming the model) on models that can't act on them; see [Models](#models).
 
-Both also take `--image PATH` for image-to-image (read from disk and base64-encoded, not a URL) and `--image-strength` (0.0–1.0, only valid alongside `--image`; the server's own default, 0.4, applies if you omit it) — see [Image-to-image](#image-to-image) for what `image_strength` actually controls (mflux's convention is the inverse of some other tools').
+Both also take `--image PATH` for image-to-image (read from disk and base64-encoded, not a URL) and `--image-strength` (0.0–1.0, only valid alongside `--image`; the server's own default, 0.4, applies if you omit it) — see [Image-to-image](#image-to-image) for what `image_strength` actually controls (mflux's convention is the inverse of some other tools'). `--fractional-start` (also only valid alongside `--image`) makes that strength continuous instead of quantized to `1/steps`, at no extra cost — see [Fractional start](#fractional-start).
 
 Both render the exact full-resolution bytes returned by the server — no downscaling, no recompression, nothing client-side touches the image data. They use the iTerm2 inline-image protocol's chunked `MultipartFile` variant (also works in WezTerm; in an unsupported terminal the escape codes are just ignored, and the saved file and progress text still work either way), the same variant iTerm2's own [`imgcat`](https://github.com/gnachman/iTerm2-shell-integration/blob/master/utilities/imgcat) reference tool uses by default: the base64 payload is split into `FilePart=` sequences behind a metadata-only header and a `FileEnd` marker, rather than one giant `File=...:<base64>` sequence.
 
@@ -67,7 +67,7 @@ Not tmux-aware — iTerm2's protocol needs extra passthrough wrapping inside tmu
 
 `client/harness.html` is a small, dependency-free page (plain HTML/CSS/JS, no build step) with a form for prompt/width/height/steps/seed/preview_every that calls the streaming endpoint directly from the browser via `fetch`, reads [`/health`](#get-health) on load to show which model the server is running (leaving Steps blank uses that model's default, and Guidance / Negative prompt appear only if it accepts them), parsing the SSE stream the same way the terminal clients do, and renders previews and the final image as `<img>` elements (via `data:` URLs) plus a download link for the final PNG.
 
-It also does image-to-image. Get a base image onto the page either by dragging an image file onto it from anywhere (drop targets are the whole page, not just the drop-zone box — that's just where the visual highlight and preview show up) or by clicking the drop zone to pick a file; or click **Use last result** to feed the most recently generated image straight back in as the next input, for chaining edits without a round trip through disk. **Clear image** drops back to plain text-to-image. The Image strength field controls how strongly that input constrains the output (default 0.4) — see [Image-to-image](#image-to-image) for what the number actually means; the page's own hint text is a reminder that it's the inverse of some other tools' "denoising strength". If the chosen image is a PNG this server generated, its embedded prompt (read straight out of the PNG's `eXIf` metadata, client-side, no server round trip) is loaded into the Prompt box automatically — a photo with no such metadata just leaves the box alone.
+It also does image-to-image. Get a base image onto the page either by dragging an image file onto it from anywhere (drop targets are the whole page, not just the drop-zone box — that's just where the visual highlight and preview show up) or by clicking the drop zone to pick a file; or click **Use last result** to feed the most recently generated image straight back in as the next input, for chaining edits without a round trip through disk. **Clear image** drops back to plain text-to-image. Loading a base image any of those ways also sets Width and Height to the image's own dimensions, rounded down to a multiple of 16 — mflux resizes the input to whatever `width`/`height` the request carries with a plain `resize()` and no aspect-ratio handling, so a portrait image against the 1024×1024 default would be stretched, not letterboxed, and that distorted image is what the generation is seeded from. 16 rather than 8 because that's what the server itself does with the number (mflux floors both dimensions to a multiple of 16), so the box says the size you'll actually get; the fields step by 16 to match. The Image strength field controls how strongly that input constrains the output (default 0.4) — see [Image-to-image](#image-to-image) for what the number actually means; the page's own hint text is a reminder that it's the inverse of some other tools' "denoising strength". The **Fractional start** checkbox next to it is [the same flag](#fractional-start) the API takes, and is sent only while an image is loaded. If the chosen image is a PNG this server generated, its embedded prompt (read straight out of the PNG's `eXIf` metadata, client-side, no server round trip) is loaded into the Prompt box automatically — a photo with no such metadata just leaves the box alone.
 
 The server itself serves this page, at `GET /harness.html` — just open `http://localhost:8420/harness.html` (or whichever host/port `server.py` is bound to) once it's up. The Server URL field defaults to the relative path `/mfluxible/v1/images/generations`, which resolves against whatever origin served the page, so no configuration is needed for this same-origin case.
 
@@ -82,9 +82,9 @@ cd client && python3 -m http.server 8000
 
 ### MCP tool (generate images from within Claude)
 
-`client/mcp_server.py` exposes two tools over MCP's stdio transport: `generate_image(prompt, width, height, steps, seed, guidance, negative_prompt, image_path, image_strength)`, which forwards each `thinking` step as an MCP progress update and returns the image as inline content, and `check_image(handle)`, which collects an image from a `generate_image` call that outlived its tool-call timeout (see below).
+`client/mcp_server.py` exposes two tools over MCP's stdio transport: `generate_image(prompt, width, height, steps, seed, guidance, negative_prompt, image_path, image_strength, fractional_start)`, which forwards each `thinking` step as an MCP progress update and returns the image as inline content, and `check_image(handle)`, which collects an image from a `generate_image` call that outlived its tool-call timeout (see below).
 
-`image_path` is a local file path (read from disk by the tool, not a URL) for image-to-image; `image_strength` (0.0–1.0, only meaningful alongside `image_path`, server default 0.4 if omitted) follows mflux's own convention — see [Image-to-image](#image-to-image) — which is the *inverse* of "denoising strength" in some other tools, so the tool's own docstring spells this out for the model calling it.
+`image_path` is a local file path (read from disk by the tool, not a URL) for image-to-image; `image_strength` (0.0–1.0, only meaningful alongside `image_path`, server default 0.4 if omitted) follows mflux's own convention — see [Image-to-image](#image-to-image) — which is the *inverse* of "denoising strength" in some other tools, so the tool's own docstring spells this out for the model calling it. `fractional_start` is the same [flag](#fractional-start) the API takes, described there as the thing to reach for when a user is tuning strength finely or asking why a small change to it did nothing.
 
 ```bash
 pip install -r client/requirements-mcp.txt
@@ -188,8 +188,8 @@ mfluxible's own, native endpoint — everything below (step-by-step `thinking` e
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `prompt` | string | required | |
-| `width` | int | 1024 | must be divisible by 8 |
-| `height` | int | 1024 | must be divisible by 8 |
+| `width` | int | 1024 | should be divisible by 16 — mflux floors it to a multiple of 16 rather than rejecting it, so anything else generates up to 15px smaller than asked |
+| `height` | int | 1024 | same as `width` |
 | `steps` | int or null | the model's own default | 9 for Z-Image-Turbo, 4 for FLUX.1-schnell, 25 for FLUX.1-dev, 20 for Qwen-Image; see `default_steps` on [`/health`](#get-health) |
 | `seed` | int or null | random | echoed back in the response so a run can be reproduced |
 | `guidance` | float or null | the model's own default | only on models that use guidance (3.5 for FLUX.1-dev and Qwen-Image). A **400** on guidance-distilled models rather than a silently ignored field — see [Models](#models) |
@@ -198,13 +198,14 @@ mfluxible's own, native endpoint — everything below (step-by-step `thinking` e
 | `stream` | bool | true | SSE stream vs a single JSON response |
 | `image` | string or null | unset | base64-encoded input image (no `data:` URI prefix) for image-to-image. Accepted by every model this server can run — see [Image-to-image](#image-to-image) below |
 | `image_strength` | float or null | 0.4 if `image` is set | how strongly `image` constrains the output, `0.0`–`1.0`; only meaningful, and only accepted, alongside `image` — a **400** if set without it |
+| `fractional_start` | bool | `false` | start image-to-image *between* two steps of the sigma schedule instead of flooring to one, making `image_strength` continuous at no extra compute; only accepted alongside `image` — a **400** otherwise. See [Fractional start](#fractional-start) |
 
 ### Streaming response (`stream: true`, default)
 
 `text/event-stream`, one JSON object per `data:` line:
 
 ```
-data: {"type": "start", "seed": 123, "total_steps": 9}
+data: {"type": "start", "seed": 123, "total_steps": 9, "start_step": 0, "effective_image_strength": null}
 
 data: {"type": "thinking", "step": 1, "total_steps": 9, "step_ms": 210, "elapsed_ms": 210}
 
@@ -214,6 +215,8 @@ data: {"type": "thinking", "step": 2, "total_steps": 9, "step_ms": 190, "elapsed
 
 data: {"type": "image", "mime_type": "image/png", "data": "<base64 png>", "seed": 123, "generation_time": 14.2}
 ```
+
+The `start` event's `start_step` is the number of leading denoising steps this generation skips, and it is `0` for everything except image-to-image — so the first `thinking` event is always step `start_step + 1`, and `total_steps - start_step` steps actually run. Progress is therefore `(step - start_step) / (total_steps - start_step)`, which reduces to `step / total_steps` when nothing is skipped. `effective_image_strength` is the `image_strength` bucket the request landed in (`start_step / total_steps`), or `null` when no `image` was sent — see [Image-to-image](#image-to-image) for why the value you sent and the value that took effect aren't always the same. Both fields are display/progress information: `effective_image_strength` is the exact *lower edge* of its bucket as a fraction, but as a float it lands a hair under it, so feeding it back into a later request can floor to the next bucket down. Under [`fractional_start`](#fractional-start) there are no buckets and it reports the strength that actually took effect.
 
 A `thinking` event is emitted once step `step` has finished, carrying both `step_ms` (how long that one step took) and `elapsed_ms` (cumulative time since the denoising loop started, so the `step_ms` values sum to it). The first step's `step_ms` is normally much larger than the rest, and this is **per generation, not a one-time startup cost**: MLX defers all compute until something forces evaluation, so the first step's `mx.eval` pays for everything built lazily ahead of it (paging in and materializing the quantized weights, encoding the prompt) on top of its own denoising. Measured on an M2 Pro at 512×512, the first step reports 55–73s against ~3.3s for each later step, on every run, and is insensitive to both prompt length and step count. `generation_time` on the final `image` event is mflux's own measurement of the denoising loop, so it lands within a few ms of the last `elapsed_ms` — the final VAE decode and PNG encoding happen after it and are counted in neither. A preview decode is charged to the *next* step's `step_ms`, not the step it was requested on.
 
@@ -231,6 +234,30 @@ Set `image` (and, optionally, `image_strength`) to seed generation from an exist
 
 `image_strength` follows **mflux's own convention, not the "denoising strength" convention** used by tools like Stable Diffusion/A1111/diffusers, where a *higher* value means *more* change from the input. mflux's is the other way round: it's how strongly the input image constrains the output. `0.0` means the image has no influence at all (equivalent to plain text-to-image); `1.0` means maximum influence, which can mean very few — or even zero — denoising steps actually run, so the output stays close to the input. The default, `0.4`, is a middle ground (and matches mflux's own CLI default). If you're used to the inverted convention, mentally flip the slider.
 
+`image_strength` is also **quantized to `1/steps`**, because it only ever reaches the model as an integer: mflux turns it into `init_time_step = max(1, int(steps * image_strength))`, which both picks the step the denoising loop starts at and indexes the noise level blended into the input image. Nothing downstream sees the original float. At the 9 steps Z-Image-Turbo defaults to, that's ten distinct settings — `0.35` and `0.4` both floor to `3` and produce identical pixels for the same seed, while `0.3` and `0.35` straddle a boundary and don't. The `start` event's `effective_image_strength` reports the bucket actually used, so a nudge that changed nothing is visible rather than looking like the server ignored it. Raising `steps` gives a finer dial (20 steps → 21 buckets), but it also runs proportionally more steps — so you move start-noise and trajectory length together — and on a few-step distilled model like Z-Image-Turbo or FLUX.1-schnell it's off-distribution rather than simply slower. Whether the finer grid even *contains* the coarse one is model-specific: for Z-Image-Turbo and FLUX it does exactly (doubling `steps` interpolates the rungs you had and leaves them where they were), but Qwen-Image sets `sigma_shift_terminal`, whose stretch is scaled by the last raw sigma `1/steps`, so its schedules at different step counts don't line up at all. [`fractional_start`](#fractional-start) is the way to get granularity without any of that.
+
+Note the degenerate end: `image_strength: 1.0` makes `init_time_step` equal `steps`, so **no denoising steps run at all** and the noise level is zero. The stream is well-formed — a `start` event, no `thinking` events, then the final image — but that image is just your input scaled to `width`/`height` and round-tripped through the VAE. It's accepted rather than rejected because it's the honest limit of the scale, not a mistake the server can distinguish from intent.
+
+#### Fractional start
+
+`fractional_start: true` removes the quantization instead of working around it, at the same step count and the same cost.
+
+It works because `init_time_step` is doing two jobs. Job one — which step the loop starts at — genuinely has to be an integer: every step integrates between adjacent grid points, `dt = sigmas[t+1] - sigmas[t]`, so there is no such thing as starting halfway through one. Job two — the noise level the input image is blended to, `sigmas[init_time_step]` — is just an array lookup, and nothing requires it to land on a grid point. Sharing one integer between them is what quantizes the dial.
+
+So [`server/schedulers.py`](server/schedulers.py) moves the rung rather than the index: it takes the schedule the request's own `steps` produces and replaces `sigmas[init_time_step]` with a point interpolated toward its neighbour, at the exact position `image_strength` names. The loop still starts on the same whole step and still runs `steps - start_step` of them; only its first step is shorter. At 10 steps, `0.25` lands halfway between the rungs `0.2` and `0.3` reach, `0.22` lands a fifth of the way, and so on — with no change to how many steps run, so a strength sweep isn't also a step-count sweep.
+
+This is safe rather than a mismatch between the latents and what the model thinks it is denoising because **every variant conditions the transformer on `sigmas[t]` itself, not on the step index** — `ZImage` computes `timestep = 1 - sigmas[t]` inline, and the FLUX and Qwen transformers read `config.scheduler.sigmas[...]` for their time embedding. Moving the rung moves the conditioning with it. That's the assumption to re-check if a future mflux version makes images from this path come out wrong.
+
+Mechanically it's one of mflux's own extension points: `Config` resolves a scheduler given as a dotted import path, and all three variants take `scheduler=` on `generate_image()`. The API exposes a **bool, not that path** — a caller-supplied dotted path would be an arbitrary module import in the server process — so the server picks the class and the request only chooses whether to use it.
+
+It's off by default because it changes the pixels a given strength produces: an existing seed/strength pair keeps reproducing its old image unless you ask. With it on, `effective_image_strength` on the `start` event reports the strength that actually took effect rather than a floored bucket, so the two modes stay distinguishable from the stream alone. Two edge cases still report a fraction of `0` and leave the schedule untouched, since mflux's own clamps have already moved the start off the position the strength names: a strength below `1/steps` (floored *up* to rung 1), and `1.0` (starts past the last rung, with no steps to run).
+
+Two caveats worth stating. The interpolation is done on the request's own already-shifted schedule rather than by re-deriving mflux's sigma-shift math, so a half-step lands *near*, not exactly on, the rung that twice as many steps would have given — within 0.001 across the low-index region img2img actually uses, growing to about 0.013 at the very tail (measured for Z-Image-Turbo at 1024×1024; for FLUX.1-schnell, whose schedule isn't shifted at all, it's exact). Every bundled client exposes it: `--fractional-start` on both terminal clients, a checkbox beside Image strength in the harness, and a `fractional_start` argument on the MCP `generate_image` tool.
+
+```bash
+python client/stream_client.py "a lighthouse" --steps 10 --image input.png --image-strength 0.25 --fractional-start
+```
+
 The image is scaled to the request's `width`/`height` before use, so it need not match them. Internally, the base64 payload is decoded to a temp file for the duration of one generation (mflux's `image_path` wants an actual path, not bytes) and removed once that generation finishes — nothing is written that outlives the request.
 
 ### `POST /v1/images/generations`
@@ -241,7 +268,7 @@ A genuine [OpenAI Images API](https://platform.openai.com/docs/api-reference/ima
 |---|---|---|---|
 | `prompt` | string | required | |
 | `model` | string | required | must equal the loaded model's key (see `model.name` on [`/health`](#get-health)) — one model runs per process, so this is validated, not routed on; a mismatch is a 400 naming what's actually loaded |
-| `size` | string | `"1024x1024"` | `"<width>x<height>"`, both divisible by 8; `"auto"` maps to `1024x1024` |
+| `size` | string | `"1024x1024"` | `"<width>x<height>"`, both ideally divisible by 16 (see [`width`](#post-mfluxiblev1imagesgenerations)); `"auto"` maps to `1024x1024` |
 | `n` | int | 1 | must be 1 — a 400 otherwise, rather than silently generating just one |
 | `response_format` | string | `"b64_json"` | only `"b64_json"` is supported — a 400 for `"url"`, since this server doesn't host images |
 | `stream` | bool | false | |

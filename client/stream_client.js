@@ -159,17 +159,23 @@ async function main() {
       out: { type: "string", default: "output.png" },
       image: { type: "string", help: "input image path, for image-to-image" },
       "image-strength": { type: "string" },
+      "fractional-start": { type: "boolean", default: false },
     },
   });
 
   const prompt = positionals[0];
   if (!prompt) {
-    console.error("usage: stream_client.js <prompt> [--url URL] [--width N] [--height N] [--steps N] [--seed N] [--guidance F] [--negative-prompt TEXT] [--preview-every N] [--out FILE] [--image PATH] [--image-strength F]");
+    console.error("usage: stream_client.js <prompt> [--url URL] [--width N] [--height N] [--steps N] [--seed N] [--guidance F] [--negative-prompt TEXT] [--preview-every N] [--out FILE] [--image PATH] [--image-strength F] [--fractional-start]");
     process.exit(1);
   }
 
   if (values["image-strength"] !== undefined && values.image === undefined) {
     console.error("error: --image-strength requires --image");
+    process.exit(1);
+  }
+
+  if (values["fractional-start"] && values.image === undefined) {
+    console.error("error: --fractional-start requires --image");
     process.exit(1);
   }
 
@@ -188,6 +194,10 @@ async function main() {
     // Server default (0.4) applies if --image is given without --image-strength.
     image: values.image !== undefined ? fs.readFileSync(values.image).toString("base64") : null,
     image_strength: values["image-strength"] !== undefined ? Number(values["image-strength"]) : null,
+    // Without this, image_strength only reaches the model as an int (1/steps
+    // granularity); with it, the noise level lands exactly where the strength asks,
+    // at the same step count and speed.
+    fractional_start: values["fractional-start"],
   };
 
   await postSSE(values.url, body, (event) => handleEvent(event, values.out));

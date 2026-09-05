@@ -40,6 +40,7 @@ from mflux.models.common.vae.vae_util import VAEUtil
 from mflux.utils.image_util import ImageUtil
 
 from models import ModelSpec, resolve
+from schedulers import SCHEDULER_PATH, start_fraction
 from schemas import GenerateRequest
 
 _DONE = object()
@@ -129,16 +130,54 @@ def _encode_final_png_with_metadata(image) -> bytes:
 class _StreamCallback:
     """One-shot InLoopCallback: registered for a single generation, then discarded."""
 
-    def __init__(self, engine: "MfluxEngine", preview_every: int, emit):
+    def __init__(self, engine: "MfluxEngine", preview_every: int, emit, fractional_start: bool = False):
         self.engine = engine
         self.preview_every = preview_every
         self.emit = emit
+        self.fractional_start = fractional_start
         self.start_ts = 0.0
         self.last_ts = 0.0
 
     def call_before_loop(self, seed, prompt, latents, config, **kwargs):
         self.start_ts = self.last_ts = time.monotonic()
-        self.emit({"type": "start", "seed": seed, "total_steps": config.num_inference_steps})
+        # Image-to-image doesn't start the denoising loop at step 0: mflux noises the
+        # input image to the sigma partway down the schedule and starts there, so the
+        # first `thinking` event is step start_step + 1 and only total_steps -
+        # start_step steps ever run (mflux.models.common.config.config.Config --
+        # init_time_step, and time_steps = range(init_time_step, num_inference_steps)).
+        # Without this the client has no way to tell a skipped step from a slow one,
+        # and progress against total_steps alone starts partway along.
+        start_step = config.init_time_step
+        fraction = (
+            start_fraction(config.num_inference_steps, config.image_strength, start_step)
+            if self.fractional_start
+            else 0.0
+        )
+        self.emit(
+            {
+                "type": "start",
+                "seed": seed,
+                "total_steps": config.num_inference_steps,
+                "start_step": start_step,
+                # init_time_step is an int, so image_strength is normally quantized to
+                # 1/steps before it reaches the model: at 9 steps, 0.35 and 0.4 both
+                # floor to 3 and generate identical pixels for the same seed. Reporting
+                # the bucket the request actually landed in makes that visible instead
+                # of leaving a nudged slider looking like it was ignored. This is the
+                # bucket's lower edge (start_step / total_steps), which is exact as a
+                # fraction but a hair below it as a float -- feeding it back verbatim
+                # can floor to the next bucket down, so it's for display, not for
+                # round-tripping. With fractional_start the quantization is gone and
+                # this reports the strength that actually took effect, which is the
+                # requested one except where schedulers.start_fraction documents a
+                # clamp -- computed through that same helper so the two can't disagree.
+                "effective_image_strength": (
+                    (start_step + fraction) / config.num_inference_steps
+                    if config.image_path is not None
+                    else None
+                ),
+            }
+        )
 
     def call_in_loop(self, t, seed, prompt, latents, config, time_steps):
         # MLX is lazy, so this callback fires *before* step t has actually been
@@ -312,6 +351,8 @@ class MfluxEngine:
             if req.image_strength is not None and not (0.0 <= req.image_strength <= 1.0):
                 raise ValueError("image_strength must be between 0.0 and 1.0.")
             _decode_input_image(req.image)
+        elif req.fractional_start:
+            raise ValueError("fractional_start requires image to also be set.")
 
     def _generation_kwargs(self, req: GenerateRequest) -> dict:
         """Per-request knobs that only some models can act on.
@@ -345,7 +386,7 @@ class MfluxEngine:
         seed = req.seed if req.seed is not None else random.randint(0, 2**32 - 1)
         steps = req.steps if req.steps is not None else self.spec.default_steps
         kwargs = self._generation_kwargs(req)
-        callback = _StreamCallback(self, req.preview_every, emit)
+        callback = _StreamCallback(self, req.preview_every, emit, fractional_start=req.fractional_start)
 
         # mflux's image_path wants an actual file on disk, not bytes or a PIL.Image (see
         # _decode_input_image) -- written up front, outside the lock, since encoding a
@@ -361,6 +402,11 @@ class MfluxEngine:
                 f.write(image_bytes)
             kwargs["image_path"] = tmp_image_path
             kwargs["image_strength"] = req.image_strength if req.image_strength is not None else DEFAULT_IMAGE_STRENGTH
+            if req.fractional_start:
+                # A dotted path mflux imports, never built from request data -- see
+                # SCHEDULER_PATH's comment. Passed only when asked for, so an ordinary
+                # request keeps whatever scheduler the variant picks for itself.
+                kwargs["scheduler"] = SCHEDULER_PATH
 
         try:
             # Only one generation at a time: MLX/Metal + the shared callback list on
