@@ -2,15 +2,40 @@
 
 ## Layout
 
-`server/` (server.py, engine.py, models.py, schemas.py, chat_stub.py, requirements.txt) is the model + HTTP API. `client/` (stream_client.py, stream_client.js, harness.html, mcp_server.py, requirements.txt, requirements-mcp.txt) is everything that talks to it over HTTP. They're independent dependency-wise -- installing one's requirements.txt doesn't pull in the other's. server.py/engine.py/models.py/schemas.py/chat_stub.py import each other as flat sibling modules (`from engine import ...`), not a package, so `server/` must stay on `sys.path` when running (e.g. `uvicorn server:app --app-dir server`) -- don't add an `__init__.py` or turn this into a `server.*` package without updating those imports and the run command together.
+`server/` (server.py, engine.py, models.py, schemas.py, chat_stub.py, requirements.txt) is the model + HTTP API. `clients/` (stream_client.py, stream_client.js, harness.html, mcp_server.py, requirements.txt, requirements-mcp.txt) is everything that talks to it over HTTP. They're independent dependency-wise -- installing one's requirements.txt doesn't pull in the other's. server.py/engine.py/models.py/schemas.py/chat_stub.py import each other as flat sibling modules (`from engine import ...`), not a package, so `server/` must stay on `sys.path` when running (e.g. `uv run uvicorn server:app --app-dir server`) -- don't add an `__init__.py` or turn this into a `server.*` package without updating those imports and the run command together.
+
+## uv, but with requirements.txt files -- deliberately not a uv project
+
+Setup is `uv venv --python 3.11`, `uv pip install -r <one of the requirements files>`, and
+`uv run <cmd>`; CI skips the venv entirely with `uv pip install --system`
+(`.github/workflows/tests.yml`). There is intentionally **no `pyproject.toml` and no
+`uv.lock`**, so `uv sync` is not the entry point here. Adding one would fold the four
+separate dependency sets -- `server/requirements.txt`, `clients/requirements.txt`,
+`clients/requirements-mcp.txt`, `requirements-dev.txt` -- into a single resolution, and
+those files staying separate is exactly what the Layout note above is protecting: a
+client-only or MCP-only install must never drag in mflux/PyTorch, and a machine running
+only the terminal client should need nothing but `requests`.
+
+`uv run` works fine outside a project: with no `pyproject.toml` it falls back to `./.venv`,
+so `uv run pytest` and `uv run clients/stream_client.py ...` pick up whatever was installed
+there without an `activate` step (verified against uv 0.12.9, not assumed). The MCP
+registration examples in `docs/mcp.md` hardcode `/path/to/mfluxible/.venv/bin/python`
+because Claude Desktop launches stdio servers with a minimal environment -- that path is
+the venv `uv venv` creates, so it stays correct under uv.
 
 ## API changes
 
-Always update `README.md` when changing the API (endpoints, request/response shapes, SSE event schema).
+Always update `docs/api.md` when changing the API (endpoints, request/response shapes, SSE event
+schema). `README.md` is only an overview + quickstart + index into `docs/`; the rest of the prose
+lives in four pages there, split by who the reader is rather than by topic: `server.md` (running
+the server -- how it works, its env vars, the models, remote hosting, troubleshooting),
+`clients.md` (the terminal scripts, the browser harness, OpenAI-compatible frontends), `mcp.md`
+(the MCP tool, including its own env vars) and `api.md`, plus `testing.md`. So a server env var
+goes in `server.md` and an MCP one in `mcp.md`, even though both are "configuration".
 
 ## mflux is a fast-moving dependency
 
-`server/engine.py` reaches into mflux internals that aren't public API: `model.callbacks.before_loop/in_loop/interrupt` are mutated directly, since `CallbackRegistry` has no `unregister()` as of mflux 0.19.1. The VAE-decode branching in `_decode_preview_b64` mirrors mflux's own `StepwiseHandler` on purpose, with one deliberate deviation: the non-packed branch goes through `VAEUtil.decode` rather than calling `vae.decode()` directly the way `StepwiseHandler` does. Qwen-Image's VAE is a 3D (video) decoder returning `(B, C, 1, H, W)` and `ImageUtil.to_image` wants 4D — `VAEUtil.decode` is what drops the singleton frame axis, and it's the same call each variant's own final decode makes, so previews and final images stay on identical handling. Calling `vae.decode()` bare here works for Z-Image and FLUX and breaks only on Qwen previews. If `pip install -U mflux` breaks this file, check `mflux/callbacks/callback_registry.py` and `mflux/callbacks/instances/stepwise_handler.py` in the installed package first — that's where this was reverse-engineered from (mflux ships no public docs for the callback system).
+`server/engine.py` reaches into mflux internals that aren't public API: `model.callbacks.before_loop/in_loop/interrupt` are mutated directly, since `CallbackRegistry` has no `unregister()` as of mflux 0.19.1. The VAE-decode branching in `_decode_preview_b64` mirrors mflux's own `StepwiseHandler` on purpose, with one deliberate deviation: the non-packed branch goes through `VAEUtil.decode` rather than calling `vae.decode()` directly the way `StepwiseHandler` does. Qwen-Image's VAE is a 3D (video) decoder returning `(B, C, 1, H, W)` and `ImageUtil.to_image` wants 4D — `VAEUtil.decode` is what drops the singleton frame axis, and it's the same call each variant's own final decode makes, so previews and final images stay on identical handling. Calling `vae.decode()` bare here works for Z-Image and FLUX and breaks only on Qwen previews. If `uv pip install -U mflux` breaks this file, check `mflux/callbacks/callback_registry.py` and `mflux/callbacks/instances/stepwise_handler.py` in the installed package first — that's where this was reverse-engineered from (mflux ships no public docs for the callback system).
 
 ## server/schedulers.py depends on mflux conditioning the model on sigmas, not on the step index
 
@@ -57,11 +82,11 @@ that part isn't expected to need chasing the way the tool name might.
 
 ## mcp SDK also moved fast: FastMCP -> MCPServer
 
-`client/mcp_server.py` targets `mcp` 2.x, where `mcp.server.fastmcp.FastMCP` (the commonly-documented v1 API) was renamed to `mcp.server.mcpserver.MCPServer`. Importing the old path raises a `ModuleNotFoundError` with a migration pointer, it doesn't just silently break — if that happens, you're looking at v1-flavored example code (`FastMCP(...)`) against a v2 install. `Context`, `Image`, and the `@server.tool()` decorator are all still there, just re-exported from `mcp.server.mcpserver` instead.
+`clients/mcp_server.py` targets `mcp` 2.x, where `mcp.server.fastmcp.FastMCP` (the commonly-documented v1 API) was renamed to `mcp.server.mcpserver.MCPServer`. Importing the old path raises a `ModuleNotFoundError` with a migration pointer, it doesn't just silently break — if that happens, you're looking at v1-flavored example code (`FastMCP(...)`) against a v2 install. `Context`, `Image`, and the `@server.tool()` decorator are all still there, just re-exported from `mcp.server.mcpserver` instead.
 
 ## Progress notifications do not reliably hold a host's tool-call timeout open
 
-This is why `client/mcp_server.py` runs generation in a background task and hands back a
+This is why `clients/mcp_server.py` runs generation in a background task and hands back a
 `check_image` handle instead of just blocking. Measured 2026-08-31 against a live Claude
 Code session: a `generate_image` call died at ~60s with the MCP SDK's default
 `Request timed out` while the server was sending a progress notification every ~8s. The

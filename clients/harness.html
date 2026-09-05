@@ -465,6 +465,10 @@ function handleEvent(event) {
       finalImg.src = dataUrl;
       downloadLink.href = dataUrl;
       finalWrap.classList.remove("hidden");
+      // The final image supersedes the last preview of the same generation, so
+      // drop the preview rather than leaving a lower-fidelity duplicate on screen.
+      previewWrap.classList.add("hidden");
+      previewImg.removeAttribute("src");
       log(`done (seed=${event.seed}, ${event.generation_time.toFixed(1)}s)`);
       lastResultB64 = event.data;
       useLastBtn.disabled = false;

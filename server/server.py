@@ -82,10 +82,10 @@ app.add_middleware(
 )
 
 
-# server/ and client/ live in the same repo checkout but stay dependency-independent
+# server/ and clients/ live in the same repo checkout but stay dependency-independent
 # (see CLAUDE.md) -- this reaches across that boundary only to serve a static file, not
 # to import anything, so it doesn't compromise that separation.
-HARNESS_PATH = Path(__file__).resolve().parent.parent / "client" / "harness.html"
+HARNESS_PATH = Path(__file__).resolve().parent.parent / "clients" / "harness.html"
 
 
 @app.get("/harness.html")
