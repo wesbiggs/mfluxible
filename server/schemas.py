@@ -32,6 +32,29 @@ class GenerateRequest(BaseModel):
         description="Decode and include an in-progress preview image every N steps. 0 disables previews.",
     )
     stream: bool = True
+    image: str | None = Field(
+        default=None,
+        description=(
+            "Base64-encoded input image (no data: URI prefix), for image-to-image. Loaded, "
+            "scaled to width/height, and blended with noise per image_strength before the "
+            "first denoising step -- every model this server can run accepts it, since mflux's "
+            "ZImage/Flux1/QwenImage generate_image() all share this parameter. Must be paired "
+            "with image_strength; rejected with a 400 if it isn't valid base64 or isn't a "
+            "decodable image."
+        ),
+    )
+    image_strength: float | None = Field(
+        default=None,
+        description=(
+            "How strongly the input image constrains the output, in [0.0, 1.0] -- mflux's own "
+            "convention, which is the *inverse* of some other img2img tools' 'denoising "
+            "strength': 0.0 means the image has no influence (equivalent to plain text-to-image); "
+            "1.0 means maximum influence, which can mean very few or even zero denoising steps "
+            "actually run, so the output stays close to the input. Only meaningful, and only "
+            "accepted, alongside image; defaults to 0.4 (mflux's own CLI default) when image is "
+            "set and this is omitted."
+        ),
+    )
 
 
 class OpenAIImageGenerationRequest(BaseModel):

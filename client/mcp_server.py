@@ -340,9 +340,11 @@ async def generate_image(
     seed: int | None = None,
     guidance: float | None = None,
     negative_prompt: str | None = None,
+    image_path: str | None = None,
+    image_strength: float | None = None,
     ctx: Context | None = None,
 ) -> list[TextContent | ImageContent]:
-    """Generate an image from a text prompt.
+    """Generate an image from a text prompt, optionally seeded from an existing image.
 
     Which model runs is the server's choice, not this tool's: Z-Image-Turbo by
     default, or FLUX.1-schnell, FLUX.1-dev or Qwen-Image if it was started that way.
@@ -357,6 +359,15 @@ async def generate_image(
     width/height must be divisible by 8. Generation time scales with pixel count and
     can take minutes, so prefer the defaults unless the user asks for a specific size.
     Leave seed unset for a random one.
+
+    image_path is a local file path (read from disk, not a URL) to an image-to-image
+    input -- unlike guidance/negative_prompt, every model this server can run accepts
+    it. image_strength (0.0-1.0, only meaningful alongside image_path, default 0.4)
+    follows mflux's own convention, which is the *inverse* of the "denoising strength"
+    used by tools like Stable Diffusion/A1111: HIGHER means the input image constrains
+    the output MORE (closer to unchanged, possibly with few or even zero denoising
+    steps actually run), and 0.0 means the image has no influence at all (plain
+    text-to-image). Don't assume the opposite-convention meaning.
 
     Returns the image directly if it finishes quickly. Otherwise it returns a handle
     and keeps generating in the background: call check_image with that handle to
@@ -376,6 +387,17 @@ async def generate_image(
             raise ToolError(
                 f"{info.get('label', 'this model')} has no negative-prompt branch; omit the negative_prompt argument."
             )
+
+    image_b64 = None
+    if image_path is not None:
+        if image_strength is not None and not (0.0 <= image_strength <= 1.0):
+            raise ToolError("image_strength must be between 0.0 and 1.0.")
+        try:
+            image_b64 = base64.b64encode(Path(image_path).expanduser().read_bytes()).decode("ascii")
+        except OSError as exc:
+            raise ToolError(f"could not read image_path {image_path!r}: {exc}")
+    elif image_strength is not None:
+        raise ToolError("image_strength requires image_path to also be set.")
 
     _prune_jobs()
     job = _Job(
@@ -400,6 +422,8 @@ async def generate_image(
                 "negative_prompt": negative_prompt,
                 "preview_every": 0,
                 "stream": True,
+                "image": image_b64,
+                "image_strength": image_strength,
             },
         )
     )

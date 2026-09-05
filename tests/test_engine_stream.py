@@ -5,6 +5,7 @@ encoding, all without a real model or GPU work.
 
 import base64
 import io
+import os
 
 import pytest
 from PIL import Image
@@ -80,6 +81,37 @@ async def test_no_preview_key_when_preview_every_is_zero(toy_engine):
     events = await _collect(toy_engine, req)
     thinking = [e for e in events if e["type"] == "thinking"]
     assert all("preview" not in e for e in thinking)
+
+
+def _b64_png(size=(8, 8), color=(0, 255, 0)) -> str:
+    buf = io.BytesIO()
+    Image.new("RGB", size, color).save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+async def test_image_to_image_passes_a_real_file_and_gets_cleaned_up(toy_engine):
+    req = GenerateRequest(
+        prompt="a cat", width=32, height=32, steps=2, image=_b64_png(), image_strength=0.7
+    )
+    events = await _collect(toy_engine, req)
+    assert events[-1]["type"] == "image"
+
+    # ToyModel recorded what engine.py actually handed to generate_image(): a real
+    # file that existed while generation was running (see toy_model.py), and the
+    # image_strength from the request passed straight through.
+    assert toy_engine.model.last_image_path is not None
+    assert toy_engine.model.last_image_path_existed is True
+    assert toy_engine.model.last_image_strength == 0.7
+
+    # engine.py's finally block must have removed the temp file once generation
+    # finished -- it must not leak one input-image temp file per request.
+    assert not os.path.exists(toy_engine.model.last_image_path)
+
+
+async def test_image_to_image_defaults_strength_when_omitted(toy_engine):
+    req = GenerateRequest(prompt="a cat", width=16, height=16, steps=1, image=_b64_png())
+    await _collect(toy_engine, req)
+    assert toy_engine.model.last_image_strength == 0.4  # engine.DEFAULT_IMAGE_STRENGTH
 
 
 async def test_check_request_failure_propagates_before_any_event(toy_engine):

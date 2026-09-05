@@ -157,12 +157,19 @@ async function main() {
       "negative-prompt": { type: "string" },
       "preview-every": { type: "string", default: "0" },
       out: { type: "string", default: "output.png" },
+      image: { type: "string", help: "input image path, for image-to-image" },
+      "image-strength": { type: "string" },
     },
   });
 
   const prompt = positionals[0];
   if (!prompt) {
-    console.error("usage: stream_client.js <prompt> [--url URL] [--width N] [--height N] [--steps N] [--seed N] [--guidance F] [--negative-prompt TEXT] [--preview-every N] [--out FILE]");
+    console.error("usage: stream_client.js <prompt> [--url URL] [--width N] [--height N] [--steps N] [--seed N] [--guidance F] [--negative-prompt TEXT] [--preview-every N] [--out FILE] [--image PATH] [--image-strength F]");
+    process.exit(1);
+  }
+
+  if (values["image-strength"] !== undefined && values.image === undefined) {
+    console.error("error: --image-strength requires --image");
     process.exit(1);
   }
 
@@ -176,6 +183,11 @@ async function main() {
     negative_prompt: values["negative-prompt"] ?? null,
     preview_every: Number(values["preview-every"]),
     stream: true,
+    // mflux's own convention (not the inverse used by some other img2img tools):
+    // higher image_strength means the image constrains the output MORE, not less.
+    // Server default (0.4) applies if --image is given without --image-strength.
+    image: values.image !== undefined ? fs.readFileSync(values.image).toString("base64") : null,
+    image_strength: values["image-strength"] !== undefined ? Number(values["image-strength"]) : null,
   };
 
   await postSSE(values.url, body, (event) => handleEvent(event, values.out));

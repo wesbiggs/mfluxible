@@ -25,6 +25,7 @@ import argparse
 import base64
 import json
 import sys
+from pathlib import Path
 
 import requests
 
@@ -71,7 +72,22 @@ def main() -> None:
     parser.add_argument("--negative-prompt", default=None, help="Qwen-Image only")
     parser.add_argument("--preview-every", type=int, default=0, help="0 disables in-progress previews")
     parser.add_argument("--out", default="output.png")
+    parser.add_argument("--image", default=None, help="input image path, for image-to-image")
+    parser.add_argument(
+        "--image-strength",
+        type=float,
+        default=None,
+        help=(
+            "0.0-1.0, only with --image; mflux's own convention (not the inverse used by some "
+            "other img2img tools): higher means the image constrains the output MORE, not less. "
+            "Server default (0.4) applies if --image is given without this."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.image_strength is not None and args.image is None:
+        print("error: --image-strength requires --image", file=sys.stderr)
+        sys.exit(1)
 
     body = {
         "prompt": args.prompt,
@@ -83,6 +99,8 @@ def main() -> None:
         "negative_prompt": args.negative_prompt,
         "preview_every": args.preview_every,
         "stream": True,
+        "image": base64.b64encode(Path(args.image).read_bytes()).decode("ascii") if args.image else None,
+        "image_strength": args.image_strength,
     }
 
     with requests.post(args.url, json=body, stream=True) as resp:

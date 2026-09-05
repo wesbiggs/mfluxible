@@ -46,6 +46,11 @@ _DONE = object()
 
 DEFAULT_MODEL_CACHE_DIR = Path(os.environ.get("MFLUXIBLE_MODEL_DIR", "~/.cache/mfluxible")).expanduser()
 
+# mflux's own CLI default (mflux.cli.defaults.defaults.IMAGE_STRENGTH), applied here when
+# a client sends `image` without `image_strength` -- not copied from mflux.cli itself,
+# same reasoning as ModelSpec.default_steps in models.py: that module is CLI-internal.
+DEFAULT_IMAGE_STRENGTH = 0.4
+
 # MLX holds on to buffers it has freed so it can reuse them instead of asking
 # Metal for new ones. That cache is reclaimable, but it still counts toward the
 # process's memory footprint, and on a machine where the model already fills most
@@ -80,6 +85,27 @@ def _pil_to_b64_png(img: Image.Image) -> str:
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _decode_input_image(b64_data: str) -> bytes:
+    """Decodes and validates a client-supplied base64 input image, raising ValueError
+    (never a bare base64/Pillow exception) on bad input. Called from check_request so a
+    garbled `image` field gets the same clean 400 a bad guidance/negative_prompt request
+    gets rather than surfacing as an opaque error mid-stream; called again in
+    generate_stream to get the actual bytes to write to disk (see mflux's own image_path
+    parameter -- it wants a file path, not bytes or a PIL.Image, so there's no way to hand
+    it a decoded image directly). The redundant decode is cheap next to a generation.
+    """
+    try:
+        raw = base64.b64decode(b64_data, validate=True)
+    except Exception as exc:
+        raise ValueError(f"image is not valid base64: {exc}") from exc
+    try:
+        with Image.open(io.BytesIO(raw)) as img:
+            img.verify()
+    except Exception as exc:
+        raise ValueError(f"image could not be decoded as an image: {exc}") from exc
+    return raw
 
 
 def _encode_final_png_with_metadata(image) -> bytes:
@@ -280,6 +306,12 @@ class MfluxEngine:
             raise ValueError(f"{self.spec.label} ignores guidance (it is guidance-distilled); omit the field.")
         if req.negative_prompt is not None and not self.spec.supports_negative_prompt:
             raise ValueError(f"{self.spec.label} has no negative-prompt branch; omit the field.")
+        if req.image_strength is not None and req.image is None:
+            raise ValueError("image_strength requires image to also be set.")
+        if req.image is not None:
+            if req.image_strength is not None and not (0.0 <= req.image_strength <= 1.0):
+                raise ValueError("image_strength must be between 0.0 and 1.0.")
+            _decode_input_image(req.image)
 
     def _generation_kwargs(self, req: GenerateRequest) -> dict:
         """Per-request knobs that only some models can act on.
@@ -315,62 +347,81 @@ class MfluxEngine:
         kwargs = self._generation_kwargs(req)
         callback = _StreamCallback(self, req.preview_every, emit)
 
-        # Only one generation at a time: MLX/Metal + the shared callback list on
-        # self.model aren't set up for concurrent generate_image() calls.
-        async with self._lock:
-            self.model.callbacks.before_loop.append(callback)
-            self.model.callbacks.in_loop.append(callback)
-            self.model.callbacks.interrupt.append(callback)
+        # mflux's image_path wants an actual file on disk, not bytes or a PIL.Image (see
+        # _decode_input_image) -- written up front, outside the lock, since encoding a
+        # few hundred KB doesn't need it. Removed in the outer finally below, which only
+        # runs once the generation thread is confirmed done with it (see that finally's
+        # own comment on why it must wait for `task`).
+        tmp_image_path: str | None = None
+        if req.image is not None:
+            image_bytes = _decode_input_image(req.image)
+            fd, tmp_image_path = tempfile.mkstemp(suffix=".input-image")
+            os.close(fd)
+            with open(tmp_image_path, "wb") as f:
+                f.write(image_bytes)
+            kwargs["image_path"] = tmp_image_path
+            kwargs["image_strength"] = req.image_strength if req.image_strength is not None else DEFAULT_IMAGE_STRENGTH
 
-            def run():
+        try:
+            # Only one generation at a time: MLX/Metal + the shared callback list on
+            # self.model aren't set up for concurrent generate_image() calls.
+            async with self._lock:
+                self.model.callbacks.before_loop.append(callback)
+                self.model.callbacks.in_loop.append(callback)
+                self.model.callbacks.interrupt.append(callback)
+
+                def run():
+                    try:
+                        return self.model.generate_image(
+                            seed=seed,
+                            prompt=req.prompt,
+                            num_inference_steps=steps,
+                            width=req.width,
+                            height=req.height,
+                            **kwargs,
+                        )
+                    finally:
+                        emit({"type": _DONE})
+
+                # run_in_executor submits to the executor immediately and returns a Future
+                # (not a coroutine) -- no create_task() wrapper needed or valid here.
+                task = loop.run_in_executor(self._executor, run)
                 try:
-                    return self.model.generate_image(
-                        seed=seed,
-                        prompt=req.prompt,
-                        num_inference_steps=steps,
-                        width=req.width,
-                        height=req.height,
-                        **kwargs,
-                    )
+                    while True:
+                        item = await queue.get()
+                        if item.get("type") is _DONE:
+                            break
+                        yield item
+
+                    image = await task
+                    yield {
+                        "type": "image",
+                        "mime_type": "image/png",
+                        "data": base64.b64encode(_encode_final_png_with_metadata(image)).decode("ascii"),
+                        "seed": seed,
+                        "generation_time": image.generation_time,
+                    }
+                except Exception as exc:
+                    yield {"type": "error", "message": str(exc)}
                 finally:
-                    emit({"type": _DONE})
-
-            # run_in_executor submits to the executor immediately and returns a Future
-            # (not a coroutine) -- no create_task() wrapper needed or valid here.
-            task = loop.run_in_executor(self._executor, run)
-            try:
-                while True:
-                    item = await queue.get()
-                    if item.get("type") is _DONE:
-                        break
-                    yield item
-
-                image = await task
-                yield {
-                    "type": "image",
-                    "mime_type": "image/png",
-                    "data": base64.b64encode(_encode_final_png_with_metadata(image)).decode("ascii"),
-                    "seed": seed,
-                    "generation_time": image.generation_time,
-                }
-            except Exception as exc:
-                yield {"type": "error", "message": str(exc)}
-            finally:
-                # mflux has no way to interrupt generate_image() from outside the
-                # thread it's running on (its only interrupt path is a literal
-                # KeyboardInterrupt on the server process, not a client hangup) --
-                # so if we're getting here early (e.g. GeneratorExit from a
-                # disconnected client), the background thread is still running
-                # regardless. We must not unregister this callback, or let the
-                # lock above release, until that thread genuinely finishes:
-                # self.model.callbacks.in_loop is a single shared, unsynchronized
-                # list, and letting a new request start while an abandoned
-                # generation is still iterating it lets that zombie thread invoke
-                # the NEW request's callback and leak bogus events into its
-                # stream -- reproduced empirically, not just theoretical.
-                if not task.done():
-                    with contextlib.suppress(Exception):
-                        await task
-                self.model.callbacks.before_loop.remove(callback)
-                self.model.callbacks.in_loop.remove(callback)
-                self.model.callbacks.interrupt.remove(callback)
+                    # mflux has no way to interrupt generate_image() from outside the
+                    # thread it's running on (its only interrupt path is a literal
+                    # KeyboardInterrupt on the server process, not a client hangup) --
+                    # so if we're getting here early (e.g. GeneratorExit from a
+                    # disconnected client), the background thread is still running
+                    # regardless. We must not unregister this callback, or let the
+                    # lock above release, until that thread genuinely finishes:
+                    # self.model.callbacks.in_loop is a single shared, unsynchronized
+                    # list, and letting a new request start while an abandoned
+                    # generation is still iterating it lets that zombie thread invoke
+                    # the NEW request's callback and leak bogus events into its
+                    # stream -- reproduced empirically, not just theoretical.
+                    if not task.done():
+                        with contextlib.suppress(Exception):
+                            await task
+                    self.model.callbacks.before_loop.remove(callback)
+                    self.model.callbacks.in_loop.remove(callback)
+                    self.model.callbacks.interrupt.remove(callback)
+        finally:
+            if tmp_image_path is not None:
+                os.unlink(tmp_image_path)

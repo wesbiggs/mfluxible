@@ -14,6 +14,8 @@ def test_defaults():
     assert req.negative_prompt is None
     assert req.preview_every == 0
     assert req.stream is True
+    assert req.image is None
+    assert req.image_strength is None
 
 
 def test_prompt_is_required():

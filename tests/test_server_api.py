@@ -39,6 +39,132 @@ def test_generate_rejects_unsupported_guidance_with_a_400_before_streaming(clien
     assert resp.json()["type"] == "error"
 
 
+def _b64_png(size=(16, 16), color=(0, 0, 255)) -> str:
+    buf = io.BytesIO()
+    Image.new("RGB", size, color).save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def test_generate_image_to_image_non_streaming(client):
+    resp = client.post(
+        "/mfluxible/v1/images/generations",
+        json={
+            "prompt": "a cat",
+            "width": 32,
+            "height": 32,
+            "steps": 1,
+            "stream": False,
+            "image": _b64_png(),
+            "image_strength": 0.6,
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["type"] == "image"
+    image = Image.open(io.BytesIO(base64.b64decode(body["data"])))
+    assert image.size == (32, 32)
+
+
+def test_generate_rejects_image_strength_without_image_with_a_400(client):
+    resp = client.post(
+        "/mfluxible/v1/images/generations", json={"prompt": "a cat", "image_strength": 0.5}
+    )
+    assert resp.status_code == 400
+    assert resp.json()["type"] == "error"
+
+
+def test_generate_rejects_invalid_base64_image_with_a_400(client):
+    resp = client.post(
+        "/mfluxible/v1/images/generations", json={"prompt": "a cat", "image": "not!base64!!"}
+    )
+    assert resp.status_code == 400
+    assert resp.json()["type"] == "error"
+
+
+def _png_bytes(size=(16, 16), color=(0, 128, 255)) -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", size, color).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_openai_edit_non_streaming(client):
+    resp = client.post(
+        "/v1/images/edits",
+        data={"prompt": "a cat", "model": "toy-solid-color", "size": "32x32"},
+        files={"image": ("input.png", _png_bytes(), "image/png")},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "created" in body
+    image = Image.open(io.BytesIO(base64.b64decode(body["data"][0]["b64_json"])))
+    assert image.size == (32, 32)
+
+
+def test_openai_edit_accepts_image_strength_extension(client):
+    resp = client.post(
+        "/v1/images/edits",
+        data={"prompt": "a cat", "model": "toy-solid-color", "size": "16x16", "image_strength": "0.8"},
+        files={"image": ("input.png", _png_bytes(), "image/png")},
+    )
+    assert resp.status_code == 200
+
+
+def test_openai_edit_rejects_mask_with_a_400(client):
+    resp = client.post(
+        "/v1/images/edits",
+        data={"prompt": "a cat", "model": "toy-solid-color"},
+        files={
+            "image": ("input.png", _png_bytes(), "image/png"),
+            "mask": ("mask.png", _png_bytes(), "image/png"),
+        },
+    )
+    assert resp.status_code == 400
+    assert "mask" in resp.json()["error"]["message"]
+
+
+def test_openai_edit_rejects_wrong_model_name(client):
+    resp = client.post(
+        "/v1/images/edits",
+        data={"prompt": "a cat", "model": "not-the-loaded-model"},
+        files={"image": ("input.png", _png_bytes(), "image/png")},
+    )
+    assert resp.status_code == 400
+    assert "not-the-loaded-model" in resp.json()["error"]["message"]
+
+
+def test_openai_edit_rejects_n_greater_than_1(client):
+    resp = client.post(
+        "/v1/images/edits",
+        data={"prompt": "a cat", "model": "toy-solid-color", "n": "2"},
+        files={"image": ("input.png", _png_bytes(), "image/png")},
+    )
+    assert resp.status_code == 400
+
+
+def test_openai_edit_rejects_malformed_base64_image_strength_range(client):
+    resp = client.post(
+        "/v1/images/edits",
+        data={"prompt": "a cat", "model": "toy-solid-color", "image_strength": "5.0"},
+        files={"image": ("input.png", _png_bytes(), "image/png")},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["type"] == "invalid_request_error"
+
+
+def test_openai_edit_streaming_ends_with_completed_event(client):
+    with client.stream(
+        "POST",
+        "/v1/images/edits",
+        data={"prompt": "a cat", "model": "toy-solid-color", "size": "16x16", "stream": "true"},
+        files={"image": ("input.png", _png_bytes(), "image/png")},
+    ) as resp:
+        assert resp.status_code == 200
+        events = [
+            json.loads(line[len("data: ") :]) for line in resp.iter_lines() if line.startswith("data: ")
+        ]
+    assert [e["type"] for e in events] == ["image_generation.completed"]
+
+
 def test_openai_list_models_shows_only_the_running_model(client):
     resp = client.get("/v1/models")
     assert resp.status_code == 200

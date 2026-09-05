@@ -4,6 +4,7 @@ One process runs one model, chosen at startup with MFLUXIBLE_MODEL (see models.p
 for the table). Weights are only fetched for the model actually selected.
 """
 
+import base64
 import json
 import os
 import time
@@ -11,7 +12,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import mlx.core as mx
-from fastapi import FastAPI
+from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
@@ -188,16 +189,25 @@ def _parse_openai_size(size: str) -> tuple[int, int]:
     return int(parts[0]), int(parts[1])
 
 
-def _openai_to_generate_request(req: OpenAIImageGenerationRequest) -> GenerateRequest:
-    width, height = _parse_openai_size(req.size)
+def _preview_every_from_partial_images(partial_images: int) -> int:
     # OpenAI's partial_images is a total count, not a stride -- approximated by
-    # spacing previews evenly across the model's default step count, since the OpenAI
-    # request shape has no `steps` field for a client to have overridden it with (see
-    # OpenAIImageGenerationRequest's docstring; `steps` is left unset below for the
+    # spacing previews evenly across the model's default step count, since neither
+    # OpenAI request shape below has a `steps` field for a client to have overridden it
+    # with (see OpenAIImageGenerationRequest's docstring; `steps` is left unset for the
     # same reason mfluxible's own bundled clients leave it null -- whichever model is
     # loaded picks its own default, see CLAUDE.md).
-    preview_every = max(1, engine.spec.default_steps // req.partial_images) if req.partial_images else 0
-    return GenerateRequest(prompt=req.prompt, width=width, height=height, preview_every=preview_every, stream=req.stream)
+    return max(1, engine.spec.default_steps // partial_images) if partial_images else 0
+
+
+def _openai_to_generate_request(req: OpenAIImageGenerationRequest) -> GenerateRequest:
+    width, height = _parse_openai_size(req.size)
+    return GenerateRequest(
+        prompt=req.prompt,
+        width=width,
+        height=height,
+        preview_every=_preview_every_from_partial_images(req.partial_images),
+        stream=req.stream,
+    )
 
 
 async def _openai_sse(req: GenerateRequest, created: int):
@@ -291,6 +301,90 @@ async def openai_generate(req: OpenAIImageGenerationRequest):
         gen_req = _openai_to_generate_request(req)
     except ValueError as exc:
         return _openai_error(400, str(exc))
+
+    try:
+        engine.check_request(gen_req)
+    except ValueError as exc:
+        return _openai_error(400, str(exc))
+
+    created = int(time.time())
+    if gen_req.stream:
+        return StreamingResponse(_openai_sse(gen_req, created), media_type="text/event-stream")
+
+    try:
+        final = await _collect_final_image(gen_req)
+    except RuntimeError as exc:
+        return _openai_error(500, str(exc), error_type="api_error")
+
+    return {"created": created, "data": [{"b64_json": final["data"]}]}
+
+
+# A genuine OpenAI Images-Edit-API-compatible endpoint (see
+# https://platform.openai.com/docs/api-reference/images/createEdit), for image-to-image
+# via an existing OpenAI-client-based tool. Multipart form data, like OpenAI's own --
+# not JSON, hence plain Form()/File() parameters here rather than a pydantic request
+# model the way every other endpoint uses one.
+#
+# This maps onto mflux's strength-based img2img (see README's "Image-to-image" section
+# on /mfluxible/v1/images/generations), not true masked inpainting: OpenAI's `mask`
+# selects a region to regenerate while leaving the rest untouched, and mflux has no
+# masked-region pipeline wired up here to honour that with, so `mask` is rejected with a
+# 400 if present rather than silently ignored (letting a caller believe only the masked
+# region changed, when actually the whole image was reinterpreted, would be worse than
+# refusing outright). `image_strength` isn't part of OpenAI's request shape at all, so
+# it's accepted as a non-standard extension the same way `partial_images` already is on
+# `POST /v1/images/generations` above -- mfluxible's own default (0.4) applies if it's
+# left out.
+@app.post("/v1/images/edits")
+async def openai_edit_image(
+    prompt: str = Form(...),
+    model: str = Form(...),
+    image: UploadFile = File(...),
+    mask: UploadFile | None = File(default=None),
+    n: int = Form(default=1),
+    size: str = Form(default="1024x1024"),
+    response_format: str = Form(default="b64_json"),
+    stream: bool = Form(default=False),
+    partial_images: int = Form(default=0, ge=0, le=3),
+    image_strength: float | None = Form(default=None),
+):
+    if model != engine.spec.key:
+        return _openai_error(
+            400,
+            f"model {model!r} is not loaded -- this server is running "
+            f"{engine.spec.key!r} ({engine.spec.label}); one model runs per process (see /health).",
+        )
+    if n != 1:
+        return _openai_error(400, "n must be 1 -- mfluxible generates one image per request.")
+    if response_format != "b64_json":
+        return _openai_error(
+            400,
+            f"response_format {response_format!r} is not supported -- only 'b64_json' is "
+            "(mfluxible does not host images for a 'url' response).",
+        )
+    if mask is not None:
+        return _openai_error(
+            400,
+            "mask is not supported -- mfluxible has no masked-region inpainting pipeline; "
+            "this endpoint does whole-image edits only, via mflux's strength-based "
+            "img2img (see the 'Image-to-image' section of README.md).",
+        )
+
+    try:
+        width, height = _parse_openai_size(size)
+    except ValueError as exc:
+        return _openai_error(400, str(exc))
+
+    image_bytes = await image.read()
+    gen_req = GenerateRequest(
+        prompt=prompt,
+        width=width,
+        height=height,
+        preview_every=_preview_every_from_partial_images(partial_images),
+        stream=stream,
+        image=base64.b64encode(image_bytes).decode("ascii"),
+        image_strength=image_strength,
+    )
 
     try:
         engine.check_request(gen_req)

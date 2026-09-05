@@ -23,6 +23,7 @@ registry entirely -- nothing in server/ needs to change to "register" this model
 
 from __future__ import annotations
 
+import os
 import random
 
 import mlx.core as mx
@@ -104,6 +105,12 @@ class ToyModel:
         self.lora_scales = lora_scales
         self.vae = _ToyVAE()
         self.callbacks = CallbackRegistry()
+        # Recorded by generate_image() below so tests can assert engine.py actually
+        # passed image_path/image_strength through (and that the path it passed existed
+        # on disk *at call time* -- see test_engine_stream.py).
+        self.last_image_path: str | None = None
+        self.last_image_strength: float | None = None
+        self.last_image_path_existed: bool | None = None
 
     def generate_image(
         self,
@@ -114,8 +121,17 @@ class ToyModel:
         height: int = 64,
         guidance: float | None = None,
         negative_prompt: str | None = None,
+        image_path: str | None = None,
+        image_strength: float | None = None,
         **_ignored,
     ):
+        self.last_image_path = image_path
+        self.last_image_strength = image_strength
+        if image_path is not None:
+            # Recorded now, not just the path string: engine.py's finally block unlinks
+            # this file once generate_image() returns, so "did the file exist while
+            # generate_image was actually running" can only be checked from in here.
+            self.last_image_path_existed = os.path.exists(image_path)
         config = Config(
             model_config=self.model_config,
             num_inference_steps=num_inference_steps,

@@ -53,6 +53,8 @@ node client/stream_client.js "a puffin on a cliff at sunset" --preview-every 2 -
 
 Both take `--steps`, `--seed`, `--guidance` and `--negative-prompt`, and leave all four to the server when you don't pass them — so `--steps` is only worth setting to override the loaded model's own default. `--guidance` and `--negative-prompt` are refused (with a message naming the model) on models that can't act on them; see [Models](#models).
 
+Both also take `--image PATH` for image-to-image (read from disk and base64-encoded, not a URL) and `--image-strength` (0.0–1.0, only valid alongside `--image`; the server's own default, 0.4, applies if you omit it) — see [Image-to-image](#image-to-image) for what `image_strength` actually controls (mflux's convention is the inverse of some other tools').
+
 Both render the exact full-resolution bytes returned by the server — no downscaling, no recompression, nothing client-side touches the image data. They use the iTerm2 inline-image protocol's chunked `MultipartFile` variant (also works in WezTerm; in an unsupported terminal the escape codes are just ignored, and the saved file and progress text still work either way), the same variant iTerm2's own [`imgcat`](https://github.com/gnachman/iTerm2-shell-integration/blob/master/utilities/imgcat) reference tool uses by default: the base64 payload is split into `FilePart=` sequences behind a metadata-only header and a `FileEnd` marker, rather than one giant `File=...:<base64>` sequence.
 
 This matters because iTerm2's own source caps how much data it'll accumulate for a *single* OSC escape sequence at 1,048,576 bytes ([`VT100XtermParser.m`](https://github.com/gnachman/iTerm2/blob/master/sources/VT100/VT100XtermParser.m)) — past that it truncates rather than cleanly dropping the sequence, which can corrupt what renders afterward too, not just fail to show the one image. Diffusion output is detailed/photographic content that a full-resolution PNG can realistically approach or cross that limit for. Chunking (500,000 bytes/chunk here — `imgcat`'s own 200-byte default exists specifically to survive tmux, which doesn't apply since neither script wraps for tmux) means no image, at any size or detail level, can hit that cap.
@@ -64,6 +66,8 @@ Not tmux-aware — iTerm2's protocol needs extra passthrough wrapping inside tmu
 ### Browser
 
 `client/harness.html` is a small, dependency-free page (plain HTML/CSS/JS, no build step) with a form for prompt/width/height/steps/seed/preview_every that calls the streaming endpoint directly from the browser via `fetch`, reads [`/health`](#get-health) on load to show which model the server is running (leaving Steps blank uses that model's default, and Guidance / Negative prompt appear only if it accepts them), parsing the SSE stream the same way the terminal clients do, and renders previews and the final image as `<img>` elements (via `data:` URLs) plus a download link for the final PNG.
+
+It also does image-to-image. Get a base image onto the page either by dragging an image file onto it from anywhere (drop targets are the whole page, not just the drop-zone box — that's just where the visual highlight and preview show up) or by clicking the drop zone to pick a file; or click **Use last result** to feed the most recently generated image straight back in as the next input, for chaining edits without a round trip through disk. **Clear image** drops back to plain text-to-image. The Image strength field controls how strongly that input constrains the output (default 0.4) — see [Image-to-image](#image-to-image) for what the number actually means; the page's own hint text is a reminder that it's the inverse of some other tools' "denoising strength".
 
 The server itself serves this page, at `GET /harness.html` — just open `http://localhost:8420/harness.html` (or whichever host/port `server.py` is bound to) once it's up. The Server URL field defaults to the relative path `/mfluxible/v1/images/generations`, which resolves against whatever origin served the page, so no configuration is needed for this same-origin case.
 
@@ -78,7 +82,9 @@ cd client && python3 -m http.server 8000
 
 ### MCP tool (generate images from within Claude)
 
-`client/mcp_server.py` exposes two tools over MCP's stdio transport: `generate_image(prompt, width, height, steps, seed, guidance, negative_prompt)`, which forwards each `thinking` step as an MCP progress update and returns the image as inline content, and `check_image(handle)`, which collects an image from a `generate_image` call that outlived its tool-call timeout (see below).
+`client/mcp_server.py` exposes two tools over MCP's stdio transport: `generate_image(prompt, width, height, steps, seed, guidance, negative_prompt, image_path, image_strength)`, which forwards each `thinking` step as an MCP progress update and returns the image as inline content, and `check_image(handle)`, which collects an image from a `generate_image` call that outlived its tool-call timeout (see below).
+
+`image_path` is a local file path (read from disk by the tool, not a URL) for image-to-image; `image_strength` (0.0–1.0, only meaningful alongside `image_path`, server default 0.4 if omitted) follows mflux's own convention — see [Image-to-image](#image-to-image) — which is the *inverse* of "denoising strength" in some other tools, so the tool's own docstring spells this out for the model calling it.
 
 ```bash
 pip install -r client/requirements-mcp.txt
@@ -134,7 +140,7 @@ Either way, if the server is on a different host/port, point the proxy at it wit
 
 ### OpenAI-compatible frontends
 
-None of the above are this — they're the bundled clients, and they all speak mfluxible's own native API. But `POST /v1/images/generations` (see [API](#api) below) is a genuine [OpenAI Images API](https://platform.openai.com/docs/api-reference/images/create)-compatible endpoint, so any tool built against that API can point at this server directly, with no code changes on its side. For example, [Open WebUI](https://docs.openwebui.com/features/chat-conversations/image-generation-and-editing/openai/)'s Settings → Admin → Images panel takes an arbitrary `IMAGES_OPENAI_API_BASE_URL` and a free-text model name — set the base URL to `http://127.0.0.1:8420/v1` and the model name to whatever `model.name` reports on [`/health`](#get-health) (e.g. `z-image-turbo`), and Open WebUI's own chat UI becomes a frontend for this server.
+None of the above are this — they're the bundled clients, and they all speak mfluxible's own native API. But `POST /v1/images/generations` and `POST /v1/images/edits` (see [API](#api) below) are genuine [OpenAI Images API](https://platform.openai.com/docs/api-reference/images/create)-compatible endpoints, so any tool built against that API can point at this server directly, with no code changes on its side. For example, [Open WebUI](https://docs.openwebui.com/features/chat-conversations/image-generation-and-editing/openai/)'s Settings → Admin → Images panel takes an arbitrary `IMAGES_OPENAI_API_BASE_URL` and a free-text model name — set the base URL to `http://127.0.0.1:8420/v1` and the model name to whatever `model.name` reports on [`/health`](#get-health) (e.g. `z-image-turbo`), and Open WebUI's own chat UI becomes a frontend for this server.
 
 Open WebUI's *Native* (agentic) mode also needs an actual chat model behind the connection to decide when to call the image tool — normally a separate LLM. If you'd rather not run one just for that, point Open WebUI's chat connection at mfluxible's own `POST /v1/chat/completions` (same base URL) too — see [that section](#post-v1chatcompletions) below for what it does and, importantly, doesn't do.
 
@@ -190,6 +196,8 @@ mfluxible's own, native endpoint — everything below (step-by-step `thinking` e
 | `negative_prompt` | string or null | unset | Qwen-Image only; a **400** elsewhere, for the same reason |
 | `preview_every` | int | 0 | decode and stream an in-progress preview every N steps; 0 disables previews. Each preview is a full VAE decode, so this trades speed for visibility |
 | `stream` | bool | true | SSE stream vs a single JSON response |
+| `image` | string or null | unset | base64-encoded input image (no `data:` URI prefix) for image-to-image. Accepted by every model this server can run — see [Image-to-image](#image-to-image) below |
+| `image_strength` | float or null | 0.4 if `image` is set | how strongly `image` constrains the output, `0.0`–`1.0`; only meaningful, and only accepted, alongside `image` — a **400** if set without it |
 
 ### Streaming response (`stream: true`, default)
 
@@ -215,7 +223,15 @@ The final image's PNG bytes (`data` on the `image` event) carry embedded metadat
 
 ### Non-streaming response (`stream: false`)
 
-Returns the same `image` event object as a single JSON body (or a 500 with the `error` object on failure). A request the configured model cannot honour — `guidance` or `negative_prompt` where it has no effect — is rejected up front with a 400 carrying the same `error` object, in both modes: for a stream that check has to happen before the first byte, since by then the status line is already sent.
+Returns the same `image` event object as a single JSON body (or a 500 with the `error` object on failure). A request the configured model cannot honour — `guidance` or `negative_prompt` where it has no effect, or `image_strength` without `image` — is rejected up front with a 400 carrying the same `error` object, in both modes: for a stream that check has to happen before the first byte, since by then the status line is already sent. A malformed `image` (not valid base64, or not a decodable image) gets the same 400 treatment.
+
+### Image-to-image
+
+Set `image` (and, optionally, `image_strength`) to seed generation from an existing image instead of pure noise, using mflux's own `image_path`/`image_strength` support. Unlike `guidance`/`negative_prompt`, this isn't model-specific — mflux's `ZImage`, `Flux1` and `QwenImage` all share the same `generate_image(image_path=..., image_strength=...)` parameters, so it works on every model this server can run, with no `/health` check needed first.
+
+`image_strength` follows **mflux's own convention, not the "denoising strength" convention** used by tools like Stable Diffusion/A1111/diffusers, where a *higher* value means *more* change from the input. mflux's is the other way round: it's how strongly the input image constrains the output. `0.0` means the image has no influence at all (equivalent to plain text-to-image); `1.0` means maximum influence, which can mean very few — or even zero — denoising steps actually run, so the output stays close to the input. The default, `0.4`, is a middle ground (and matches mflux's own CLI default). If you're used to the inverted convention, mentally flip the slider.
+
+The image is scaled to the request's `width`/`height` before use, so it need not match them. Internally, the base64 payload is decoded to a temp file for the duration of one generation (mflux's `image_path` wants an actual path, not bytes) and removed once that generation finishes — nothing is written that outlives the request.
 
 ### `POST /v1/images/generations`
 
@@ -250,6 +266,25 @@ data: {"type": "image_generation.completed", "b64_json": "<base64 png>", "create
 `partial_image` events only appear when `partial_images` > 0. The stream ends after `image_generation.completed` with no trailing `[DONE]` sentinel — OpenAI's own raw wire format for this isn't documented anywhere publicly to confirm one either way, so none is fabricated here.
 
 Errors use OpenAI's envelope rather than the native endpoint's: `{"error": {"message": "...", "type": "invalid_request_error", "param": null, "code": null}}`, with a 400 for a bad request (wrong `model`, `n != 1`, unsupported `response_format`, malformed `size`) and a 500 (`type: "api_error"`) if generation itself fails.
+
+### `POST /v1/images/edits`
+
+A genuine [OpenAI Images-Edit-API](https://platform.openai.com/docs/api-reference/images/createEdit)-compatible endpoint for image-to-image, so an existing OpenAI-client-based image-editing tool can point at this server unmodified. Unlike every other endpoint here, the request is `multipart/form-data`, not JSON — matching OpenAI's own request shape for this one.
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `prompt` | string (form field) | required | |
+| `model` | string (form field) | required | same validation as [`/v1/images/generations`](#post-v1imagesgenerations) |
+| `image` | file | required | the input image |
+| `mask` | file | — | **not supported** — a 400 if present, rather than silently ignored. mflux has no masked-region inpainting pipeline wired up here; this endpoint does whole-image edits only (see [Image-to-image](#image-to-image)), and a caller expecting only the masked region to change would otherwise get a silently wrong result |
+| `n` | int (form field) | 1 | same as `/v1/images/generations` |
+| `size` | string (form field) | `"1024x1024"` | same as `/v1/images/generations` |
+| `response_format` | string (form field) | `"b64_json"` | same as `/v1/images/generations` |
+| `stream` | bool (form field) | false | same SSE transport and event shape as `/v1/images/generations` |
+| `partial_images` | int (form field) | 0 | same as `/v1/images/generations` |
+| `image_strength` | float (form field) | 0.4 | **not part of OpenAI's request shape** — accepted as an extension the same way `partial_images` already is. See [Image-to-image](#image-to-image) for what it controls (mflux's convention, the inverse of some other tools') |
+
+Response shapes, streaming behavior, and the error envelope are all identical to [`/v1/images/generations`](#post-v1imagesgenerations) above.
 
 ### `GET /v1/models`
 

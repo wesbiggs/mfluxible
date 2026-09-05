@@ -52,6 +52,22 @@
   #finalWrap img { max-width: 100%; border-radius: 4px; display: block; }
   #finalWrap a { display: inline-block; margin-top: 0.5rem; font-size: 0.9rem; }
   .hidden { display: none; }
+  #dropZone {
+    border: 2px dashed #8888;
+    border-radius: 6px;
+    padding: 0.75rem;
+    text-align: center;
+    cursor: pointer;
+    font-size: 0.85rem;
+    opacity: 0.8;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  #dropZone.dragover { border-color: #2563eb; opacity: 1; background: #2563eb14; }
+  #dropZone img { max-width: 100%; max-height: 160px; border-radius: 4px; display: block; margin: 0 auto; }
+  .imgRow { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
+  .imgRow button { padding: 0.35rem 0.7rem; font-size: 0.85rem; background: #64748b; }
+  .imgRow label { flex: 1 0 auto; min-width: 8rem; }
+  .hint { font-size: 0.78rem; opacity: 0.65; margin: 0.15rem 0 0; }
 </style>
 </head>
 <body>
@@ -73,6 +89,21 @@
     <label>Steps <input type="number" id="steps" placeholder="model default"></label>
     <label>Seed <input type="number" id="seed" placeholder="random"></label>
   </div>
+  <label>Input image <span style="font-weight: normal; opacity: 0.7;">(optional &mdash; image-to-image)</span>
+    <div id="dropZone">
+      <img id="imagePreview" class="hidden" alt="input image preview">
+      <span id="dropZoneText">Drop an image anywhere on the page, or click to choose a file</span>
+    </div>
+  </label>
+  <input type="file" id="imageFileInput" accept="image/*" class="hidden">
+  <div class="imgRow">
+    <button type="button" id="useLastBtn" disabled>Use last result</button>
+    <button type="button" id="clearImageBtn" disabled>Clear image</button>
+    <label>Image strength
+      <input type="number" id="imageStrength" min="0" max="1" step="0.05" value="0.4">
+    </label>
+  </div>
+  <p class="hint">mflux's own convention (the inverse of some other img2img tools'): 0 = input image ignored (plain text-to-image); 1 = maximum influence, output stays close to the input.</p>
   <label id="guidanceWrap" class="hidden">Guidance
     <input type="number" id="guidance" step="0.1" placeholder="model default">
   </label>
@@ -107,6 +138,13 @@ const guidanceEl = document.getElementById("guidance");
 const guidanceWrap = document.getElementById("guidanceWrap");
 const negativeEl = document.getElementById("negativePrompt");
 const negativeWrap = document.getElementById("negativeWrap");
+const dropZone = document.getElementById("dropZone");
+const dropZoneText = document.getElementById("dropZoneText");
+const imagePreview = document.getElementById("imagePreview");
+const imageFileInput = document.getElementById("imageFileInput");
+const useLastBtn = document.getElementById("useLastBtn");
+const clearImageBtn = document.getElementById("clearImageBtn");
+const imageStrengthEl = document.getElementById("imageStrength");
 const submitBtn = document.getElementById("submitBtn");
 const logEl = document.getElementById("log");
 const previewWrap = document.getElementById("previewWrap");
@@ -125,6 +163,76 @@ function log(line) {
 // rejects them outright on a model that can't act on them). /health lives alongside
 // the generations endpoint, so it is derived from whatever URL is in the box.
 let modelInfo = null;
+
+// Bare base64 (no data: prefix) of the current image-to-image input, or null for
+// plain text-to-image -- what the API's `image` field wants. lastResultB64 is
+// updated on every successful generation so "Use last result" can chain edits
+// without a round trip through disk.
+let baseImageB64 = null;
+let lastResultB64 = null;
+
+function setBaseImage(b64, mimeType) {
+  baseImageB64 = b64;
+  imagePreview.src = `data:${mimeType};base64,${b64}`;
+  imagePreview.classList.remove("hidden");
+  dropZoneText.classList.add("hidden");
+  clearImageBtn.disabled = false;
+}
+
+function clearBaseImage() {
+  baseImageB64 = null;
+  imagePreview.src = "";
+  imagePreview.classList.add("hidden");
+  dropZoneText.classList.remove("hidden");
+  clearImageBtn.disabled = true;
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    // readAsDataURL's result is "data:<mime>;base64,<b64>" -- only the part after
+    // the first comma is the bare base64 the API wants.
+    reader.onload = () => resolve(reader.result.slice(reader.result.indexOf(",") + 1));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+async function handleImageFile(file) {
+  if (!file || !file.type.startsWith("image/")) {
+    log("error: that file doesn't look like an image");
+    return;
+  }
+  setBaseImage(await fileToBase64(file), file.type || "image/png");
+}
+
+dropZone.addEventListener("click", () => imageFileInput.click());
+imageFileInput.addEventListener("change", () => {
+  if (imageFileInput.files[0]) handleImageFile(imageFileInput.files[0]);
+  imageFileInput.value = ""; // so choosing the same file again still fires "change"
+});
+
+// Drag-and-drop works anywhere on the page, not just over the drop zone -- the
+// listeners have to live on the document (not dropZone) to catch that, with the
+// dropZone itself only used for the visual highlight and as the click target.
+document.addEventListener("dragover", (e) => {
+  e.preventDefault(); // otherwise the browser navigates to the dropped file
+  dropZone.classList.add("dragover");
+});
+document.addEventListener("dragleave", (e) => {
+  if (!e.relatedTarget) dropZone.classList.remove("dragover"); // left the window
+});
+document.addEventListener("drop", (e) => {
+  e.preventDefault();
+  dropZone.classList.remove("dragover");
+  const file = e.dataTransfer.files && e.dataTransfer.files[0];
+  if (file) handleImageFile(file);
+});
+
+useLastBtn.addEventListener("click", () => {
+  if (lastResultB64) setBaseImage(lastResultB64, "image/png");
+});
+clearImageBtn.addEventListener("click", clearBaseImage);
 
 function healthUrl(generationsUrl) {
   // Base against the page's own location so a relative Server URL (the default,
@@ -223,6 +331,8 @@ function handleEvent(event) {
       downloadLink.href = dataUrl;
       finalWrap.classList.remove("hidden");
       log(`done (seed=${event.seed}, ${event.generation_time.toFixed(1)}s)`);
+      lastResultB64 = event.data;
+      useLastBtn.disabled = false;
       break;
     }
     case "error":
@@ -257,6 +367,8 @@ form.addEventListener("submit", async (e) => {
     negative_prompt: negativeVal === "" ? null : negativeVal,
     preview_every: Number(document.getElementById("previewEvery").value),
     stream: true,
+    image: baseImageB64,
+    image_strength: baseImageB64 ? Number(imageStrengthEl.value) : null,
   };
 
   try {
