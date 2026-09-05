@@ -132,6 +132,7 @@
 <script>
 const form = document.getElementById("form");
 const urlEl = document.getElementById("url");
+const promptEl = document.getElementById("prompt");
 const modelInfoEl = document.getElementById("modelInfo");
 const stepsEl = document.getElementById("steps");
 const guidanceEl = document.getElementById("guidance");
@@ -187,6 +188,104 @@ function clearBaseImage() {
   clearImageBtn.disabled = true;
 }
 
+// mflux embeds full generation metadata -- including the exact prompt -- as an
+// EXIF UserComment (tag 0x9286) inside a PNG "eXIf" chunk (see
+// ImageUtil._embed_metadata in the mflux package; confirmed by reading its
+// source, per this project's convention of not guessing at fast-moving
+// dependencies). Every image this server hands back is a PNG carrying that
+// metadata, so an input image picked up for image-to-image -- whether a fresh
+// file or "Use last result" -- can have its prompt read back out.
+function readPngChunks(bytes) {
+  const sig = [137, 80, 78, 71, 13, 10, 26, 10];
+  for (let i = 0; i < 8; i++) if (bytes[i] !== sig[i]) return null;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const chunks = [];
+  let offset = 8;
+  while (offset + 8 <= bytes.length) {
+    const length = view.getUint32(offset);
+    const type = String.fromCharCode(bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7]);
+    const dataStart = offset + 8;
+    if (dataStart + length > bytes.length) break;
+    chunks.push({ type, data: bytes.subarray(dataStart, dataStart + length) });
+    offset = dataStart + length + 4; // skip CRC
+    if (type === "IEND") break;
+  }
+  return chunks;
+}
+
+// exifBytes is the raw TIFF stream PIL writes into the "eXIf" chunk (no
+// "Exif\0\0" prefix -- PngImagePlugin strips that before writing the chunk).
+function findExifUserComment(exifBytes) {
+  if (exifBytes.length < 8) return null;
+  const little = exifBytes[0] === 0x49 && exifBytes[1] === 0x49; // "II"
+  const view = new DataView(exifBytes.buffer, exifBytes.byteOffset, exifBytes.byteLength);
+  const u16 = (o) => view.getUint16(o, little);
+  const u32 = (o) => view.getUint32(o, little);
+  const TYPE_SIZES = { 1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 7: 1, 9: 4, 10: 8 };
+
+  function readIfd(ifdOffset) {
+    const count = u16(ifdOffset);
+    const entries = [];
+    for (let i = 0; i < count; i++) {
+      const entryOffset = ifdOffset + 2 + i * 12;
+      entries.push({ tag: u16(entryOffset), type: u16(entryOffset + 2), count: u32(entryOffset + 4), valueOffset: entryOffset + 8 });
+    }
+    return entries;
+  }
+
+  function entryBytes(entry) {
+    const totalBytes = (TYPE_SIZES[entry.type] || 1) * entry.count;
+    const start = totalBytes <= 4 ? entry.valueOffset : u32(entry.valueOffset);
+    return exifBytes.subarray(start, start + totalBytes);
+  }
+
+  const ifd0 = readIfd(u32(4));
+  const exifIfdEntry = ifd0.find((e) => e.tag === 0x8769); // Exif IFD pointer
+  if (!exifIfdEntry) return null;
+  const exifEntries = readIfd(u32(exifIfdEntry.valueOffset));
+  const userComment = exifEntries.find((e) => e.tag === 0x9286); // UserComment
+  if (!userComment) return null;
+
+  let bytes = entryBytes(userComment);
+  // Always an 8-byte character-code prefix per the EXIF spec; mflux always
+  // writes "ASCII\0\0\0" (see ImageUtil._embed_metadata).
+  const asciiPrefix = [0x41, 0x53, 0x43, 0x49, 0x49, 0, 0, 0];
+  if (bytes.length >= 8 && asciiPrefix.every((b, i) => bytes[i] === b)) bytes = bytes.subarray(8);
+  return new TextDecoder("utf-8").decode(bytes);
+}
+
+// Best-effort: returns null for anything that isn't a PNG carrying this
+// project's metadata (a photo picked off disk, an image from elsewhere) as
+// readily as for actual parse failures.
+function extractPromptFromPng(bytes) {
+  try {
+    const chunks = readPngChunks(bytes);
+    const exifChunk = chunks && chunks.find((c) => c.type === "eXIf");
+    if (!exifChunk) return null;
+    const userComment = findExifUserComment(exifChunk.data);
+    if (!userComment) return null;
+    const metadata = JSON.parse(userComment);
+    return typeof metadata.prompt === "string" ? metadata.prompt : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+function applyEmbeddedPrompt(bytes) {
+  const prompt = extractPromptFromPng(bytes);
+  if (prompt) {
+    promptEl.value = prompt;
+    log("loaded prompt from image metadata");
+  }
+}
+
+function base64ToBytes(b64) {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
 function fileToBase64(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -204,6 +303,7 @@ async function handleImageFile(file) {
     return;
   }
   setBaseImage(await fileToBase64(file), file.type || "image/png");
+  if (file.type === "image/png") applyEmbeddedPrompt(new Uint8Array(await file.arrayBuffer()));
 }
 
 dropZone.addEventListener("click", () => imageFileInput.click());
@@ -230,7 +330,9 @@ document.addEventListener("drop", (e) => {
 });
 
 useLastBtn.addEventListener("click", () => {
-  if (lastResultB64) setBaseImage(lastResultB64, "image/png");
+  if (!lastResultB64) return;
+  setBaseImage(lastResultB64, "image/png");
+  applyEmbeddedPrompt(base64ToBytes(lastResultB64));
 });
 clearImageBtn.addEventListener("click", clearBaseImage);
 
@@ -357,7 +459,7 @@ form.addEventListener("submit", async (e) => {
   const guidanceVal = guidanceWrap.classList.contains("hidden") ? "" : guidanceEl.value;
   const negativeVal = negativeWrap.classList.contains("hidden") ? "" : negativeEl.value.trim();
   const body = {
-    prompt: document.getElementById("prompt").value,
+    prompt: promptEl.value,
     width: Number(document.getElementById("width").value),
     height: Number(document.getElementById("height").value),
     // Blank means "whatever this model's default is" -- the server fills it in.
