@@ -88,7 +88,7 @@ app.add_middleware(
 HARNESS_PATH = Path(__file__).resolve().parent.parent / "clients" / "harness.html"
 
 
-@app.get("/harness.html")
+@app.get("/")
 async def harness():
     return FileResponse(HARNESS_PATH, media_type="text/html")
 

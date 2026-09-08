@@ -291,8 +291,8 @@ def test_openai_generate_streaming_with_partial_images(client):
     assert [e["partial_image_index"] for e in events[:2]] == [0, 1]
 
 
-def test_harness_html_is_served(client):
-    resp = client.get("/harness.html")
+def test_harness_is_served_at_root(client):
+    resp = client.get("/")
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/html")
     assert "mfluxible harness" in resp.text

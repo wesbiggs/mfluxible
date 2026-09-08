@@ -2,137 +2,673 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>mfluxible harness</title>
 <style>
-  :root { color-scheme: light dark; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    max-width: 720px;
-    margin: 2rem auto;
-    padding: 0 1rem;
-    line-height: 1.4;
+  /* Design tokens. Everything below reads from these, so the whole palette moves
+     from one place and the dark scheme is a token swap rather than a second sheet. */
+  :root {
+    color-scheme: light dark;
+    --bg:            #f4f5f7;
+    --panel:         #ffffff;
+    --panel-sunken:  #f8f9fb;
+    --border:        #e4e7ec;
+    --border-strong: #d0d5dd;
+    --text:          #101828;
+    --muted:         #475467;
+    --faint:         #667085;
+    --accent:        #3538cd;
+    --accent-hover:  #2d30ad;
+    --accent-soft:   #eef0ff;
+    --accent-ring:   #3538cd33;
+    --danger:        #d92d20;
+    --danger-soft:   #fef3f2;
+    --shadow-sm: 0 1px 2px rgb(16 24 40 / 0.05);
+    --shadow-md: 0 2px 4px -1px rgb(16 24 40 / 0.06), 0 8px 20px -6px rgb(16 24 40 / 0.10);
+    --r-sm: 6px;
+    --r-md: 9px;
+    --r-lg: 14px;
+    --sidebar: 384px;
+    --header: 52px;
+    --console: 190px;
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   }
-  h1 { font-size: 1.25rem; }
-  form { display: grid; gap: 0.75rem; }
-  label { display: grid; gap: 0.25rem; font-size: 0.9rem; }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:            #0d1117;
+      --panel:         #151b23;
+      --panel-sunken:  #10161e;
+      --border:        #262d38;
+      --border-strong: #343c4a;
+      --text:          #e6edf3;
+      --muted:         #9aa5b5;
+      --faint:         #7f8b9c;
+      --accent:        #7b7ff6;
+      --accent-hover:  #9195ff;
+      --accent-soft:   #1e2140;
+      --accent-ring:   #7b7ff64d;
+      --danger:        #ff7b72;
+      --danger-soft:   #2d1618;
+      --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.3);
+      --shadow-md: 0 2px 4px -1px rgb(0 0 0 / 0.4), 0 8px 20px -6px rgb(0 0 0 / 0.5);
+    }
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    font-family: var(--font);
+    font-size: 14px;
+    line-height: 1.45;
+    color: var(--text);
+    background: var(--bg);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Utility. !important because several rules below are more specific than a bare
+     class (e.g. .stage img sets display), and this is toggled from JS on all of them --
+     a hidden element must stay hidden whatever else claims to style it. */
+  .hidden { display: none !important; }
+
+  /* Kept in the DOM (label-for-focus and screen readers) but out of the layout, for a
+     field whose section heading already names it. */
+  .sr-only {
+    position: absolute;
+    width: 1px; height: 1px;
+    margin: -1px; padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  /* ---------- app shell ---------- */
+
+  .app {
+    height: 100dvh;
+    display: grid;
+    grid-template-columns: var(--sidebar) minmax(0, 1fr);
+    grid-template-rows: var(--header) minmax(0, 1fr);
+    grid-template-areas: "header header" "sidebar stage";
+  }
+
+  .topbar {
+    grid-area: header;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0 1rem;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+  }
+  .brand {
+    display: flex;
+    align-items: baseline;
+    gap: 0.45rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  .brand .mark {
+    display: grid;
+    place-items: center;
+    width: 22px; height: 22px;
+    border-radius: var(--r-sm);
+    background: var(--accent);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 700;
+    align-self: center;
+  }
+  .brand .sub {
+    color: var(--faint);
+    font-weight: 450;
+    font-size: 0.8rem;
+  }
+  #modelInfo {
+    margin: 0 0 0 auto;
+    padding: 0.2rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--panel-sunken);
+    color: var(--muted);
+    font-size: 0.78rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 60ch;
+  }
+
+  /* ---------- sidebar ---------- */
+
+  #form {
+    grid-area: sidebar;
+    display: grid;
+    grid-template-rows: minmax(0, 1fr) auto;
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+    min-height: 0;
+  }
+  .controls {
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 0.25rem 0 1rem;
+  }
+
+  .section { padding: 1rem 1rem 1.1rem; border-bottom: 1px solid var(--border); }
+  .section:last-child { border-bottom: none; }
+  .section > h2 {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-height: 22px;
+    margin: 0 0 0.7rem;
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .stack { display: grid; gap: 0.7rem; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.7rem; position: relative; }
+
+  label {
+    display: grid;
+    gap: 0.3rem;
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--muted);
+  }
+  label .opt { font-weight: 400; color: var(--faint); }
+
   input, textarea {
     font: inherit;
-    padding: 0.4rem 0.5rem;
-    border: 1px solid #8888;
-    border-radius: 4px;
+    font-size: 0.875rem;
+    width: 100%;
+    padding: 0.45rem 0.6rem;
+    color: var(--text);
+    background: var(--panel-sunken);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--r-md);
+    transition: border-color 0.12s, box-shadow 0.12s, background 0.12s;
+  }
+  input::placeholder, textarea::placeholder { color: var(--faint); }
+  input:focus, textarea:focus {
+    outline: none;
+    background: var(--panel);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-ring);
+  }
+  textarea { resize: vertical; min-height: 5.25rem; line-height: 1.5; }
+  #prompt { min-height: 6.5rem; }
+  input[type="number"] { font-variant-numeric: tabular-nums; }
+  #url { font-family: var(--mono); font-size: 0.78rem; }
+
+  .check {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--muted);
+    cursor: pointer;
+  }
+  .check input { width: auto; margin: 0; accent-color: var(--accent); }
+
+  /* Info affordance. The tooltip is anchored to the enclosing .grid2 rather than to
+     the little button, so it always spans the column and can never poke out of the
+     sidebar -- .controls scrolls, which means overflow-x is clipped, so a tip sized
+     off the trigger would get cut in half on the right-hand column. */
+  .info { display: inline-flex; vertical-align: -0.15em; }
+  .info > button {
+    width: 15px; height: 15px;
+    padding: 0;
+    display: grid;
+    place-items: center;
+    font: 600 9.5px/1 var(--font);
+    color: var(--faint);
     background: transparent;
-    color: inherit;
+    border: 1px solid var(--border-strong);
+    border-radius: 50%;
+    cursor: help;
+    transition: color 0.12s, border-color 0.12s;
   }
-  textarea { resize: vertical; min-height: 3.5rem; }
-  .row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.75rem; }
-  button {
+  .info > button:hover, .info > button:focus-visible { color: var(--accent); border-color: var(--accent); }
+  .info > button:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+  .tip {
+    position: absolute;
+    top: calc(100% + 7px);
+    left: 0; right: 0;
+    z-index: 5;
+    padding: 0.55rem 0.65rem;
+    font-size: 0.74rem;
+    font-weight: 400;
+    line-height: 1.5;
+    color: var(--muted);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    box-shadow: var(--shadow-md);
+    /* visibility, not display, so the fade can run; pointer-events off so the tip
+       can't sit under the cursor and fight its own hover state. */
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(-3px);
+    pointer-events: none;
+    transition: opacity 0.12s, transform 0.12s, visibility 0.12s;
+  }
+  /* focus-within covers keyboard tabbing and a tap on touch, where hover never fires. */
+  .info:hover > .tip, .info:focus-within > .tip {
+    opacity: 1;
+    visibility: visible;
+    transform: none;
+  }
+  @media (prefers-reduced-motion: reduce) { .tip { transition: none; } }
+
+  /* ---------- buttons ---------- */
+
+  .btn {
     font: inherit;
-    padding: 0.5rem 1rem;
-    border: none;
-    border-radius: 4px;
-    background: #2563eb;
-    color: white;
-    cursor: pointer;
-  }
-  button:disabled { background: #8888; cursor: default; }
-  #log {
-    font-family: ui-monospace, monospace;
     font-size: 0.85rem;
-    white-space: pre-wrap;
-    background: #8881;
-    border-radius: 4px;
-    padding: 0.5rem 0.75rem;
-    min-height: 2rem;
-    max-height: 12rem;
-    overflow-y: auto;
+    font-weight: 550;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    padding: 0.5rem 0.9rem;
+    border: 1px solid transparent;
+    border-radius: var(--r-md);
+    background: var(--accent);
+    color: #fff;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.12s, border-color 0.12s, color 0.12s;
   }
-  #modelInfo { font-size: 0.85rem; opacity: 0.75; margin: -0.5rem 0 1rem; }
-  #previewWrap, #finalWrap { margin-top: 1rem; }
-  #previewWrap img { max-width: 200px; border-radius: 4px; display: block; }
-  #finalWrap img { max-width: 100%; border-radius: 4px; display: block; }
-  #finalWrap a { display: inline-block; margin-top: 0.5rem; font-size: 0.9rem; }
-  .hidden { display: none; }
+  .btn:hover:not(:disabled) { background: var(--accent-hover); }
+  .btn:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+  .btn.secondary {
+    background: var(--panel);
+    border-color: var(--border-strong);
+    color: var(--text);
+  }
+  .btn.secondary:hover:not(:disabled) { background: var(--panel-sunken); border-color: var(--faint); }
+  .btn.small { padding: 0.35rem 0.65rem; font-size: 0.78rem; }
+  .btn:disabled { opacity: 0.45; cursor: default; }
+
+  .actions {
+    display: flex;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
+    background: var(--panel);
+    border-top: 1px solid var(--border);
+  }
+  .actions #submitBtn { flex: 1; }
+
+  /* ---------- drop zone ---------- */
+
   #dropZone {
-    border: 2px dashed #8888;
-    border-radius: 6px;
-    padding: 0.75rem;
+    display: grid;
+    place-items: center;
+    gap: 0.5rem;
+    min-height: 108px;
+    padding: 0.85rem;
     text-align: center;
+    font-size: 0.78rem;
+    color: var(--faint);
+    background: var(--panel-sunken);
+    border: 1.5px dashed var(--border-strong);
+    border-radius: var(--r-lg);
     cursor: pointer;
-    font-size: 0.85rem;
-    opacity: 0.8;
-    transition: border-color 0.15s, background 0.15s;
+    transition: border-color 0.15s, background 0.15s, color 0.15s;
   }
-  #dropZone.dragover { border-color: #2563eb; opacity: 1; background: #2563eb14; }
-  #dropZone img { max-width: 100%; max-height: 160px; border-radius: 4px; display: block; margin: 0 auto; }
-  .imgRow { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
-  .imgRow button { padding: 0.35rem 0.7rem; font-size: 0.85rem; background: #64748b; }
-  .imgRow label { flex: 1 0 auto; min-width: 8rem; }
-  .imgRow label.checkRow { display: flex; align-items: center; gap: 0.35rem; font-weight: normal; }
-  .imgRow label.checkRow input { width: auto; }
-  .hint { font-size: 0.78rem; opacity: 0.65; margin: 0.15rem 0 0; }
+  #dropZone:hover { border-color: var(--faint); color: var(--muted); }
+  #dropZone.dragover {
+    border-color: var(--accent);
+    border-style: solid;
+    background: var(--accent-soft);
+    color: var(--accent);
+  }
+  #dropZone img {
+    max-width: 100%;
+    max-height: 150px;
+    border-radius: var(--r-md);
+    box-shadow: var(--shadow-sm);
+  }
+  .iconBtn {
+    display: grid;
+    place-items: center;
+    width: 22px; height: 22px;
+    margin-left: auto;
+    padding: 0;
+    color: var(--faint);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--r-sm);
+    cursor: pointer;
+    transition: color 0.12s, background 0.12s, border-color 0.12s;
+  }
+  .iconBtn:hover { color: var(--danger); background: var(--danger-soft); border-color: var(--danger); }
+  .iconBtn:focus-visible { outline: none; color: var(--danger); box-shadow: 0 0 0 3px var(--accent-ring); }
+
+  /* Controls that act on a base image are pointless without one, so they only exist
+     while the drop zone holds a preview. #imagePreview carries .hidden exactly when
+     baseImageB64 is null (setBaseImage / clearBaseImage), so :has() reads the state the
+     script already maintains -- same trick as the empty stage and the progress bar. */
+  #baseSection:has(#imagePreview.hidden) .baseOnly { display: none; }
+
+  /* ---------- stage ---------- */
+
+  .stage {
+    grid-area: stage;
+    display: grid;
+    grid-template-rows: minmax(0, 1fr) auto;
+    min-width: 0;
+    min-height: 0;
+  }
+
+  .canvas {
+    position: relative;
+    display: grid;
+    place-items: center;
+    padding: 1.5rem;
+    min-height: 0;
+    overflow: auto;
+  }
+
+  /* Indeterminate bar while a run is in flight. #submitBtn is disabled for exactly
+     that window, so :has() derives the state from the DOM the existing script already
+     maintains -- no extra JS, and nothing to keep in sync. */
+  .canvas::before {
+    content: "";
+    position: absolute;
+    inset: 0 0 auto;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
+    background-size: 40% 100%;
+    background-repeat: no-repeat;
+    opacity: 0;
+    transition: opacity 0.2s;
+  }
+  body:has(#submitBtn:disabled) .canvas::before {
+    opacity: 1;
+    animation: sweep 1.1s linear infinite;
+  }
+  @keyframes sweep {
+    from { background-position: -45% 0; }
+    to   { background-position: 145% 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    body:has(#submitBtn:disabled) .canvas::before { animation: none; background-size: 100% 100%; }
+  }
+
+  .pane { display: grid; gap: 0.6rem; justify-items: center; max-width: 100%; }
+  .pane img {
+    display: block;
+    max-width: 100%;
+    /* Fit inside the canvas rather than making it scroll: the viewport less the header,
+       the console, this canvas's own padding and the label row beneath the image. */
+    max-height: max(180px, calc(100dvh - var(--header) - var(--console) - 78px));
+    border-radius: var(--r-lg);
+    box-shadow: var(--shadow-md);
+    /* Checkerboard, so a transparent PNG reads as transparent rather than as white. */
+    background-color: var(--panel);
+    background-image:
+      linear-gradient(45deg, var(--border) 25%, transparent 25%, transparent 75%, var(--border) 75%),
+      linear-gradient(45deg, var(--border) 25%, transparent 25%, transparent 75%, var(--border) 75%);
+    background-size: 18px 18px;
+    background-position: 0 0, 9px 9px;
+  }
+  #previewWrap img { max-height: min(340px, max(180px, calc(100dvh - var(--header) - var(--console) - 78px))); }
+
+  .paneBar {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    font-size: 0.75rem;
+    color: var(--muted);
+  }
+  .tag {
+    padding: 0.15rem 0.5rem;
+    border-radius: 999px;
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    background: var(--accent-soft);
+    color: var(--accent);
+  }
+  .tag.live { background: var(--panel-sunken); color: var(--muted); border: 1px solid var(--border); }
+  .paneAction {
+    font: inherit;
+    font-size: 0.78rem;
+    font-weight: 550;
+    line-height: 1.45;
+    color: var(--accent);
+    text-decoration: none;
+    padding: 0.25rem 0.55rem;
+    background: transparent;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--r-sm);
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s;
+  }
+  .paneAction:hover:not(:disabled) { background: var(--accent-soft); border-color: var(--accent); }
+  .paneAction:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+  .paneAction:disabled { opacity: 0.45; cursor: default; }
+
+  /* Empty state, shown only while neither pane is. Pure CSS off the .hidden class the
+     script already toggles, which is why the three have to stay adjacent siblings in
+     this order -- adjacent-sibling selectors are what read that state. */
+  #emptyState { display: none; }
+  #previewWrap.hidden + #finalWrap.hidden + #emptyState {
+    display: grid;
+    place-items: center;
+    gap: 0.5rem;
+    text-align: center;
+    color: var(--faint);
+  }
+  #emptyState .glyph {
+    width: 46px; height: 46px;
+    display: grid; place-items: center;
+    border: 1.5px dashed var(--border-strong);
+    border-radius: var(--r-lg);
+    font-size: 20px;
+  }
+  #emptyState strong { font-weight: 550; color: var(--muted); font-size: 0.9rem; }
+  #emptyState span { font-size: 0.8rem; }
+
+  /* ---------- console ---------- */
+
+  .console {
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+    height: var(--console);
+    background: var(--panel);
+    border-top: 1px solid var(--border);
+  }
+  .consoleBar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.9rem;
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--faint);
+    border-bottom: 1px solid var(--border);
+  }
+  #log {
+    margin: 0;
+    padding: 0.6rem 0.9rem 0.9rem;
+    font-family: var(--mono);
+    font-size: 0.76rem;
+    line-height: 1.65;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--muted);
+    background: var(--panel-sunken);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  #log:empty::before { content: "Nothing yet."; color: var(--faint); }
+
+  /* ---------- narrow viewports ---------- */
+
+  @media (max-width: 900px) {
+    .app {
+      height: auto;
+      min-height: 100dvh;
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: var(--header) auto auto;
+      /* Stage above the controls: stacked, the control column is taller than the
+         viewport, and putting it first would bury the image the page exists to show. */
+      grid-template-areas: "header" "stage" "sidebar";
+    }
+    #form { border-right: none; border-top: 1px solid var(--border); }
+    .controls { overflow: visible; }
+    /* The controls now run past the fold, so pin the primary action to the viewport
+       rather than to the bottom of a column nobody can see. */
+    .actions { position: sticky; bottom: 0; box-shadow: 0 -1px 3px rgb(16 24 40 / 0.06); }
+    .stage { grid-template-rows: auto auto; }
+    .canvas { padding: 1rem; min-height: 220px; }
+    .pane img { max-height: 55dvh; }
+    #previewWrap img { max-height: 40dvh; }
+    .console { height: 160px; }
+    #modelInfo { max-width: 42vw; }
+  }
 </style>
 </head>
 <body>
 
-<h1>mfluxible harness</h1>
+<div class="app">
 
-<p id="modelInfo">checking which model the server is running&hellip;</p>
-
-<form id="form">
-  <label>Server URL
-    <input type="text" id="url" value="/mfluxible/v1/images/generations">
-  </label>
-  <label>Prompt
-    <textarea id="prompt" required>a puffin standing on a cliff at sunset</textarea>
-  </label>
-  <div class="row">
-    <label>Width <input type="number" id="width" value="1024" step="16"></label>
-    <label>Height <input type="number" id="height" value="1024" step="16"></label>
-    <label>Steps <input type="number" id="steps" placeholder="model default"></label>
-    <label>Seed <input type="number" id="seed" placeholder="random"></label>
-  </div>
-  <label>Input image <span style="font-weight: normal; opacity: 0.7;">(optional &mdash; image-to-image)</span>
-    <div id="dropZone">
-      <img id="imagePreview" class="hidden" alt="input image preview">
-      <span id="dropZoneText">Drop an image anywhere on the page, or click to choose a file</span>
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark">m</span>
+      mfluxible
+      <span class="sub">harness</span>
     </div>
-  </label>
-  <input type="file" id="imageFileInput" accept="image/*" class="hidden">
-  <div class="imgRow">
-    <button type="button" id="useLastBtn" disabled>Use last result</button>
-    <button type="button" id="clearImageBtn" disabled>Clear image</button>
-    <label>Image strength
-      <input type="number" id="imageStrength" min="0" max="1" step="0.05" value="0.4">
-    </label>
-    <label class="checkRow">
-      <input type="checkbox" id="fractionalStart"> Fractional start
-    </label>
-  </div>
-  <p class="hint">mflux's own convention (the inverse of some other img2img tools'): 0 = input image ignored (plain text-to-image); 1 = maximum influence, output stays close to the input.</p>
-  <p class="hint">Image strength normally quantizes to 1/steps &mdash; at 9 steps, 0.35 and 0.4 are the same image. Fractional start places the noise level exactly where the strength asks, at the same step count and the same speed. Changes the pixels a given strength produces, so leave it off to reproduce an earlier run.</p>
-  <label id="guidanceWrap" class="hidden">Guidance
-    <input type="number" id="guidance" step="0.1" placeholder="model default">
-  </label>
-  <label id="negativeWrap" class="hidden">Negative prompt
-    <textarea id="negativePrompt" placeholder="what to steer away from"></textarea>
-  </label>
-  <label>Preview every N steps (0 disables)
-    <input type="number" id="previewEvery" value="0">
-  </label>
-  <button type="submit" id="submitBtn">Generate</button>
-</form>
+    <p id="modelInfo">checking which model the server is running&hellip;</p>
+  </header>
 
-<div id="log"></div>
+  <form id="form">
+    <div class="controls">
 
-<div id="previewWrap" class="hidden">
-  <strong>Latest preview</strong>
-  <img id="previewImg" alt="preview">
-</div>
+      <section class="section">
+        <h2>Prompt</h2>
+        <div class="stack">
+          <label><span class="sr-only">Prompt</span>
+            <textarea id="prompt" required>a puffin standing on a cliff at sunset</textarea>
+          </label>
+          <label id="negativeWrap" class="hidden">Negative prompt
+            <textarea id="negativePrompt" placeholder="what to steer away from"></textarea>
+          </label>
+        </div>
+      </section>
 
-<div id="finalWrap" class="hidden">
-  <strong>Result</strong>
-  <img id="finalImg" alt="result">
-  <a id="downloadLink" download="output.png">Download PNG</a>
+      <section class="section">
+        <h2>Output</h2>
+        <div class="stack">
+          <div class="grid2">
+            <label>Width <input type="number" id="width" value="1024" step="16"></label>
+            <label>Height <input type="number" id="height" value="1024" step="16"></label>
+            <label>Steps <input type="number" id="steps" placeholder="model default"></label>
+            <label>Seed <input type="number" id="seed" placeholder="random"></label>
+          </div>
+          <label id="guidanceWrap" class="hidden">Guidance
+            <input type="number" id="guidance" step="0.1" placeholder="model default">
+          </label>
+        </div>
+      </section>
+
+      <section class="section" id="baseSection">
+        <h2>Base image <span class="opt">&mdash; optional</span>
+          <button type="button" class="iconBtn baseOnly" id="clearImageBtn" title="Clear base image" aria-label="Clear base image" disabled>
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor"
+                 stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M2.5 4h11M6.5 4V2.6h3V4M4.1 4l.55 8.9a1 1 0 0 0 1 .95h4.7a1 1 0 0 0 1-.95L11.9 4M6.6 6.7v4.4M9.4 6.7v4.4"/>
+            </svg>
+          </button>
+        </h2>
+        <div class="stack">
+          <div id="dropZone">
+            <img id="imagePreview" class="hidden" alt="input image preview">
+            <span id="dropZoneText">Drop an image anywhere on the page, or click to choose a file</span>
+          </div>
+          <input type="file" id="imageFileInput" accept="image/*" class="hidden">
+          <div class="grid2 baseOnly">
+            <label><span>Image strength <span class="info">
+              <button type="button" aria-label="About image strength" aria-describedby="tipStrength">i</button>
+              <span class="tip" id="tipStrength" role="tooltip">mflux's own convention (the inverse of some other img2img tools'): 0 = input image ignored (plain text-to-image); 1 = maximum influence, output stays close to the input.</span>
+            </span></span>
+              <input type="number" id="imageStrength" min="0" max="1" step="0.05" value="0.4">
+            </label>
+            <label class="check">
+              <input type="checkbox" id="fractionalStart"> Fractional start
+              <span class="info">
+                <button type="button" aria-label="About fractional start" aria-describedby="tipFractional">i</button>
+                <span class="tip" id="tipFractional" role="tooltip">Image strength normally quantizes to 1/steps &mdash; at 9 steps, 0.35 and 0.4 are the same image. Fractional start places the noise level exactly where the strength asks, at the same step count and the same speed. Changes the pixels a given strength produces, so leave it off to reproduce an earlier run.</span>
+              </span>
+            </label>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>Advanced</h2>
+        <div class="stack">
+          <label>Server URL
+            <input type="text" id="url" value="/mfluxible/v1/images/generations">
+          </label>
+          <label><span>Preview every N steps <span class="opt">(0 disables)</span></span>
+            <input type="number" id="previewEvery" value="0">
+          </label>
+        </div>
+      </section>
+
+    </div>
+
+    <div class="actions">
+      <button type="submit" class="btn" id="submitBtn">Generate</button>
+      <button type="button" class="btn secondary" id="resetBtn">Reset all</button>
+    </div>
+  </form>
+
+  <main class="stage">
+    <div class="canvas">
+
+      <div id="previewWrap" class="pane hidden">
+        <img id="previewImg" alt="preview">
+        <div class="paneBar"><span class="tag live">Live preview</span></div>
+      </div>
+
+      <div id="finalWrap" class="pane hidden">
+        <img id="finalImg" alt="result">
+        <div class="paneBar">
+          <span class="tag">Result</span>
+          <a id="downloadLink" class="paneAction" download="output.png">Download PNG</a>
+          <button type="button" class="paneAction" id="useLastBtn" disabled>Use as Base Image</button>
+        </div>
+      </div>
+
+      <div id="emptyState">
+        <span class="glyph">&#9634;</span>
+        <strong>No image yet</strong>
+        <span>Set a prompt on the left, then hit Generate.</span>
+      </div>
+
+    </div>
+
+    <div class="console">
+      <div class="consoleBar">Log</div>
+      <div id="log"></div>
+    </div>
+  </main>
+
 </div>
 
 <script>
@@ -155,7 +691,9 @@ const imageStrengthEl = document.getElementById("imageStrength");
 const fractionalStartEl = document.getElementById("fractionalStart");
 const widthEl = document.getElementById("width");
 const heightEl = document.getElementById("height");
+const seedEl = document.getElementById("seed");
 const submitBtn = document.getElementById("submitBtn");
+const resetBtn = document.getElementById("resetBtn");
 const logEl = document.getElementById("log");
 const previewWrap = document.getElementById("previewWrap");
 const previewImg = document.getElementById("previewImg");
@@ -290,7 +828,7 @@ function findExifUserComment(exifBytes) {
 // Best-effort: returns null for anything that isn't a PNG carrying this
 // project's metadata (a photo picked off disk, an image from elsewhere) as
 // readily as for actual parse failures.
-function extractPromptFromPng(bytes) {
+function extractMetadataFromPng(bytes) {
   try {
     const chunks = readPngChunks(bytes);
     const exifChunk = chunks && chunks.find((c) => c.type === "eXIf");
@@ -298,18 +836,32 @@ function extractPromptFromPng(bytes) {
     const userComment = findExifUserComment(exifChunk.data);
     if (!userComment) return null;
     const metadata = JSON.parse(userComment);
-    return typeof metadata.prompt === "string" ? metadata.prompt : null;
+    return metadata && typeof metadata === "object" ? metadata : null;
   } catch (err) {
     return null;
   }
 }
 
-function applyEmbeddedPrompt(bytes) {
-  const prompt = extractPromptFromPng(bytes);
-  if (prompt) {
-    promptEl.value = prompt;
-    log("loaded prompt from image metadata");
+// Width/height deliberately aren't taken from here -- setBaseImage reads them off the
+// decoded image instead, which is right even for an image that's been cropped or
+// resized since it was generated. Seed and prompt have no such fallback.
+function applyEmbeddedMetadata(bytes) {
+  const metadata = extractMetadataFromPng(bytes);
+  if (!metadata) return;
+  const loaded = [];
+  if (typeof metadata.prompt === "string") {
+    promptEl.value = metadata.prompt;
+    loaded.push("prompt");
   }
+  // mflux writes seed as a JSON number, but accept a numeric string too rather than
+  // silently dropping it; Number("") is 0, so the emptiness check comes first.
+  const seed = metadata.seed;
+  if (typeof seed === "number" ? Number.isFinite(seed)
+      : typeof seed === "string" && seed.trim() !== "" && Number.isFinite(Number(seed))) {
+    seedEl.value = String(Number(seed));
+    loaded.push("seed");
+  }
+  if (loaded.length) log(`loaded ${loaded.join(" and ")} from image metadata`);
 }
 
 function base64ToBytes(b64) {
@@ -336,7 +888,7 @@ async function handleImageFile(file) {
     return;
   }
   setBaseImage(await fileToBase64(file), file.type || "image/png");
-  if (file.type === "image/png") applyEmbeddedPrompt(new Uint8Array(await file.arrayBuffer()));
+  if (file.type === "image/png") applyEmbeddedMetadata(new Uint8Array(await file.arrayBuffer()));
 }
 
 dropZone.addEventListener("click", () => imageFileInput.click());
@@ -365,13 +917,13 @@ document.addEventListener("drop", (e) => {
 useLastBtn.addEventListener("click", () => {
   if (!lastResultB64) return;
   setBaseImage(lastResultB64, "image/png");
-  applyEmbeddedPrompt(base64ToBytes(lastResultB64));
+  applyEmbeddedMetadata(base64ToBytes(lastResultB64));
 });
 clearImageBtn.addEventListener("click", clearBaseImage);
 
 function healthUrl(generationsUrl) {
   // Base against the page's own location so a relative Server URL (the default,
-  // now that the server can serve this page itself at /harness.html) still resolves.
+  // now that the server can serve this page itself at its root) still resolves.
   const u = new URL(generationsUrl, window.location.href);
   u.pathname = "/health";
   u.search = "";
@@ -480,6 +1032,29 @@ function handleEvent(event) {
   }
 }
 
+// "Back to defaults" for the fields is exactly what a native form.reset() means --
+// every control returns to the value in its markup -- so a field added to the form
+// later is covered without touching this function. The rest is the state the form
+// doesn't own: the image-to-image inputs, the last result, and the output panes.
+function resetAll() {
+  form.reset();
+  clearBaseImage();
+  lastResultB64 = null;
+  useLastBtn.disabled = true;
+  logEl.textContent = "";
+  previewWrap.classList.add("hidden");
+  previewImg.removeAttribute("src");
+  finalWrap.classList.add("hidden");
+  finalImg.removeAttribute("src");
+  downloadLink.removeAttribute("href");
+  // form.reset() fires no "change" event, so the Server URL returning to its default
+  // wouldn't otherwise re-check what's on the other end. This also restores the
+  // things refreshModel owns rather than the markup: whether Guidance and Negative
+  // prompt are shown at all, and the model-default placeholders.
+  refreshModel();
+}
+
+resetBtn.addEventListener("click", resetAll);
 urlEl.addEventListener("change", refreshModel);
 refreshModel();
 
@@ -489,9 +1064,10 @@ form.addEventListener("submit", async (e) => {
   previewWrap.classList.add("hidden");
   finalWrap.classList.add("hidden");
   submitBtn.disabled = true;
+  resetBtn.disabled = true;
   submitBtn.textContent = "Generating...";
 
-  const seedVal = document.getElementById("seed").value;
+  const seedVal = seedEl.value;
   const stepsVal = stepsEl.value;
   const guidanceVal = guidanceWrap.classList.contains("hidden") ? "" : guidanceEl.value;
   const negativeVal = negativeWrap.classList.contains("hidden") ? "" : negativeEl.value.trim();
@@ -519,6 +1095,7 @@ form.addEventListener("submit", async (e) => {
     log(`error: ${err.message}`);
   } finally {
     submitBtn.disabled = false;
+    resetBtn.disabled = false;
     submitBtn.textContent = "Generate";
   }
 });

@@ -31,9 +31,9 @@ Returns:
 
 `memory` reports MLX's own byte counters for the server process. `active_bytes` is memory backing live arrays — near zero until the first generation, since weights are quantized lazily and only materialize when something first forces evaluation. `cache_bytes` is buffers MLX has freed but retains for reuse: reclaimable, but it counts toward the process's memory footprint just the same, so on a memory-tight machine it is worth watching between generations. `peak_bytes` is the high-water mark of active memory. All three are plain counters, so polling `/health` mid-generation is cheap and does not disturb the run.
 
-## `GET /harness.html`
+## `GET /`
 
-Serves `clients/harness.html` as-is — see the [Browser](clients.md#browser) client. Lets you open the harness straight from the running server (`http://localhost:8420/harness.html`) instead of standing up a separate static file server for it.
+Serves `clients/harness.html` as-is — see the [Browser](clients.md#browser) client. Lets you open the harness straight from the running server (`http://localhost:8420/`) instead of standing up a separate static file server for it.
 
 ## `POST /mfluxible/v1/images/generations`
 
