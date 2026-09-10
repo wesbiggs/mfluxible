@@ -394,6 +394,11 @@ async def generate_image(
             raise ToolError(
                 f"{info.get('label', 'this model')} has no negative-prompt branch; omit the negative_prompt argument."
             )
+        if fractional_start and not info.get("supports_fractional_start", True):
+            raise ToolError(
+                f"{info.get('label', 'this model')} does not run the linear schedule fractional_start "
+                "extends; omit the fractional_start argument (image_strength still works)."
+            )
 
     image_b64 = None
     if image_path is not None:

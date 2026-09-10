@@ -39,7 +39,7 @@ from PIL import Image
 from mflux.models.common.vae.vae_util import VAEUtil
 from mflux.utils.image_util import ImageUtil
 
-from models import ModelSpec, resolve
+from models import CFG_GUIDANCE_FLOOR, ModelSpec, resolve
 from schedulers import SCHEDULER_PATH, start_fraction
 from schemas import GenerateRequest
 
@@ -343,8 +343,23 @@ class MfluxEngine:
         """
         if req.guidance is not None and not self.spec.supports_guidance:
             raise ValueError(f"{self.spec.label} ignores guidance (it is guidance-distilled); omit the field.")
-        if req.negative_prompt is not None and not self.spec.supports_negative_prompt:
-            raise ValueError(f"{self.spec.label} has no negative-prompt branch; omit the field.")
+        if req.negative_prompt is not None:
+            if not self.spec.supports_negative_prompt:
+                raise ValueError(f"{self.spec.label} has no negative-prompt branch; omit the field.")
+            # Having a negative branch isn't enough -- it has to be switched on. Every
+            # CFG model here encodes the unconditional prompt only above
+            # CFG_GUIDANCE_FLOOR, so at or below it the negative prompt would be
+            # accepted and then never consulted, which is exactly the silent drop the
+            # checks around it exist to prevent. This bites on Krea-2, whose own default
+            # guidance is 1.0; on every other CFG model the default already clears the
+            # floor and this only fires if a request lowers it.
+            guidance = req.guidance if req.guidance is not None else self.spec.default_guidance
+            if guidance is not None and guidance <= CFG_GUIDANCE_FLOOR:
+                raise ValueError(
+                    f"{self.spec.label} only encodes a negative prompt above guidance "
+                    f"{CFG_GUIDANCE_FLOOR} (classifier-free guidance is off at or below it, and "
+                    f"this request's guidance is {guidance}); raise guidance or omit negative_prompt."
+                )
         if req.image_strength is not None and req.image is None:
             raise ValueError("image_strength requires image to also be set.")
         if req.image is not None:
@@ -353,6 +368,18 @@ class MfluxEngine:
             _decode_input_image(req.image)
         elif req.fractional_start:
             raise ValueError("fractional_start requires image to also be set.")
+        if req.fractional_start and not self.spec.supports_fractional_start:
+            # SCHEDULER_PATH *replaces* whatever scheduler the variant would have picked
+            # for itself, so it is only a fractional start on a model that would have
+            # run a linear schedule anyway. Elsewhere it either swaps the sampler
+            # silently (flow-match models: wrong images, no error) or raises inside
+            # generate_image() on the worker thread with the SSE headers already out
+            # (Krea2). See ModelSpec.default_scheduler.
+            raise ValueError(
+                f"{self.spec.label} runs mflux's {self.spec.default_scheduler!r} scheduler, and "
+                "fractional_start only applies to models on the linear schedule it extends; "
+                "omit the field (image_strength still works, quantized to 1/steps)."
+            )
 
     def _generation_kwargs(self, req: GenerateRequest) -> dict:
         """Per-request knobs that only some models can act on.

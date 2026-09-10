@@ -26,12 +26,19 @@ the venv `uv venv` creates, so it stays correct under uv.
 ## API changes
 
 Always update `docs/api.md` when changing the API (endpoints, request/response shapes, SSE event
-schema). `README.md` is only an overview + quickstart + index into `docs/`; the rest of the prose
-lives in four pages there, split by who the reader is rather than by topic: `server.md` (running
-the server -- how it works, its env vars, the models, remote hosting, troubleshooting),
-`clients.md` (the terminal scripts, the browser harness, OpenAI-compatible frontends), `mcp.md`
-(the MCP tool, including its own env vars) and `api.md`, plus `testing.md`. So a server env var
-goes in `server.md` and an MCP one in `mcp.md`, even though both are "configuration".
+schema). `README.md` is only an overview + quickstart + index; the rest of the prose lives in four
+pages under `docs/`, split by who the reader is rather than by topic: `server.md` (running the
+server -- how it works, its env vars, the models, remote hosting, troubleshooting), `clients.md`
+(the terminal scripts, the browser harness, OpenAI-compatible frontends), `mcp.md` (the MCP tool,
+including its own env vars) and `api.md`. So a server env var goes in `server.md` and an MCP one
+in `mcp.md`, even though both are "configuration".
+
+The split that cuts across those four is `CONTRIBUTING.md`, at the top level: everything aimed at
+someone *changing* the code rather than running it -- the test suite and CI, and the procedure for
+adding a model (which fields of a `ModelSpec` have to be read out of mflux's source, and which
+mflux models need engine changes rather than a table row). `docs/` is for users; `CONTRIBUTING.md`
+is for contributors. Note the asymmetry with this file: `CONTRIBUTING.md` says what to do, while
+the sections below say why the non-obvious parts are the way they are.
 
 ## mflux is a fast-moving dependency
 
@@ -49,8 +56,21 @@ conditioned on the step index (or on `LinearScheduler._get_timesteps`, which ret
 bare `arange` nothing currently reads), the latents and the model's idea of where they
 are would silently desync, and the failure would look like bad images rather than an
 error. The module's docstring carries the rest: why `LinearScheduler` is the right base
-for every model in `models.py`, and why the interpolation is done on the request's own
-shifted schedule rather than by re-deriving mflux's shift math.
+for the linear-schedule models in `models.py`, and why the interpolation is done on the
+request's own shifted schedule rather than by re-deriving mflux's shift math.
+
+**Which models can take a fractional start is a per-model fact, now recorded as
+`ModelSpec.default_scheduler`.** Handing mflux `SCHEDULER_PATH` *replaces* the scheduler
+the variant would have chosen, so it is only a fractional start on a model that would
+have run linear anyway. Elsewhere it is a sampler swap with no error — Z-Image base and
+every FLUX.2 Klein default to `flow_match_euler_discrete`, and the failure looks like bad
+images — or a `ValueError` thrown inside `generate_image()` on the worker thread with the
+SSE headers already on the wire (`Krea2._resolve_scheduler` maps `"linear"` onto
+`"er_sde"` and rejects every other name). `check_request` rejects `fractional_start` up
+front wherever `default_scheduler != "linear"`, for the same reason it rejects guidance:
+a 400 before `StreamingResponse` starts, not a torn body. Extending it to a flow-match
+model means a sibling scheduler subclassing mflux's flow-match class, not relaxing that
+check.
 
 The scheduler is selected by handing mflux a dotted import path
 (`Config` -> `try_import_external_scheduler`), which resolves only because `server/` is
@@ -118,7 +138,15 @@ act on -- upstream errors, unknown handles -- must go out as `ToolError`.
 
 ## One model per process, and every per-model difference lives in models.py
 
-`server/models.py` is the whole multi-model story: which mflux variant class, which `ModelConfig`, which latent creator, the default step count, and whether `guidance`/`negative_prompt` mean anything. `engine.py` has no per-model branching and shouldn't grow any — mflux's ZImage, Flux1 and QwenImage happen to share a constructor signature, a `generate_image()` signature, a `save_model(base_path)` and a `callbacks` registry, which is the only reason this works.
+`server/models.py` is the whole multi-model story: which mflux variant class, which `ModelConfig`, which latent creator, the default step count, whether `guidance`/`negative_prompt` mean anything, and which scheduler the variant picks for itself. `engine.py` has no per-model branching and shouldn't grow any — mflux's ZImage, Flux1, QwenImage, Krea2, ErnieImage and Flux2Klein happen to share a constructor signature, a `generate_image()` signature, a `save_model(base_path)` and a `callbacks` registry, which is the only reason this works.
+
+That shared surface is **not** universal across mflux, which is where the table currently stops. `FIBO`, `BooguImage` and `LensImage` take no `lora_paths`/`lora_scales`, so `_load_sync`'s fresh-load branch raises `TypeError` before any weight loads; `Ideogram4` accepts no `image_path`/`image_strength`/`scheduler`; `BooguImage` has no latent creator at all (mflux's own CLI passes `latent_creator=None` and states stepwise output is unsupported), so step previews are impossible; `LensImage` has no `save_model()`, so the quantized-weight cache has nothing to write and every startup re-quantizes. Each of those needs a capability flag here *plus* engine.py honouring it — a new row alone would fail at load or mid-stream, not gracefully.
+
+Three per-model facts are load-bearing and easy to get wrong from the README alone, so they were read out of the installed mflux source rather than assumed:
+
+- **Guidance support is per-checkpoint, not per-family.** The three non-`base` FLUX.2 Klein checkpoints hard-error on any guidance but 1.0 (`flux2_generate` CLI, judged by `"base" not in model_name`), while `flux2-klein-base-*` allow it; ERNIE-Image-Turbo likewise errors off 1.0 while ERNIE-Image defaults to 4.0. Z-Image is the sharpest case: base and Turbo share the `ZImage` class, and `supports_guidance` is what decides both whether an unconditional branch gets built *and* which scheduler runs.
+- **`supports_negative_prompt` is necessary but not sufficient.** Every CFG model here encodes the unconditional prompt only above guidance 1.0 (`CFG_GUIDANCE_FLOOR`) — ZImage/ErnieImage at `<= 1.0`, Krea2 at `== 1.0`, Flux2Klein at `not > 1.0`. Krea-2's own default guidance is exactly 1.0 (mflux's `DEFAULT_GUIDANCE`), so `check_request` tests the *effective* guidance; otherwise a negative prompt there would be accepted, encoded and never consulted, which is the silent drop the whole flag scheme exists to prevent.
+- **`z-image`/`zimage` name the base checkpoint, not Turbo.** They used to be aliases for Turbo here, which was harmless while Turbo was the only Z-Image and wrong the moment the base model was added. mflux's registry is the tiebreaker for every alias in this table.
 
 Two things in that file are load-bearing rather than stylistic:
 

@@ -7,6 +7,8 @@ import json
 
 from PIL import Image
 
+from models import MODELS
+
 
 def test_health_reports_the_configured_model(client):
     resp = client.get("/health")
@@ -16,6 +18,11 @@ def test_health_reports_the_configured_model(client):
     assert body["model_loaded"] is True
     assert body["model"]["name"] == "toy-solid-color"
     assert body["model"]["supports_guidance"] is False
+    # harness.html and mcp_server.py both gate the fractional-start control on this,
+    # and both read it as "unknown" when absent -- so it going missing would silently
+    # re-offer a knob the server now rejects rather than failing anywhere visible.
+    assert body["model"]["supports_fractional_start"] is True
+    assert body["available"] == [m.key for m in MODELS]
 
 
 def test_generate_non_streaming(client):

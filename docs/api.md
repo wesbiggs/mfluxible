@@ -10,7 +10,7 @@ Returns:
 {
   "status": "ok",
   "model_loaded": true,
-  "available": ["z-image-turbo", "flux-schnell", "flux-dev", "qwen-image"],
+  "available": ["z-image-turbo", "z-image", "flux-schnell", "flux-dev", "krea-dev", "qwen-image", "krea-2", "krea-2-raw", "ernie-image-turbo", "ernie-image", "flux2-klein-4b", "flux2-klein-9b", "flux2-klein-9b-kv", "flux2-klein-base-4b", "flux2-klein-base-9b"],
   "model": {
     "name": "z-image-turbo",
     "label": "Z-Image-Turbo",
@@ -19,7 +19,8 @@ Returns:
     "default_steps": 9,
     "supports_guidance": false,
     "default_guidance": null,
-    "supports_negative_prompt": false
+    "supports_negative_prompt": false,
+    "supports_fractional_start": true
   },
   "memory": {"active_bytes": 10307921920, "cache_bytes": 1073741824, "peak_bytes": 12884901888}
 }
@@ -27,7 +28,9 @@ Returns:
 
 `model_loaded` is useful for waiting on startup (weight download + quantization can take a while the first time) before sending a generation request.
 
-`model` describes what this process is running and which request fields it will accept, so a client can fill in sensible defaults without being told how the server was configured: `default_steps` is what `steps` falls back to, and `supports_guidance` / `supports_negative_prompt` say whether `guidance` / `negative_prompt` are accepted or rejected with a 400. `available` lists every model this build knows how to run — all but `model.name` would need a restart (and a download) to use.
+`model` describes what this process is running and which request fields it will accept, so a client can fill in sensible defaults without being told how the server was configured: `default_steps` is what `steps` falls back to, and `supports_guidance` / `supports_negative_prompt` / `supports_fractional_start` say whether `guidance` / `negative_prompt` / `fractional_start` are accepted or rejected with a 400. `available` lists every model this build knows how to run — all but `model.name` would need a restart (and a download) to use.
+
+Treat any of those `supports_*` keys being **absent** as "unknown, let the server decide" rather than as `false` — that is what a server predating the key means, and it is how the bundled harness and MCP tool read them. Note also that `supports_negative_prompt` is necessary but not sufficient: a negative prompt also needs classifier-free guidance switched on, so on a model whose `default_guidance` is `1.0` (Krea-2) sending one without raising `guidance` is still a 400. See [Models](server.md#models).
 
 `memory` reports MLX's own byte counters for the server process. `active_bytes` is memory backing live arrays — near zero until the first generation, since weights are quantized lazily and only materialize when something first forces evaluation. `cache_bytes` is buffers MLX has freed but retains for reuse: reclaimable, but it counts toward the process's memory footprint just the same, so on a memory-tight machine it is worth watching between generations. `peak_bytes` is the high-water mark of active memory. All three are plain counters, so polling `/health` mid-generation is cheap and does not disturb the run.
 
@@ -52,7 +55,7 @@ mfluxible's own, native endpoint — everything below (step-by-step `thinking` e
 | `stream` | bool | true | SSE stream vs a single JSON response |
 | `image` | string or null | unset | base64-encoded input image (no `data:` URI prefix) for image-to-image. Accepted by every model this server can run — see [Image-to-image](#image-to-image) below |
 | `image_strength` | float or null | 0.4 if `image` is set | how strongly `image` constrains the output, `0.0`–`1.0`; only meaningful, and only accepted, alongside `image` — a **400** if set without it |
-| `fractional_start` | bool | `false` | start image-to-image *between* two steps of the sigma schedule instead of flooring to one, making `image_strength` continuous at no extra compute; only accepted alongside `image` — a **400** otherwise. See [Fractional start](#fractional-start) |
+| `fractional_start` | bool | `false` | start image-to-image *between* two steps of the sigma schedule instead of flooring to one, making `image_strength` continuous at no extra compute; only accepted alongside `image`, and only on a model that runs mflux's linear schedule (`supports_fractional_start` on [`/health`](#get-health)) — a **400** otherwise. See [Fractional start](#fractional-start) |
 
 ## Streaming response (`stream: true`, default)
 
@@ -107,6 +110,8 @@ Mechanically it's one of mflux's own extension points: `Config` resolves a sched
 It's off by default because it changes the pixels a given strength produces: an existing seed/strength pair keeps reproducing its old image unless you ask. With it on, `effective_image_strength` on the `start` event reports the strength that actually took effect rather than a floored bucket, so the two modes stay distinguishable from the stream alone. Two edge cases still report a fraction of `0` and leave the schedule untouched, since mflux's own clamps have already moved the start off the position the strength names: a strength below `1/steps` (floored *up* to rung 1), and `1.0` (starts past the last rung, with no steps to run).
 
 Two caveats worth stating. The interpolation is done on the request's own already-shifted schedule rather than by re-deriving mflux's sigma-shift math, so a half-step lands *near*, not exactly on, the rung that twice as many steps would have given — within 0.001 across the low-index region img2img actually uses, growing to about 0.013 at the very tail (measured for Z-Image-Turbo at 1024×1024; for FLUX.1-schnell, whose schedule isn't shifted at all, it's exact). Every bundled client exposes it: `--fractional-start` on both terminal clients, a checkbox beside Image strength in the harness, and a `fractional_start` argument on the MCP `generate_image` tool.
+
+The third caveat is which models can take it at all. `FractionalStartLinearScheduler` subclasses mflux's `LinearScheduler` and reaches the model by *replacing* the scheduler the variant would otherwise have chosen for itself — which is a no-op plus one moved rung on a model that runs the linear schedule anyway, and a different sampler entirely on one that doesn't. So it is offered only where mflux's own default is linear, and rejected with a 400 elsewhere: Z-Image (base), Krea-2, Krea-2-Raw and every FLUX.2 Klein checkpoint pick flow-match or `er_sde` instead. `supports_fractional_start` on [`/health`](#get-health) is the machine-readable form; plain `image_strength` is unaffected and works everywhere.
 
 ```bash
 uv run clients/stream_client.py "a lighthouse" --steps 10 --image input.png --image-strength 0.25 --fractional-start

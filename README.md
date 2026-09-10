@@ -28,7 +28,7 @@ uv run uvicorn server:app --app-dir server --host 127.0.0.1 --port 8420
 
 The model loads on startup, before the server accepts any requests. On first run this downloads its weights from Hugging Face — expect a sizable one-time download — then quantizes them and caches the quantized copy (see [Model cache](docs/server.md#model-cache)); both only happen once.
 
-The default model is Z-Image-Turbo ([Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo)). To run something else, set `MFLUXIBLE_MODEL` — `flux-schnell`, `flux-dev`, or `qwen-image` — before starting the server; only the model you select is ever downloaded. See [Models](docs/server.md#models) for what differs between them.
+The default model is Z-Image-Turbo ([Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo)). To run something else, set `MFLUXIBLE_MODEL` before starting the server — fifteen checkpoints across Z-Image, FLUX.1, FLUX.2 Klein, Qwen-Image, Krea-2 and ERNIE-Image are supported; only the model you select is ever downloaded. See [Models](docs/server.md#models) for the full table and what differs between them.
 
 Once it's running:
 
@@ -46,7 +46,7 @@ or use one of the [clients](docs/clients.md) for something more visual.
 - **[MCP tool](docs/mcp.md)** — generating images from within Claude Code or Claude Desktop: what the tool does, how to register it, and its own environment variables.
 - **[API](docs/api.md)** — every endpoint: the native streaming endpoint and its SSE event schema, image-to-image and fractional start, and the OpenAI-compatible `/v1` endpoints.
 - **[Server](docs/server.md)** — running it: how a synchronous mflux call is streamed out of an async server, environment variables (memory, model cache, LoRAs, CORS), the models it can run, binding to the network, and troubleshooting.
-- **[Testing](docs/testing.md)** — the weight-free test suite and CI.
+- **[Contributing](CONTRIBUTING.md)** — the weight-free test suite and CI, and what it takes to add another mflux model.
 
 ## License
 

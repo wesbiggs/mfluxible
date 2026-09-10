@@ -63,28 +63,40 @@ On by default, reflecting back any `http(s)://localhost:<any port>` or `127.0.0.
 
 One server process runs one model, chosen at startup with `MFLUXIBLE_MODEL`:
 
-| `MFLUXIBLE_MODEL` | Weights | Default steps | Guidance | Negative prompt |
-|---|---|---|---|---|
-| `z-image-turbo` (default) | [Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | 9 | — | — |
-| `flux-schnell` | [black-forest-labs/FLUX.1-schnell](https://huggingface.co/black-forest-labs/FLUX.1-schnell) | 4 | — | — |
-| `flux-dev` | [black-forest-labs/FLUX.1-dev](https://huggingface.co/black-forest-labs/FLUX.1-dev) | 25 | default 3.5 | — |
-| `qwen-image` | [Qwen/Qwen-Image-2512](https://huggingface.co/Qwen/Qwen-Image-2512) | 20 | default 3.5 | yes |
+| `MFLUXIBLE_MODEL` | Weights | Default steps | Guidance | Negative prompt | Fractional start |
+|---|---|---|---|---|---|
+| `z-image-turbo` (default) | [Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | 9 | — | — | yes |
+| `z-image` | [Tongyi-MAI/Z-Image](https://huggingface.co/Tongyi-MAI/Z-Image) | 50 | default 4.0 | yes | — |
+| `flux-schnell` | [black-forest-labs/FLUX.1-schnell](https://huggingface.co/black-forest-labs/FLUX.1-schnell) | 4 | — | — | yes |
+| `flux-dev` | [black-forest-labs/FLUX.1-dev](https://huggingface.co/black-forest-labs/FLUX.1-dev) | 25 | default 3.5 | — | yes |
+| `krea-dev` | [black-forest-labs/FLUX.1-Krea-dev](https://huggingface.co/black-forest-labs/FLUX.1-Krea-dev) | 25 | default 3.5 | — | yes |
+| `qwen-image` | [Qwen/Qwen-Image-2512](https://huggingface.co/Qwen/Qwen-Image-2512) | 20 | default 3.5 | yes | yes |
+| `krea-2` | [krea/Krea-2-Turbo](https://huggingface.co/krea/Krea-2-Turbo) | 8 | default 1.0 | above guidance 1.0 | — |
+| `krea-2-raw` | [krea/Krea-2-Raw](https://huggingface.co/krea/Krea-2-Raw) | 25 | default 1.0 | above guidance 1.0 | — |
+| `ernie-image-turbo` | [baidu/ERNIE-Image-Turbo](https://huggingface.co/baidu/ERNIE-Image-Turbo) | 8 | — | — | yes |
+| `ernie-image` | [baidu/ERNIE-Image](https://huggingface.co/baidu/ERNIE-Image) | 50 | default 4.0 | yes | yes |
+| `flux2-klein-4b` | [black-forest-labs/FLUX.2-klein-4B](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B) | 4 | — | — | — |
+| `flux2-klein-9b` | [black-forest-labs/FLUX.2-klein-9B](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B) | 4 | — | — | — |
+| `flux2-klein-9b-kv` | [black-forest-labs/FLUX.2-klein-9b-kv](https://huggingface.co/black-forest-labs/FLUX.2-klein-9b-kv) | 4 | — | — | — |
+| `flux2-klein-base-4b` | [black-forest-labs/FLUX.2-klein-base-4B](https://huggingface.co/black-forest-labs/FLUX.2-klein-base-4B) | 50 | default 1.5 | — | — |
+| `flux2-klein-base-9b` | [black-forest-labs/FLUX.2-klein-base-9B](https://huggingface.co/black-forest-labs/FLUX.2-klein-base-9B) | 50 | default 1.5 | — | — |
 
-mflux's own aliases work too (`schnell`, `dev`, `qwen`, `zimage`, …), and an unrecognised name fails at startup with the list of valid ones — before anything is downloaded.
+mflux's own aliases work too (`schnell`, `dev`, `qwen`, `zimage`, `klein-4b`, `krea2`, …), and an unrecognised name fails at startup with the list of valid ones — before anything is downloaded.
 
-**Only the model you select is ever fetched.** All four are named in `server/models.py`, but an entry there is inert data: its mflux imports are deferred into a loader function that runs at load time, and mflux downloads weights inside the model's constructor, not at import. The three you aren't running cost nothing beyond their row in that table.
+**Only the model you select is ever fetched.** All fifteen are named in `server/models.py`, but an entry there is inert data: its mflux imports are deferred into a loader function that runs at load time, and mflux downloads weights inside the model's constructor, not at import. The fourteen you aren't running cost nothing beyond their row in that table.
 
 Switching models means restarting the server, the same way `MFLUXIBLE_QUANTIZE` and LoRAs do. Each model + quantization + LoRA combination keeps its own quantized cache directory, so switching back doesn't re-quantize.
 
 What differs per model, beyond the step count:
 
-- **Guidance.** Z-Image-Turbo and FLUX.1-schnell are guidance-distilled: mflux forces guidance to 0 on the former and builds no guidance embedder at all on the latter, so a value has nowhere to go. Sending `guidance` to those is a 400 rather than a field quietly dropped. FLUX.1-dev takes distilled guidance; Qwen-Image runs true classifier-free guidance.
-- **Negative prompts.** Only Qwen-Image has a negative branch. That branch is also why its steps are expensive: it runs the transformer twice per step, conditional and unconditional, whether or not you send a `negative_prompt`.
-- **Size.** Z-Image-Turbo is the smallest of the four and Qwen-Image much the largest (a ~20B transformer alongside a multimodal text encoder). For scale, Z-Image-Turbo alone occupies 10GB of quantized weights at `MFLUXIBLE_QUANTIZE=8` and 5.5GB at `4`. On a 32GB machine, expect to want `4` or lower for Qwen-Image, and read [Memory](#memory) first — running out of headroom doesn't fail loudly, it just makes every generation slow.
+- **Guidance.** The distilled models — Z-Image-Turbo, FLUX.1-schnell, ERNIE-Image-Turbo and the three non-`base` FLUX.2 Klein checkpoints — have nowhere for a guidance value to go: mflux forces it to 0, builds no guidance embedder, or hard-errors on any value but 1.0. Sending `guidance` to those is a 400 rather than a field quietly dropped. FLUX.1-dev and FLUX.1-Krea-dev take distilled guidance; Z-Image, Qwen-Image, ERNIE-Image, Krea-2 and the FLUX.2 `base` checkpoints run true classifier-free guidance.
+- **Negative prompts.** A negative prompt needs CFG to have any effect, and every model here builds its unconditional branch only *above* guidance 1.0. So Z-Image, Qwen-Image, ERNIE-Image and Krea-2 accept one and the rest are a 400 — and on Krea-2, whose default guidance is mflux's own 1.0, a negative prompt is also a 400 unless you raise `guidance` alongside it. FLUX.1 and FLUX.2 have no negative branch at all. That branch is also why CFG steps are expensive: the transformer runs twice per step, conditional and unconditional, whether or not you send a `negative_prompt`.
+- **Fractional start.** [`fractional_start`](api.md#fractional-start) works by extending mflux's *linear* schedule, so it's only offered on models that would have run one. Z-Image (base), Krea-2 and every FLUX.2 Klein pick a different sampler for themselves — flow-match, or Krea-2's `er_sde` — and asking for a fractional start there is a 400. Plain `image_strength` still works on all of them, quantized to `1/steps` as usual.
+- **Size.** Z-Image-Turbo is among the smallest here and Qwen-Image much the largest (a ~20B transformer alongside a multimodal text encoder), with Krea-2 (12B) and the 9B FLUX.2/ERNIE checkpoints in between. For scale, Z-Image-Turbo alone occupies 10GB of quantized weights at `MFLUXIBLE_QUANTIZE=8` and 5.5GB at `4`. On a 32GB machine, expect to want `4` or lower for anything above ~9B, and read [Memory](#memory) first — running out of headroom doesn't fail loudly, it just makes every generation slow.
 
-All the bundled clients leave `steps` to the server unless you set it, so they follow whichever model is loaded without reconfiguration. The MCP tool and the browser harness go further and read [`/health`](api.md#get-health): the harness only shows Guidance and Negative prompt when the model accepts them, and the MCP tool refuses those arguments up front rather than spending a round trip to be told no.
+All the bundled clients leave `steps` to the server unless you set it, so they follow whichever model is loaded without reconfiguration. The MCP tool and the browser harness go further and read [`/health`](api.md#get-health): the harness only shows Guidance, Negative prompt and Fractional start when the model accepts them, and the MCP tool refuses those arguments up front rather than spending a round trip to be told no.
 
-Adding another mflux model is a new entry in `server/models.py` and nothing else: the three variants already share a constructor signature, a `generate_image()` signature and a `save_model()`, which is what keeps `server/engine.py` free of per-model branching.
+Adding a model mfluxible doesn't already run is a [CONTRIBUTING](../CONTRIBUTING.md#adding-a-model) topic.
 
 ## Running on a dedicated machine
 

@@ -615,7 +615,7 @@
             </span></span>
               <input type="number" id="imageStrength" min="0" max="1" step="0.05" value="0.4">
             </label>
-            <label class="check">
+            <label class="check" id="fractionalWrap">
               <input type="checkbox" id="fractionalStart"> Fractional start
               <span class="info">
                 <button type="button" aria-label="About fractional start" aria-describedby="tipFractional">i</button>
@@ -697,6 +697,7 @@ const useLastBtn = document.getElementById("useLastBtn");
 const clearImageBtn = document.getElementById("clearImageBtn");
 const imageStrengthEl = document.getElementById("imageStrength");
 const fractionalStartEl = document.getElementById("fractionalStart");
+const fractionalWrap = document.getElementById("fractionalWrap");
 const widthEl = document.getElementById("width");
 const heightEl = document.getElementById("height");
 const lockRatioEl = document.getElementById("lockRatio");
@@ -1007,6 +1008,14 @@ async function refreshModel() {
   // accept; a rejected one now comes back with a message saying why.
   guidanceWrap.classList.toggle("hidden", modelInfo ? !modelInfo.supports_guidance : false);
   negativeWrap.classList.toggle("hidden", modelInfo ? !modelInfo.supports_negative_prompt : false);
+  // `=== false` rather than `!`: a server that predates this field says nothing about
+  // it, and that means "unknown, let the server decide" -- the same rule the rest of
+  // this function follows for a missing model block. Unchecking on the way out matters
+  // because the request body reads .checked directly, so a box hidden while ticked
+  // would keep sending a field the server is about to reject.
+  const noFractional = modelInfo ? modelInfo.supports_fractional_start === false : false;
+  if (noFractional) fractionalStartEl.checked = false;
+  fractionalWrap.classList.toggle("hidden", noFractional);
   stepsEl.placeholder = modelInfo ? `model default (${modelInfo.default_steps})` : "model default";
   guidanceEl.placeholder = modelInfo && modelInfo.default_guidance !== null
     ? `model default (${modelInfo.default_guidance})`

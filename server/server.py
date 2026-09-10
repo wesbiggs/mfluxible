@@ -119,6 +119,11 @@ async def health():
             "supports_guidance": spec.supports_guidance,
             "default_guidance": spec.default_guidance,
             "supports_negative_prompt": spec.supports_negative_prompt,
+            # False on models whose own default scheduler isn't the linear one
+            # server/schedulers.py extends -- see ModelSpec.default_scheduler. A client
+            # that predates this field should treat a missing value as "unknown, let
+            # the server decide", the same way it treats a missing `model`.
+            "supports_fractional_start": spec.supports_fractional_start,
         },
         "memory": {
             "active_bytes": mx.get_active_memory(),
