@@ -172,6 +172,7 @@
   }
   .stack { display: grid; gap: 0.7rem; }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.7rem; position: relative; }
+  .span2 { grid-column: 1 / -1; }
 
   label {
     display: grid;
@@ -576,6 +577,13 @@
           <div class="grid2">
             <label>Width <input type="number" id="width" value="1024" step="16"></label>
             <label>Height <input type="number" id="height" value="1024" step="16"></label>
+            <label class="check span2">
+              <input type="checkbox" id="lockRatio"> Lock aspect ratio
+              <span class="info">
+                <button type="button" aria-label="About locking the aspect ratio" aria-describedby="tipLockRatio">i</button>
+                <span class="tip" id="tipLockRatio" role="tooltip">Holds the width:height ratio the two fields have at the moment you tick it: editing either one moves the other to match, rounded to the nearest multiple of 16 the server works in. Loading a base image still sets both from that image, and the lock takes its ratio from there.</span>
+              </span>
+            </label>
             <label>Steps <input type="number" id="steps" placeholder="model default"></label>
             <label>Seed <input type="number" id="seed" placeholder="random"></label>
           </div>
@@ -691,6 +699,7 @@ const imageStrengthEl = document.getElementById("imageStrength");
 const fractionalStartEl = document.getElementById("fractionalStart");
 const widthEl = document.getElementById("width");
 const heightEl = document.getElementById("height");
+const lockRatioEl = document.getElementById("lockRatio");
 const seedEl = document.getElementById("seed");
 const submitBtn = document.getElementById("submitBtn");
 const resetBtn = document.getElementById("resetBtn");
@@ -727,6 +736,42 @@ function snapToStep(value) {
   return Math.max(16, Math.floor(value / 16) * 16);
 }
 
+// Rounds where snapToStep floors. Both land on the 16px grid, so both say a size the
+// server won't shave -- but this one is picking a number rather than reporting back one
+// the user supplied, so nearest is simply truer to the ratio being held: at 1024 wide
+// and 3:2, flooring gives 672 and rounding 688 against a true 682.7.
+function roundToStep(value) {
+  return Math.max(16, Math.round(value / 16) * 16);
+}
+
+// Aspect-ratio lock. The ratio is taken once, when the box is ticked, rather than
+// re-derived from the fields on each edit: both dimensions land on multiples of 16, so
+// a ratio recomputed from already-rounded values would drift a little further every
+// time. Held fixed, each edit is the number actually in the box times that ratio, so a
+// half-typed value on the way to the real one corrects itself instead of accumulating.
+let lockedRatio = null;
+
+function captureRatio() {
+  const w = Number(widthEl.value);
+  const h = Number(heightEl.value);
+  lockedRatio = w > 0 && h > 0 ? w / h : null;
+}
+
+function syncLockedDimension(source, target) {
+  if (!lockRatioEl.checked || lockedRatio === null) return;
+  const value = Number(source.value);
+  // An empty box is Number 0, and mid-edit values are transient: leave the counterpart
+  // alone rather than stomping the size the user is halfway through replacing.
+  if (!(value > 0)) return;
+  // lockedRatio is width/height, so it divides going width -> height and multiplies
+  // the other way.
+  target.value = roundToStep(source === widthEl ? value / lockedRatio : value * lockedRatio);
+}
+
+lockRatioEl.addEventListener("change", captureRatio);
+widthEl.addEventListener("input", () => syncLockedDimension(widthEl, heightEl));
+heightEl.addEventListener("input", () => syncLockedDimension(heightEl, widthEl));
+
 function setBaseImage(b64, mimeType) {
   baseImageB64 = b64;
   imagePreview.src = `data:${mimeType};base64,${b64}`;
@@ -744,6 +789,11 @@ function setBaseImage(b64, mimeType) {
     if (!imagePreview.naturalWidth) return;
     widthEl.value = snapToStep(imagePreview.naturalWidth);
     heightEl.value = snapToStep(imagePreview.naturalHeight);
+    // With the aspect-ratio lock on, the input image's shape is the one worth holding
+    // -- the stretching this function exists to avoid is exactly what the old ratio
+    // would reintroduce on the next width tweak. Assigning .value fires no "input"
+    // event, so nothing here fights the lock; it just adopts the new ratio.
+    captureRatio();
   };
   // Re-loading the same image leaves .src untouched, so no load event fires -- hence
   // the complete check rather than a bare listener.
