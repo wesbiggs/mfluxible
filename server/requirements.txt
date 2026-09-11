@@ -1,5 +1,5 @@
 mflux>=0.19.1
-fastapi>=0.115
-uvicorn[standard]>=0.30
-Pillow>=10.0
-python-multipart>=0.0.9
+fastapi>=0.141.1
+uvicorn[standard]>=0.52.4
+Pillow>=12.3.0
+python-multipart>=0.0.32
