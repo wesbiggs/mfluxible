@@ -1,6 +1,6 @@
 # mfluxible
 
-A minimal streaming HTTP API for image generation on Apple Silicon, built on [mflux](https://github.com/filipstrand/mflux). Runs Z-Image-Turbo (the default), FLUX.1-schnell, FLUX.1-dev, or Qwen-Image — one model per server process, picked at startup (see [Models](docs/server.md#models)).
+A minimal streaming HTTP API for image generation on Apple Silicon, built on [mflux](https://github.com/filipstrand/mflux). Runs most of the image models mflux supports — fifteen checkpoints across Z-Image, FLUX.1, FLUX.2 Klein, Qwen-Image, Krea-2 and ERNIE-Image — one model per server process, configured at startup (see [Models](docs/server.md#models); Z-Image-Turbo is the default).
 
 Rather than a full node-graph tool (ComfyUI) or a proprietary format (Draw Things), this exposes a small API in the same spirit as a chat-completions endpoint: each denoising step streams as a "thinking" event while generation happens, with optional in-progress preview images (Draw Things-style), followed by the final image.
 
@@ -8,7 +8,7 @@ Rather than a full node-graph tool (ComfyUI) or a proprietary format (Draw Thing
 
 ```
 server/   the model + HTTP API (FastAPI)
-clients/   everything that talks to it: terminal scripts, a browser harness, an MCP tool for Claude
+clients/   everything that talks to it: terminal scripts, a browser harness, an MCP tool
 ```
 
 Nothing in `clients/` needs `server/`'s dependencies (mflux, PyTorch, etc.) or vice versa — install only what you need for what you're doing.
@@ -28,7 +28,7 @@ uv run uvicorn server:app --app-dir server --host 127.0.0.1 --port 8420
 
 The model loads on startup, before the server accepts any requests. On first run this downloads its weights from Hugging Face — expect a sizable one-time download — then quantizes them and caches the quantized copy (see [Model cache](docs/server.md#model-cache)); both only happen once.
 
-The default model is Z-Image-Turbo ([Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo)). To run something else, set `MFLUXIBLE_MODEL` before starting the server — fifteen checkpoints across Z-Image, FLUX.1, FLUX.2 Klein, Qwen-Image, Krea-2 and ERNIE-Image are supported; only the model you select is ever downloaded. See [Models](docs/server.md#models) for the full table and what differs between them.
+The default model is Z-Image-Turbo ([Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo)). To run something else, set `MFLUXIBLE_MODEL` before starting the server — fifteen checkpoints across Z-Image, FLUX.1, FLUX.2 Klein, Qwen-Image, Krea-2 and ERNIE-Image are supported; only the model you select is ever downloaded. See [Models](docs/server.md#models) for the full table, what differs between them, and roughly how much memory each needs — 8.6 GB to 31 GB of weights at the default quantization, about half that at `MFLUXIBLE_QUANTIZE=4`.
 
 Once it's running:
 
@@ -43,10 +43,10 @@ or use one of the [clients](docs/clients.md) for something more visual.
 ## Documentation
 
 - **[Clients](docs/clients.md)** — the bundled terminal scripts, the browser harness, and pointing an OpenAI-compatible frontend at the server.
-- **[MCP tool](docs/mcp.md)** — generating images from within Claude Code or Claude Desktop: what the tool does, how to register it, and its own environment variables.
+- **[MCP tool](docs/mcp.md)** — generating images from an MCP client: what the tool does, how to register it with each tested client, and its own environment variables.
 - **[API](docs/api.md)** — every endpoint: the native streaming endpoint and its SSE event schema, image-to-image and fractional start, and the OpenAI-compatible `/v1` endpoints.
 - **[Server](docs/server.md)** — running it: how a synchronous mflux call is streamed out of an async server, environment variables (memory, model cache, LoRAs, CORS), the models it can run, binding to the network, and troubleshooting.
-- **[Contributing](CONTRIBUTING.md)** — the weight-free test suite and CI, and what it takes to add another mflux model.
+- **[Contributing](CONTRIBUTING.md)** — for developers: the weight-free test suite and CI, and what it takes to add another mflux model.
 
 ## License
 
