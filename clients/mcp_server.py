@@ -348,14 +348,18 @@ async def generate_image(
     """Generate an image from a text prompt, optionally seeded from an existing image.
 
     Which model runs is the server's choice, not this tool's: Z-Image-Turbo by
-    default, or FLUX.1-schnell, FLUX.1-dev or Qwen-Image if it was started that way.
+    default, or any other checkpoint it was started with, across Z-Image, FLUX.1,
+    FLUX.2 Klein, Qwen-Image, Krea-2 and ERNIE-Image.
 
-    Leave steps unset and the server uses that model's own default (9 for
-    Z-Image-Turbo, 4 for FLUX.1-schnell, 25 for FLUX.1-dev, 20 for Qwen-Image) --
-    prefer that to guessing, since a step count that suits one model is wrong for
-    another. guidance applies only to models that use it (FLUX.1-dev, Qwen-Image) and
-    negative_prompt only to Qwen-Image; sending either to a model that cannot act on
-    it is an error naming the model, so leave both unset unless you know otherwise.
+    Leave steps unset and the server uses that model's own default, which runs
+    anywhere from 4 to 50 depending on the checkpoint -- prefer that to guessing,
+    since a step count that suits one model is several times too small for another.
+
+    guidance, negative_prompt and fractional_start are supported per checkpoint, not
+    per family: a turbo variant and the base model it came from often differ, so
+    knowing the family is not enough to know whether an argument applies. Sending one
+    to a model that cannot act on it is an error naming that model, so leave all three
+    unset unless the user asked for them.
 
     width/height must be divisible by 16 (the server floors them to a multiple of 16,
     so anything else silently generates up to 15px smaller). Generation time scales with
