@@ -781,9 +781,11 @@ heightEl.addEventListener("input", () => syncLockedDimension(heightEl, widthEl))
 //
 // Falling off the list costs nothing for the raster formats: an <img> picks its
 // decoder from the bytes' magic number rather than trusting a data: URL's declared
-// type, so a mislabelled PNG still previews -- and the server sniffs the bytes too
-// (Pillow, in _input_image_problem), never this string. SVG is the one that does need
-// its real type, and is deliberately absent: Pillow can't open one, so an SVG has no
+// type, so the fallback label still previews the real image -- checked, not assumed
+// (a real JPEG served as image/png decodes and reports its true naturalWidth, which
+// is what applyDimensions below reads). The server sniffs the bytes too (Pillow, in
+// _input_image_problem), never this string. SVG is the one format that does need its
+// real type, and is deliberately absent: Pillow can't open one, so an SVG has no
 // generation to preview for.
 const PREVIEW_MIME_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp", "image/avif"];
 
