@@ -21,6 +21,8 @@ Environment variables for `server.py`, all optional.
 | `MFLUXIBLE_MLX_WIRED_LIMIT_MB` | unset | Wire this much memory so the OS cannot page the weights out (see [Memory](#memory)) |
 | `MFLUXIBLE_LORA_PATHS` | unset | Comma-separated local LoRA `.safetensors` files to bake in (see [LoRAs](#loras)) |
 | `MFLUXIBLE_LORA_SCALES` | `1.0` each | Comma-separated scales matching `MFLUXIBLE_LORA_PATHS` |
+| `MFLUXIBLE_BASIC_AUTH_USERNAME` | unset | HTTP Basic username; auth is off unless this **and** the password are both set (see [Authentication](#authentication)) |
+| `MFLUXIBLE_BASIC_AUTH_PASSWORD` | unset | HTTP Basic password; required alongside the username |
 | `MFLUXIBLE_CORS_ORIGIN_REGEX` | `https?://(localhost\|127\.0\.0\.1)(:\d+)?` | Origins to reflect back in CORS (see [CORS](#cors)) |
 | `MFLUXIBLE_CORS_ORIGINS` | unset | Comma-separated exact-match origins, in addition to the regex |
 | `HF_TOKEN` | unset | Not an mfluxible variable — `huggingface_hub` reads it, and gated models need it (see [Gated weights](#gated-weights-and-hf_token)) |
@@ -138,7 +140,25 @@ Then everything else just points at that host instead of `127.0.0.1`, no code ch
 - `stream_client.py` / `stream_client.js`: `--url http://mac-mini.local:8420/mfluxible/v1/images/generations`
 - `mcp_server.py`: set `MFLUXIBLE_URL=http://mac-mini.local:8420/mfluxible/v1/images/generations` when registering it, e.g. `claude mcp add mfluxible --scope user -e MFLUXIBLE_URL=http://mac-mini.local:8420/mfluxible/v1/images/generations -- /path/to/mfluxible/.venv/bin/python /path/to/mfluxible/clients/mcp_server.py` — or, in Claude Desktop's config, `"env": {"MFLUXIBLE_URL": "http://mac-mini.local:8420/mfluxible/v1/images/generations"}` alongside `command`/`args`
 
-There's no authentication on the API — only bind it to `0.0.0.0` on a network you trust (home LAN, Tailscale/VPN), never expose it directly to the internet.
+### Authentication
+
+There's none by default. Set **both** `MFLUXIBLE_BASIC_AUTH_USERNAME` and `MFLUXIBLE_BASIC_AUTH_PASSWORD` to require HTTP Basic credentials on every endpoint — the API, `/health`, `/docs`, and the browser harness at `GET /`:
+
+```bash
+MFLUXIBLE_BASIC_AUTH_USERNAME=tavern MFLUXIBLE_BASIC_AUTH_PASSWORD='a long random string' \
+  uv run uvicorn server:app --app-dir server --host 0.0.0.0 --port 8420
+```
+
+Setting only one of the two leaves auth **off**: a half-finished deployment is far likelier than a deliberately blank username, and quietly serving unauthenticated is the failure worth avoiding. Bind to a non-loopback address without both set and the server logs a warning at startup, before it downloads anything.
+
+Each client carries the credentials its own way — `curl -u`, `--url http://user:pass@host:8420/...` for the terminal clients, and a browser will prompt you at `GET /`.
+
+Two things this is and isn't:
+
+- **It is not a substitute for network placement.** Basic credentials travel base64-encoded, not encrypted, so on plain HTTP anything on the path can read them. Keep binding to `0.0.0.0` only on a network you trust (home LAN, Tailscale/VPN) and never expose it directly to the internet — auth is defence in depth on that network, not permission to skip it. Put it behind a TLS-terminating reverse proxy if it needs to cross anything less trusted.
+- **CORS is not a substitute either.** It's a browser policy, not access control: `curl` and every non-browser client ignore it entirely. It also doesn't apply to the bundled harness at all, whose Server URL defaults to a relative path and is therefore same-origin. See [CORS](#cors).
+
+**Turning auth on blocks SillyTavern's image-generation source.** Its `stable-diffusion.cpp server` source sends no credentials on any of its three calls (unlike its AUTOMATIC1111 source, which has a Basic-auth field), so every request from it 401s. There's no setting to work around it, and embedding credentials in the URL doesn't help either — Node's `fetch` rejects a URL containing them. If you need that integration, keep the server on a trusted network without auth. See [SillyTavern](clients.md#sillytavern).
 
 ## Troubleshooting
 

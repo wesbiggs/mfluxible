@@ -2,7 +2,7 @@
 
 ## Layout
 
-`server/` (server.py, engine.py, models.py, schemas.py, chat_stub.py, requirements.txt) is the model + HTTP API. `clients/` (stream_client.py, stream_client.js, harness.html, mcp_server.py, requirements.txt, requirements-mcp.txt) is everything that talks to it over HTTP. They're independent dependency-wise -- installing one's requirements.txt doesn't pull in the other's. server.py/engine.py/models.py/schemas.py/chat_stub.py import each other as flat sibling modules (`from engine import ...`), not a package, so `server/` must stay on `sys.path` when running (e.g. `uv run uvicorn server:app --app-dir server`) -- don't add an `__init__.py` or turn this into a `server.*` package without updating those imports and the run command together.
+`server/` (server.py, engine.py, models.py, schemas.py, chat_stub.py, schedulers.py, auth.py, requirements.txt) is the model + HTTP API. `clients/` (stream_client.py, stream_client.js, harness.html, mcp_server.py, requirements.txt, requirements-mcp.txt) is everything that talks to it over HTTP. They're independent dependency-wise -- installing one's requirements.txt doesn't pull in the other's. server.py/engine.py/models.py/schemas.py/chat_stub.py/auth.py import each other as flat sibling modules (`from engine import ...`), not a package, so `server/` must stay on `sys.path` when running (e.g. `uv run uvicorn server:app --app-dir server`) -- don't add an `__init__.py` or turn this into a `server.*` package without updating those imports and the run command together.
 
 ## uv, but with requirements.txt files -- deliberately not a uv project
 
@@ -85,6 +85,68 @@ and still previews -- an `<img>` picks its decoder from the bytes' magic number,
 from the URL's declared type (verified, not assumed: a real JPEG relabelled
 `image/png` decodes and reports its true `naturalWidth`). SVG is the one format that
 does need its real type and is deliberately absent, since Pillow can't open one anyway.
+
+## Basic auth: CORS must wrap it, and it must not buffer the stream
+
+`server/auth.py` is off unless **both** `MFLUXIBLE_BASIC_AUTH_USERNAME` and
+`MFLUXIBLE_BASIC_AUTH_PASSWORD` are set. Half-configured means off, not
+half-open: setting one of the two is far likelier to be a half-finished
+deployment than a deliberately blank username, and the failure worth avoiding is
+silently serving unauthenticated while someone believes otherwise.
+
+**The two `add_middleware` calls in server.py are in the order they are on
+purpose, and it reads backwards.** Starlette's `add_middleware` inserts at the
+*front* of the stack, so the middleware added **last** runs **first**. Auth is
+added first precisely so `CORSMiddleware` ends up outside it. That ordering is
+load-bearing: a browser preflight carries no credentials by spec, so if auth ran
+first every cross-origin call would 401 at the preflight with no way for the page
+to recover. `test_cors_preflight_is_answered_without_credentials` fails if the
+two calls are swapped (verified by actually swapping them, not assumed), and it
+is the only thing standing between a tidy-up and a subtly broken browser client.
+
+Note the asymmetry that falls out of this and is *correct*: CORSMiddleware only
+claims an OPTIONS request that carries `Access-Control-Request-Method`. A **bare**
+OPTIONS is an ordinary request and is gated -- which is exactly SillyTavern's
+reachability probe (see the shim section above), so **turning auth on blocks the
+SillyTavern integration entirely**. Its `sdcpp` source sends no credentials on any
+of its three calls, unlike its AUTOMATIC1111 source which has a Basic-auth field,
+and credentials in the URL don't help either because Node's `fetch` rejects a URL
+containing them. That is documented in `docs/clients.md` rather than worked around:
+exempting those three endpoints from auth to keep one client working would be a
+worse answer than a visible incompatibility. Both halves are pinned by
+`test_the_sillytavern_ping_is_not_a_preflight_and_is_gated`.
+
+**Pure ASGI middleware, not `BaseHTTPMiddleware`.** The latter runs the response
+through an anyio task group and a memory stream, which is the wrong shape for a
+server where nearly every interesting endpoint returns a `StreamingResponse` that
+has to reach the client event by event -- the SSE `thinking` events carry per-step
+previews a client renders live. A pure ASGI middleware forwards send/receive
+untouched. `test_a_generation_still_streams_under_auth` asserts more than one
+event arrives, and a live run confirmed five discrete events rather than one
+buffered blob.
+
+**The `except binascii.Error` in `_decoded_credentials` is compatible with the
+invariant two sections above, not an exception to it.** `base64.b64decode` raises
+on a malformed header, and that except *discards* the exception and returns
+`None`, so a garbage header produces the byte-identical 401 a wrong password
+does. Nothing from the exception reaches a response body, which is the property
+being protected -- and the 401 deliberately says nothing about which half was
+wrong, since differing bodies would enumerate valid usernames. Both are tested
+against the response text, not the wording.
+
+`resolve_bind_host()` is best-effort and says so: the app is handed to uvicorn
+rather than starting it, so there is no socket to interrogate. It mirrors how
+uvicorn itself resolves the value -- explicit `--host`, then `UVICORN_HOST` (its
+CLI is a click command with `auto_envvar_prefix="UVICORN"`), then the `127.0.0.1`
+default, verified against uvicorn 0.52.4 -- and only decides whether to print a
+warning, so being wrong costs a missing or spurious warning, never a wrong bind.
+An unparseable hostname counts as non-loopback, because the useful direction to
+be wrong in is warning about a safe bind rather than staying quiet about an
+exposed one. The warning is logged before `engine.load()` so an exposed server
+says so immediately instead of after a multi-gigabyte download, and it reaches
+stderr through `logging.lastResort` under uvicorn's own `LOGGING_CONFIG` (which
+configures only the `uvicorn*` loggers and leaves root without a handler) -- the
+same mechanism `engine.py` already depends on.
 
 ## mflux is a fast-moving dependency
 

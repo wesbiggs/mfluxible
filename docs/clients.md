@@ -62,6 +62,8 @@ Setup, under Extensions → Image Generation:
 
 Step 4 matters more than it looks. SillyTavern sends both values on every request, from sliders it always shows, and this server **honours `steps` and drops `cfg_scale` where the model can't use it** rather than rejecting either — so a mismatch is slow or ignored, never an error you'd see. [The API reference](api.md#why-this-endpoint-drops-what-the-native-api-rejects) has the full reasoning; the short version is that SillyTavern replaces any upstream error with a bare `500` and no body, so a 400 explaining itself would reach you as an unexplained failed generation.
 
+**It also can't authenticate.** SillyTavern's `sdcpp` source sends no credentials on any of its three calls — unlike its AUTOMATIC1111 source, which has a Basic-auth field — so turning on [authentication](server.md#authentication) blocks this integration entirely, with no setting on either side to work around it. Credentials in the URL don't help either: Node's `fetch` rejects a URL containing them.
+
 Two consequences worth knowing:
 
 - **The sampler and scheduler dropdowns do nothing here.** They're populated from a hardcoded stable-diffusion.cpp list, and mflux picks its own sampler; the values are accepted and ignored.

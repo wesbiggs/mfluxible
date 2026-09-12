@@ -6,6 +6,7 @@ for the table). Weights are only fetched for the model actually selected.
 
 import base64
 import json
+import logging
 import os
 import time
 from contextlib import asynccontextmanager
@@ -17,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 import chat_stub
+from auth import BasicAuthMiddleware, credentials_from_env, resolve_bind_host, startup_warning
 from engine import MfluxEngine
 from models import CFG_GUIDANCE_FLOOR, MODELS
 from schemas import (
@@ -25,6 +27,10 @@ from schemas import (
     GenerateRequest,
     OpenAIImageGenerationRequest,
 )
+
+# Nothing configures logging here, so this lands on stderr via logging.lastResort --
+# the terminal running uvicorn -- the same way engine.py's does.
+log = logging.getLogger("mfluxible.server")
 
 MODEL = os.environ.get("MFLUXIBLE_MODEL", "z-image-turbo")
 
@@ -45,6 +51,10 @@ if LORA_PATHS and _raw_lora_scales:
 else:
     LORA_SCALES = None
 
+# (username, password) or None. Read once at import like every other setting here;
+# the middleware reads it back through a callable so the tests can swap it.
+BASIC_AUTH = credentials_from_env()
+
 # An unknown MFLUXIBLE_MODEL raises here, at import, listing the valid names -- before
 # lifespan starts a multi-gigabyte download for something that was never going to run.
 engine = MfluxEngine(model=MODEL, quantize=QUANTIZE, lora_paths=LORA_PATHS, lora_scales=LORA_SCALES)
@@ -60,6 +70,11 @@ MODEL_LOADED_AT: int = 0
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global MODEL_LOADED_AT
+    # Before the weights, so an exposed-and-unauthenticated server says so
+    # immediately rather than after a multi-gigabyte download.
+    warning = startup_warning(resolve_bind_host(), BASIC_AUTH is not None)
+    if warning is not None:
+        log.warning(warning)
     await engine.load()
     MODEL_LOADED_AT = int(time.time())
     yield
@@ -77,6 +92,15 @@ app = FastAPI(title="mfluxible", lifespan=lifespan)
 CORS_ORIGIN_REGEX = os.environ.get("MFLUXIBLE_CORS_ORIGIN_REGEX", r"https?://(localhost|127\.0\.0\.1)(:\d+)?")
 _raw_cors_origins = os.environ.get("MFLUXIBLE_CORS_ORIGINS", "").strip()
 CORS_ORIGINS = [o.strip() for o in _raw_cors_origins.split(",") if o.strip()]
+
+# Order matters, and it is the reverse of how it reads. Starlette's add_middleware
+# inserts at the front of the stack, so the middleware added *last* runs *first* --
+# meaning CORS below wraps auth here, not the other way round. That is the order
+# required: CORSMiddleware answers a browser preflight itself and returns before
+# auth ever sees it, which it has to, because a preflight carries no credentials
+# by spec and a 401 there would make every cross-origin call fail with no way for
+# the page to send them. Pinned by test_cors_preflight_is_answered_without_credentials.
+app.add_middleware(BasicAuthMiddleware, credentials=lambda: BASIC_AUTH)
 
 app.add_middleware(
     CORSMiddleware,
