@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
 
+# Nothing here writes to the repo -- checkout is the only thing that touches the API,
+# and it only reads. Spelled out rather than left to the repo/org default so a later
+# default of "write" doesn't silently hand a write-scoped token to every third-party
+# action in the job.
+permissions:
+  contents: read
+
 jobs:
   test:
     # mlx (mflux's own dependency) only ships wheels for Apple Silicon macOS -- there

@@ -319,3 +319,65 @@ def test_generate_streaming_sse(client):
 
     assert [e["type"] for e in events] == ["start", "thinking", "thinking", "image"]
     assert events[-1]["seed"] == 9
+
+
+# Both error envelopes, checked against the same leak. server.py has no `except` clause
+# in it at all any more -- an exception carrying mflux's text out to a response body was
+# the only way host detail could get into one (see MfluxEngine.request_problem), so
+# these pin the shape of the fix rather than just its current wording.
+_LEAKY_MESSAGE = "No such file: '/Users/someone/.cache/huggingface/hub/models--x/transformer.safetensors'"
+
+
+def _make_generation_fail(client):
+    import server as server_module
+
+    def boom(*_args, **_kwargs):
+        raise FileNotFoundError(_LEAKY_MESSAGE)
+
+    server_module.engine.model.generate_image = boom
+
+
+def test_generate_failure_is_a_500_that_does_not_quote_the_exception(client):
+    _make_generation_fail(client)
+    resp = client.post(
+        "/mfluxible/v1/images/generations",
+        json={"prompt": "a cat", "width": 32, "height": 32, "steps": 2, "stream": False},
+    )
+    assert resp.status_code == 500
+    assert "/Users/someone" not in resp.text
+    assert "server log" in resp.json()["message"]
+
+
+def test_openai_generate_failure_does_not_quote_the_exception(client):
+    _make_generation_fail(client)
+    resp = client.post(
+        "/v1/images/generations",
+        json={"prompt": "a cat", "model": "toy-solid-color", "size": "32x32"},
+    )
+    assert resp.status_code == 500
+    assert "/Users/someone" not in resp.text
+    assert resp.json()["error"]["type"] == "api_error"
+
+
+def test_streaming_failure_does_not_quote_the_exception(client):
+    # The stream is the path that can't be fixed at the endpoint: the 200 is already on
+    # the wire by the time generation fails, so whatever the engine emits is what ships.
+    _make_generation_fail(client)
+    with client.stream(
+        "POST",
+        "/mfluxible/v1/images/generations",
+        json={"prompt": "a cat", "width": 32, "height": 32, "steps": 2, "stream": True},
+    ) as resp:
+        assert resp.status_code == 200
+        body = "".join(resp.iter_text())
+
+    assert "/Users/someone" not in body
+    assert "server log" in body
+
+
+def test_a_rejected_request_still_says_exactly_why(client):
+    # The other half of the invariant: messages server.py *did* write are worth reading,
+    # and none of the above is allowed to flatten them into something generic.
+    resp = client.post("/mfluxible/v1/images/generations", json={"prompt": "a cat", "image_strength": 0.5})
+    assert resp.status_code == 400
+    assert resp.json()["message"] == "image_strength requires image to also be set."

@@ -79,6 +79,8 @@ A `thinking` event is emitted once step `step` has finished, carrying both `step
 
 `preview` is only present on steps where `preview_every` divides the step number, and — like `data` on the final `image` event — is always the full requested resolution; the server never downscales anything (that's a client concern — see [Clients](clients.md)). An `{"type": "error", "message": "..."}` event replaces the final `image` event if generation fails or is interrupted.
 
+**What `message` will and won't tell you.** Every message this API returns is one the server composed for a client to read — which for a generation that failed inside mflux means only `generation failed -- see the server log for the reason.`, not mflux's own text. The reason, with the full traceback, goes to the server's stderr instead (the terminal running `uvicorn`); mflux, MLX and Hugging Face errors routinely quote absolute cache paths, and those describe the machine serving the request rather than the request. Interruptions are the exception and still say which step they stopped on. So: a 400 can be acted on from the client, a 500 is read on the server — see [Troubleshooting](server.md#troubleshooting).
+
 The final image's PNG bytes (`data` on the `image` event) carry embedded metadata — prompt, seed, steps, model, quantization, LoRA config (if any), and generation time — as EXIF (`UserComment`), XMP, and IPTC all at once, for broad tool compatibility (readable with e.g. `exiftool output.png`; macOS's built-in `sips`/`mdls` don't surface it). This is mflux's own metadata pipeline (`GeneratedImage.save()`), not something reimplemented here. Step previews aren't touched — only the final image is worth the overhead.
 
 ## Non-streaming response (`stream: false`)

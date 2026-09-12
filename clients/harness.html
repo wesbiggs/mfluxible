@@ -773,9 +773,27 @@ lockRatioEl.addEventListener("change", captureRatio);
 widthEl.addEventListener("input", () => syncLockedDimension(widthEl, heightEl));
 heightEl.addEventListener("input", () => syncLockedDimension(heightEl, widthEl));
 
+// A dropped file's .type is the browser's guess from its extension, not something
+// this page picked, and setBaseImage interpolates it into an attribute the browser
+// parses as a URL -- so a .type that isn't a MIME type at all would go straight into
+// one. It's matched against this list and the *list's own* copy is what gets
+// interpolated, so nothing carried in on the file reaches the URL either way.
+//
+// Falling off the list costs nothing for the raster formats: an <img> picks its
+// decoder from the bytes' magic number rather than trusting a data: URL's declared
+// type, so a mislabelled PNG still previews -- and the server sniffs the bytes too
+// (Pillow, in _input_image_problem), never this string. SVG is the one that does need
+// its real type, and is deliberately absent: Pillow can't open one, so an SVG has no
+// generation to preview for.
+const PREVIEW_MIME_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp", "image/avif"];
+
+function previewMimeType(type) {
+  return PREVIEW_MIME_TYPES.find((known) => known === String(type).toLowerCase()) || "image/png";
+}
+
 function setBaseImage(b64, mimeType) {
   baseImageB64 = b64;
-  imagePreview.src = `data:${mimeType};base64,${b64}`;
+  imagePreview.src = `data:${previewMimeType(mimeType)};base64,${b64}`;
   imagePreview.classList.remove("hidden");
   dropZoneText.classList.add("hidden");
   clearImageBtn.disabled = false;
@@ -938,7 +956,7 @@ async function handleImageFile(file) {
     log("error: that file doesn't look like an image");
     return;
   }
-  setBaseImage(await fileToBase64(file), file.type || "image/png");
+  setBaseImage(await fileToBase64(file), file.type);
   if (file.type === "image/png") applyEmbeddedMetadata(new Uint8Array(await file.arrayBuffer()));
 }
 

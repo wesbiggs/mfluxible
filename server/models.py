@@ -34,7 +34,7 @@ from typing import Any
 # ZImage and ErnieImage skip it at `guidance <= 1.0`, Krea2 at `guidance == 1.0`, and
 # Flux2Klein at `not (guidance > 1.0)`. So 1.0 is the shared floor rather than a value
 # picked here. Krea-2 is the one model whose own default sits exactly on it, which is
-# why engine.check_request tests the *effective* guidance rather than trusting the flag
+# why engine.request_problem tests the *effective* guidance rather than trusting the flag
 # alone -- a negative prompt at guidance 1.0 would otherwise be accepted, encoded and
 # then never consulted.
 CFG_GUIDANCE_FLOOR = 1.0
@@ -66,7 +66,7 @@ class ModelSpec:
     # it is a *different sampler*: Flux2Klein and Z-Image base default to
     # "flow_match_euler_discrete", and Krea2 maps "linear" onto "er_sde" and raises
     # ValueError on any name but "er_sde"/"euler" -- from inside the worker thread,
-    # after the SSE headers are already out. check_request rejects fractional_start up
+    # after the SSE headers are already out. request_problem rejects fractional_start up
     # front wherever this isn't "linear"; see schedulers.py's module docstring for why
     # subclassing LinearScheduler is what ties the two together.
     default_scheduler: str = "linear"
@@ -239,7 +239,7 @@ MODELS: tuple[ModelSpec, ...] = (
         supports_guidance=True,
         # mflux's own DEFAULT_GUIDANCE for this model. It sits exactly on
         # CFG_GUIDANCE_FLOOR, so at the default there is no unconditional branch and a
-        # negative prompt would be encoded and then ignored -- check_request rejects
+        # negative prompt would be encoded and then ignored -- request_problem rejects
         # that combination rather than raising this above what mflux recommends.
         default_guidance=1.0,
         supports_negative_prompt=True,

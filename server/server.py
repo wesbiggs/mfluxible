@@ -139,17 +139,20 @@ async def _sse(req: GenerateRequest):
 
 
 async def _collect_final_image(req: GenerateRequest) -> dict:
-    """Runs a generation to completion and returns the final `image` event. Raises
-    RuntimeError (carrying the engine's own message) if generation ends in an `error`
-    event instead -- both endpoints below turn that into their own error shape rather
-    than sharing a response type, since the native and OpenAI-compat contracts
-    disagree on what an error body looks like."""
+    """Runs a generation to completion and returns its final event -- `image`, or
+    `error` if it ended in one instead. Callers check which; both endpoints below turn
+    an `error` into their own error shape rather than sharing a response type, since
+    the native and OpenAI-compat contracts disagree on what an error body looks like.
+
+    Handed back rather than raised, for the reason in MfluxEngine.request_problem's
+    docstring: an exception travelling out to a response body is how text from inside
+    mflux would reach a client, so this module has no `except ... : str(exc)` in it at
+    all and the messages below are only ever ones engine.py wrote to be read.
+    """
     async for event in engine.generate_stream(req):
-        if event["type"] == "image":
+        if event["type"] in ("image", "error"):
             return event
-        if event["type"] == "error":
-            raise RuntimeError(event["message"])
-    raise RuntimeError("generation ended without an image or error event")
+    return {"type": "error", "message": "generation ended without an image or error event"}
 
 
 # This is mfluxible's own API -- streaming `thinking` events with step timings and
@@ -158,20 +161,19 @@ async def _collect_final_image(req: GenerateRequest) -> dict:
 # client (harness.html, stream_client.py/js, mcp_server.py) targets this path.
 @app.post("/mfluxible/v1/images/generations")
 async def generate(req: GenerateRequest):
-    # Checked before the response begins: for a stream, raising once StreamingResponse
+    # Checked before the response begins: for a stream, failing once StreamingResponse
     # has started would mean a torn body with a 200 already on the wire.
-    try:
-        engine.check_request(req)
-    except ValueError as exc:
-        return JSONResponse(status_code=400, content={"type": "error", "message": str(exc)})
+    problem = engine.request_problem(req)
+    if problem is not None:
+        return JSONResponse(status_code=400, content={"type": "error", "message": problem})
 
     if req.stream:
         return StreamingResponse(_sse(req), media_type="text/event-stream")
 
-    try:
-        return await _collect_final_image(req)
-    except RuntimeError as exc:
-        return JSONResponse(status_code=500, content={"type": "error", "message": str(exc)})
+    final = await _collect_final_image(req)
+    if final["type"] == "error":
+        return JSONResponse(status_code=500, content={"type": "error", "message": final["message"]})
+    return final
 
 
 def _openai_error(
@@ -185,13 +187,20 @@ def _openai_error(
     )
 
 
-def _parse_openai_size(size: str) -> tuple[int, int]:
+# (width, height), or None if `size` isn't a shape this understands -- returned rather
+# than raised so the caller composes the 400 itself, keeping this module free of the
+# exception-to-response-body paths _collect_final_image's docstring explains.
+def _parse_openai_size(size: str) -> tuple[int, int] | None:
     if size.strip().lower() == "auto":
         return 1024, 1024
     parts = size.lower().split("x")
     if len(parts) != 2 or not all(p.isdigit() for p in parts):
-        raise ValueError(f"size must look like '1024x1024', got {size!r}")
+        return None
     return int(parts[0]), int(parts[1])
+
+
+def _bad_size_error(size: str) -> JSONResponse:
+    return _openai_error(400, f"size must look like '1024x1024', got {size!r}")
 
 
 def _preview_every_from_partial_images(partial_images: int) -> int:
@@ -204,8 +213,7 @@ def _preview_every_from_partial_images(partial_images: int) -> int:
     return max(1, engine.spec.default_steps // partial_images) if partial_images else 0
 
 
-def _openai_to_generate_request(req: OpenAIImageGenerationRequest) -> GenerateRequest:
-    width, height = _parse_openai_size(req.size)
+def _openai_to_generate_request(req: OpenAIImageGenerationRequest, width: int, height: int) -> GenerateRequest:
     return GenerateRequest(
         prompt=req.prompt,
         width=width,
@@ -302,24 +310,22 @@ async def openai_generate(req: OpenAIImageGenerationRequest):
             "(mfluxible does not host images for a 'url' response).",
         )
 
-    try:
-        gen_req = _openai_to_generate_request(req)
-    except ValueError as exc:
-        return _openai_error(400, str(exc))
+    parsed_size = _parse_openai_size(req.size)
+    if parsed_size is None:
+        return _bad_size_error(req.size)
+    gen_req = _openai_to_generate_request(req, *parsed_size)
 
-    try:
-        engine.check_request(gen_req)
-    except ValueError as exc:
-        return _openai_error(400, str(exc))
+    problem = engine.request_problem(gen_req)
+    if problem is not None:
+        return _openai_error(400, problem)
 
     created = int(time.time())
     if gen_req.stream:
         return StreamingResponse(_openai_sse(gen_req, created), media_type="text/event-stream")
 
-    try:
-        final = await _collect_final_image(gen_req)
-    except RuntimeError as exc:
-        return _openai_error(500, str(exc), error_type="api_error")
+    final = await _collect_final_image(gen_req)
+    if final["type"] == "error":
+        return _openai_error(500, final["message"], error_type="api_error")
 
     return {"created": created, "data": [{"b64_json": final["data"]}]}
 
@@ -375,10 +381,10 @@ async def openai_edit_image(
             "img2img (see the 'Image-to-image' section of README.md).",
         )
 
-    try:
-        width, height = _parse_openai_size(size)
-    except ValueError as exc:
-        return _openai_error(400, str(exc))
+    parsed_size = _parse_openai_size(size)
+    if parsed_size is None:
+        return _bad_size_error(size)
+    width, height = parsed_size
 
     image_bytes = await image.read()
     gen_req = GenerateRequest(
@@ -391,18 +397,16 @@ async def openai_edit_image(
         image_strength=image_strength,
     )
 
-    try:
-        engine.check_request(gen_req)
-    except ValueError as exc:
-        return _openai_error(400, str(exc))
+    problem = engine.request_problem(gen_req)
+    if problem is not None:
+        return _openai_error(400, problem)
 
     created = int(time.time())
     if gen_req.stream:
         return StreamingResponse(_openai_sse(gen_req, created), media_type="text/event-stream")
 
-    try:
-        final = await _collect_final_image(gen_req)
-    except RuntimeError as exc:
-        return _openai_error(500, str(exc), error_type="api_error")
+    final = await _collect_final_image(gen_req)
+    if final["type"] == "error":
+        return _openai_error(500, final["message"], error_type="api_error")
 
     return {"created": created, "data": [{"b64_json": final["data"]}]}

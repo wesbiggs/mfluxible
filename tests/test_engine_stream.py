@@ -215,3 +215,42 @@ async def test_check_request_failure_propagates_before_any_event(toy_engine):
     # See test_server_api.py::test_generate_rejects_unsupported_guidance.
     with pytest.raises(ValueError, match="guidance"):
         await _collect(toy_engine, GenerateRequest(prompt="x", guidance=1.0))
+
+
+# The message on a failed generation is the one thing here a *client* sees that the
+# engine doesn't otherwise curate, so it gets its own coverage: mflux, MLX and HF-hub
+# exceptions quote absolute cache paths, and an `except Exception as exc: str(exc)`
+# would put the host's home directory in an HTTP response body. The stand-in below is
+# shaped like the real thing (CodeQL flagged this path as py/stack-trace-exposure).
+_LEAKY_MESSAGE = "No such file: '/Users/someone/.cache/huggingface/hub/models--x/transformer.safetensors'"
+
+
+async def test_generation_failure_reports_without_quoting_the_exception(toy_engine, caplog):
+    def boom(*_args, **_kwargs):
+        raise FileNotFoundError(_LEAKY_MESSAGE)
+
+    toy_engine.model.generate_image = boom
+    with caplog.at_level("ERROR", logger="mfluxible.engine"):
+        events = await _collect(toy_engine, GenerateRequest(prompt="x", width=32, height=32, steps=2))
+
+    assert events[-1]["type"] == "error"
+    assert "/Users/someone" not in events[-1]["message"]
+    assert "server log" in events[-1]["message"]
+    # ...and the operator, who does need it, still gets the whole thing.
+    assert _LEAKY_MESSAGE in caplog.text
+    assert "FileNotFoundError" in caplog.text
+
+
+def test_an_interruption_still_says_which_step_it_stopped_on():
+    # The counterexample to the test above: this message is mfluxible's own, describes
+    # the request rather than the host, and so is deliberately still reported verbatim.
+    # Driven through the callback directly -- mflux only ever reaches its interrupt path
+    # from a literal KeyboardInterrupt on the server process (see CLAUDE.md), which is
+    # not something a test can stage around a generation.
+    from engine import _StreamCallback
+
+    emitted = []
+    callback = _StreamCallback(None, 0, emitted.append, fractional_start=False)
+    callback.call_interrupt(4, seed=1, prompt="x", latents=None, config=None, time_steps=None)
+
+    assert emitted == [{"type": "error", "message": "generation interrupted at step 5"}]
