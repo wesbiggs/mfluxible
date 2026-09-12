@@ -40,6 +40,52 @@ mflux models need engine changes rather than a table row). `docs/` is for users;
 is for contributors. Note the asymmetry with this file: `CONTRIBUTING.md` says what to do, while
 the sections below say why the non-obvious parts are the way they are.
 
+## No path from an exception to a response body, in either direction
+
+`server/server.py` contains no `except` clause at all, and that is the point rather
+than a coincidence. Validation is `MfluxEngine.request_problem`, which *returns* the
+reason a request can't be honoured; a finished generation is `_collect_final_image`,
+which *returns* the `image` or `error` event; a bad OpenAI `size` is
+`_parse_openai_size` returning `None`. Each of those used to raise and be caught as
+`str(exc)` into the response, which is what CodeQL flagged as `py/stack-trace-exposure`
+(four alerts, one per sink).
+
+The reason to keep it structural instead of sanitizing at each sink: the messages
+themselves are *fine* -- they were all written here, for a client to read, and
+`request_problem`'s are load-bearing API surface ("Z-Image-Turbo ignores guidance;
+omit the field"). What is not fine is that an exception is a channel anything upstream
+can also write to. `generate_image()` raising out of mflux, MLX, HF-hub or Pillow lands
+in the same `except`, and those messages quote absolute cache paths -- a missing weight
+file names `~/.cache/huggingface/...` in full, so the response body hands out the host's
+account name. Keeping the curated values as *return* values is what makes "nothing from
+upstream can reach a client" checkable by reading one module rather than by auditing
+every message that might ever flow through a shared catch.
+
+So: `check_request` still exists, wrapping `request_problem` for in-process callers
+(`generate_stream`, and the tests) that have no response to put a string in -- but if
+you find yourself adding `except ... : str(exc)` back into server.py to "simplify" the
+pairs of returns, that is the leak coming back. The engine end of it is
+`generate_stream`'s `except Exception`, which logs the traceback to
+`mfluxible.engine` (stderr, so the terminal running uvicorn) and emits a fixed
+`generation failed -- see the server log for the reason.` instead; the interrupt
+message beside it stays verbatim, because "interrupted at step 5" describes the request
+rather than the host. `_input_image_problem` splits off `_decode_input_image` for the
+same reason -- it used to interpolate Pillow's exception (which includes a repr of the
+in-memory buffer, address included) into its own message.
+
+Covered by `test_engine_stream.py::test_generation_failure_reports_without_quoting_the_exception`
+and the three `_LEAKY_MESSAGE` tests in `test_server_api.py`, which assert against a
+fake `/Users/someone/.cache/...` rather than against the current wording.
+
+The browser-side counterpart is in `clients/harness.html`: `previewMimeType` matches a
+dropped file's `.type` against a fixed list and interpolates *the list's* copy into the
+`data:` URL, because `.type` is the browser's guess from a filename, not a value this
+page chose (CodeQL: `js/xss-through-dom`). Anything unlisted falls back to `image/png`
+and still previews -- an `<img>` picks its decoder from the bytes' magic number, not
+from the URL's declared type (verified, not assumed: a real JPEG relabelled
+`image/png` decodes and reports its true `naturalWidth`). SVG is the one format that
+does need its real type and is deliberately absent, since Pillow can't open one anyway.
+
 ## mflux is a fast-moving dependency
 
 `server/engine.py` reaches into mflux internals that aren't public API: `model.callbacks.before_loop/in_loop/interrupt` are mutated directly, since `CallbackRegistry` has no `unregister()` as of mflux 0.19.1. The VAE-decode branching in `_decode_preview_b64` mirrors mflux's own `StepwiseHandler` on purpose, with one deliberate deviation: the non-packed branch goes through `VAEUtil.decode` rather than calling `vae.decode()` directly the way `StepwiseHandler` does. Qwen-Image's VAE is a 3D (video) decoder returning `(B, C, 1, H, W)` and `ImageUtil.to_image` wants 4D — `VAEUtil.decode` is what drops the singleton frame axis, and it's the same call each variant's own final decode makes, so previews and final images stay on identical handling. Calling `vae.decode()` bare here works for Z-Image and FLUX and breaks only on Qwen previews. If `uv pip install -U mflux` breaks this file, check `mflux/callbacks/callback_registry.py` and `mflux/callbacks/instances/stepwise_handler.py` in the installed package first — that's where this was reverse-engineered from (mflux ships no public docs for the callback system).
@@ -66,7 +112,7 @@ have run linear anyway. Elsewhere it is a sampler swap with no error — Z-Image
 every FLUX.2 Klein default to `flow_match_euler_discrete`, and the failure looks like bad
 images — or a `ValueError` thrown inside `generate_image()` on the worker thread with the
 SSE headers already on the wire (`Krea2._resolve_scheduler` maps `"linear"` onto
-`"er_sde"` and rejects every other name). `check_request` rejects `fractional_start` up
+`"er_sde"` and rejects every other name). `request_problem` rejects `fractional_start` up
 front wherever `default_scheduler != "linear"`, for the same reason it rejects guidance:
 a 400 before `StreamingResponse` starts, not a torn body. Extending it to a flow-match
 model means a sibling scheduler subclassing mflux's flow-match class, not relaxing that
@@ -155,7 +201,7 @@ Two things in that file are load-bearing rather than stylistic:
 
 The clients deliberately send `steps` (and `guidance`) as null rather than a number of their own: whichever model is loaded decides, so none of them needs reconfiguring when the server switches models. Don't "fix" a missing default back into `stream_client.*`, `harness.html` or `mcp_server.py` — a step count that suits Z-Image-Turbo is four times too small for FLUX.1-dev. `harness.html` and `mcp_server.py` additionally read `/health` to learn what the loaded model accepts; both treat a failed or model-less `/health` as "unknown, let the server decide" rather than an error, so they keep working against a server that predates that field.
 
-Guidance and negative prompts are rejected with a 400 on models that can't act on them rather than accepted and dropped, because mflux accepts both arguments on every variant and silently ignores them (its own CLIs print a warning instead). `check_request` runs in the endpoint, *before* `StreamingResponse` starts: raising inside the generator would mean a 200 status line already on the wire and a torn body.
+Guidance and negative prompts are rejected with a 400 on models that can't act on them rather than accepted and dropped, because mflux accepts both arguments on every variant and silently ignores them (its own CLIs print a warning instead). `request_problem` runs in the endpoint, *before* `StreamingResponse` starts: failing inside the generator would mean a 200 status line already on the wire and a torn body.
 
 ## Quantized-weight cache marker is a heuristic, not an integrity check
 

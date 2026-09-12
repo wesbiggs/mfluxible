@@ -27,6 +27,7 @@ import concurrent.futures
 import contextlib
 import hashlib
 import io
+import logging
 import os
 import random
 import tempfile
@@ -42,6 +43,13 @@ from mflux.utils.image_util import ImageUtil
 from models import CFG_GUIDANCE_FLOOR, ModelSpec, resolve
 from schedulers import SCHEDULER_PATH, start_fraction
 from schemas import GenerateRequest
+
+# Where anything a *client* must not see goes instead: exception text out of mflux,
+# MLX, HF-hub or Pillow, all of which is written for whoever is running the server.
+# Nothing configures logging here, so these land on stderr via logging.lastResort --
+# i.e. in the terminal running uvicorn -- at WARNING and above, which is every level
+# used below.
+log = logging.getLogger("mfluxible.engine")
 
 _DONE = object()
 
@@ -88,25 +96,44 @@ def _pil_to_b64_png(img: Image.Image) -> str:
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-def _decode_input_image(b64_data: str) -> bytes:
-    """Decodes and validates a client-supplied base64 input image, raising ValueError
-    (never a bare base64/Pillow exception) on bad input. Called from check_request so a
-    garbled `image` field gets the same clean 400 a bad guidance/negative_prompt request
-    gets rather than surfacing as an opaque error mid-stream; called again in
-    generate_stream to get the actual bytes to write to disk (see mflux's own image_path
-    parameter -- it wants a file path, not bytes or a PIL.Image, so there's no way to hand
-    it a decoded image directly). The redundant decode is cheap next to a generation.
+def _input_image_problem(b64_data: str) -> str | None:
+    """Why a client-supplied base64 input image can't be used, or None if it can.
+
+    Called from request_problem so a garbled `image` field gets the same clean 400 a bad
+    guidance/negative_prompt request gets rather than surfacing as an opaque error
+    mid-stream.
+
+    Returns the reason rather than raising it, and returns a sentence written here
+    rather than the underlying exception's own text -- both for the reasons in
+    MfluxEngine.request_problem's docstring. The real exception goes to the log instead,
+    where it is worth having and harmless: Pillow's carries a repr of the in-memory
+    buffer (address included) and base64's describes this decode call, so neither told a
+    client anything it could act on anyway.
     """
     try:
         raw = base64.b64decode(b64_data, validate=True)
-    except Exception as exc:
-        raise ValueError(f"image is not valid base64: {exc}") from exc
+    except Exception:
+        log.warning("rejecting input image: not valid base64", exc_info=True)
+        return "image is not valid base64."
     try:
         with Image.open(io.BytesIO(raw)) as img:
             img.verify()
-    except Exception as exc:
-        raise ValueError(f"image could not be decoded as an image: {exc}") from exc
-    return raw
+    except Exception:
+        log.warning("rejecting input image: not a decodable image", exc_info=True)
+        return "image could not be decoded as an image."
+    return None
+
+
+def _decode_input_image(b64_data: str) -> bytes:
+    """The actual bytes to write to disk (see mflux's own image_path parameter -- it
+    wants a file path, not bytes or a PIL.Image, so there's no way to hand it a decoded
+    image directly).
+
+    No validation of its own: generate_stream, its only caller, runs check_request first
+    -- so _input_image_problem has already vetted this exact string, and a second round
+    of Pillow work per generation would buy nothing.
+    """
+    return base64.b64decode(b64_data, validate=True)
 
 
 def _encode_final_png_with_metadata(image) -> bytes:
@@ -334,18 +361,27 @@ class MfluxEngine:
         )
         return _pil_to_b64_png(wrapped.image)
 
-    def check_request(self, req: GenerateRequest) -> None:
-        """Raises ValueError for a request this model cannot honour.
+    def request_problem(self, req: GenerateRequest) -> str | None:
+        """Why this model cannot honour `req`, or None if it can.
 
         Called by the endpoint before the response starts, so a bad request is a 400
         rather than an exception thrown mid-stream once the SSE headers are already
-        out; generate_stream calls it too, so a direct caller gets the same guarantee.
+        out; generate_stream calls check_request below, so a direct caller gets the
+        same guarantee.
+
+        A return value rather than an exception because that is what this is -- a
+        verdict on the request, not a failure -- and because keeping it one is what
+        makes the next part checkable at a glance: every string that leaves here is
+        written in this function, for a client to read. Text from inside mflux, MLX or
+        Pillow reaches a client only by riding an exception object out to a response
+        body, so no path from an exception to a response is the invariant, and
+        server.py holds the other end of it (nothing there does str(exc) either).
         """
         if req.guidance is not None and not self.spec.supports_guidance:
-            raise ValueError(f"{self.spec.label} ignores guidance (it is guidance-distilled); omit the field.")
+            return f"{self.spec.label} ignores guidance (it is guidance-distilled); omit the field."
         if req.negative_prompt is not None:
             if not self.spec.supports_negative_prompt:
-                raise ValueError(f"{self.spec.label} has no negative-prompt branch; omit the field.")
+                return f"{self.spec.label} has no negative-prompt branch; omit the field."
             # Having a negative branch isn't enough -- it has to be switched on. Every
             # CFG model here encodes the unconditional prompt only above
             # CFG_GUIDANCE_FLOOR, so at or below it the negative prompt would be
@@ -355,19 +391,21 @@ class MfluxEngine:
             # floor and this only fires if a request lowers it.
             guidance = req.guidance if req.guidance is not None else self.spec.default_guidance
             if guidance is not None and guidance <= CFG_GUIDANCE_FLOOR:
-                raise ValueError(
+                return (
                     f"{self.spec.label} only encodes a negative prompt above guidance "
                     f"{CFG_GUIDANCE_FLOOR} (classifier-free guidance is off at or below it, and "
                     f"this request's guidance is {guidance}); raise guidance or omit negative_prompt."
                 )
         if req.image_strength is not None and req.image is None:
-            raise ValueError("image_strength requires image to also be set.")
+            return "image_strength requires image to also be set."
         if req.image is not None:
             if req.image_strength is not None and not (0.0 <= req.image_strength <= 1.0):
-                raise ValueError("image_strength must be between 0.0 and 1.0.")
-            _decode_input_image(req.image)
+                return "image_strength must be between 0.0 and 1.0."
+            problem = _input_image_problem(req.image)
+            if problem is not None:
+                return problem
         elif req.fractional_start:
-            raise ValueError("fractional_start requires image to also be set.")
+            return "fractional_start requires image to also be set."
         if req.fractional_start and not self.spec.supports_fractional_start:
             # SCHEDULER_PATH *replaces* whatever scheduler the variant would have picked
             # for itself, so it is only a fractional start on a model that would have
@@ -375,11 +413,19 @@ class MfluxEngine:
             # silently (flow-match models: wrong images, no error) or raises inside
             # generate_image() on the worker thread with the SSE headers already out
             # (Krea2). See ModelSpec.default_scheduler.
-            raise ValueError(
+            return (
                 f"{self.spec.label} runs mflux's {self.spec.default_scheduler!r} scheduler, and "
                 "fractional_start only applies to models on the linear schedule it extends; "
                 "omit the field (image_strength still works, quantized to 1/steps)."
             )
+        return None
+
+    def check_request(self, req: GenerateRequest) -> None:
+        """request_problem, raised instead of returned, for in-process callers that
+        have no response to put it in (generate_stream, and the tests)."""
+        problem = self.request_problem(req)
+        if problem is not None:
+            raise ValueError(problem)
 
     def _generation_kwargs(self, req: GenerateRequest) -> dict:
         """Per-request knobs that only some models can act on.
@@ -388,7 +434,7 @@ class MfluxEngine:
         variant *accepts* both arguments, but on a guidance-distilled model (Z-Image
         Turbo, FLUX.1-schnell) the value has no path to the output, and mflux's own
         CLIs warn rather than pretend otherwise -- so rather than accept a value and
-        silently drop it, check_request above rejects the field outright.
+        silently drop it, request_problem above rejects the field outright.
         """
         kwargs = {}
         if self.spec.supports_guidance:
@@ -474,8 +520,19 @@ class MfluxEngine:
                         "seed": seed,
                         "generation_time": image.generation_time,
                     }
-                except Exception as exc:
-                    yield {"type": "error", "message": str(exc)}
+                except Exception:
+                    # Everything mflux, MLX, HF-hub or Pillow can throw arrives here,
+                    # and none of it is written for a client: an HF-hub miss or a
+                    # failed weight load quotes absolute cache paths, which on the
+                    # default ~/.cache layout means handing out the operator's
+                    # username and disk layout. The whole traceback goes to the log
+                    # (the terminal running uvicorn, for a local server) and the
+                    # client is told that it failed and where to look.
+                    log.exception("generation failed")
+                    yield {
+                        "type": "error",
+                        "message": "generation failed -- see the server log for the reason.",
+                    }
                 finally:
                     # mflux has no way to interrupt generate_image() from outside the
                     # thread it's running on (its only interrupt path is a literal

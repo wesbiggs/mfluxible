@@ -36,7 +36,7 @@ mflux's shared variant surface is not universal, and the rest of its text-to-ima
 | `BooguImage` | no latent creator at all, so step previews are impossible (mflux's own CLI passes `latent_creator=None` and says stepwise output is unsupported) |
 | `LensImage` | no `save_model()`, so the quantized-weight cache has nothing to write and every startup re-quantizes |
 
-Each of those needs a capability flag in `models.py` **and** `engine.py` honouring it — `supports_lora`, `supports_img2img`, `supports_previews` alongside the existing pair, routed through `check_request` so an unusable field is a 400 before `StreamingResponse` starts rather than an exception thrown into a half-sent body. Adding the row alone fails at load or mid-stream, not gracefully.
+Each of those needs a capability flag in `models.py` **and** `engine.py` honouring it — `supports_lora`, `supports_img2img`, `supports_previews` alongside the existing pair, routed through `request_problem` so an unusable field is a 400 before `StreamingResponse` starts rather than an exception thrown into a half-sent body. Adding the row alone fails at load or mid-stream, not gracefully.
 
 ## Testing
 
