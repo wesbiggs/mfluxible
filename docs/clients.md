@@ -48,3 +48,21 @@ cd clients && python3 -m http.server 8000
 Neither of those, nor the [MCP tool](mcp.md), is this — they're the bundled clients, and they all speak mfluxible's own native API. But `POST /v1/images/generations` and `POST /v1/images/edits` (see the [API reference](api.md)) are genuine [OpenAI Images API](https://platform.openai.com/docs/api-reference/images/create)-compatible endpoints, so any tool built against that API can point at this server directly, with no code changes on its side. For example, [Open WebUI](https://docs.openwebui.com/features/chat-conversations/image-generation-and-editing/openai/)'s Settings → Admin → Images panel takes an arbitrary `IMAGES_OPENAI_API_BASE_URL` and a free-text model name — set the base URL to `http://127.0.0.1:8420/v1` and the model name to whatever `model.name` reports on [`/health`](api.md#get-health) (e.g. `z-image-turbo`), and Open WebUI's own chat UI becomes a frontend for this server.
 
 Open WebUI's *Native* (agentic) mode also needs an actual chat model behind the connection to decide when to call the image tool — normally a separate LLM. If you'd rather not run one just for that, point Open WebUI's chat connection at mfluxible's own `POST /v1/chat/completions` (same base URL) too — see [that endpoint](api.md#post-v1chatcompletions) for what it does and, importantly, doesn't do.
+
+## SillyTavern
+
+[SillyTavern](https://github.com/SillyTavern/SillyTavern)'s image-generation extension has no OpenAI-compatible source — its `openai` one hardcodes `api.openai.com` inside SillyTavern's own backend, with no base-URL setting (unlike the "Custom (OpenAI-compatible)" source on its chat side). So the `/v1` endpoints above are no use here. Instead, this server answers the three calls its **stable-diffusion.cpp server** source makes, which is the one local-URL source whose surface is small enough to be worth implementing: a reachability probe on [`OPTIONS /v1/images/generations`](api.md#options-v1imagesgenerations), a model list from [`GET /v1/models`](api.md#get-v1models), and generation on [`POST /sdapi/v1/txt2img`](api.md#post-sdapiv1txt2img).
+
+Setup, under Extensions → Image Generation:
+
+1. **Source** → `stable-diffusion.cpp server`.
+2. **stable-diffusion.cpp URL** → `http://127.0.0.1:8420` — the base URL only, no path. SillyTavern's server is what fetches this, not your browser, so it has to be reachable from wherever SillyTavern is running (and CORS doesn't enter into it).
+3. Click **Validate**. The model dropdown then fills from `/v1/models` with the one model this process has loaded — select it, so SillyTavern stops sending whatever name it had stored before.
+4. Set **Sampling steps** and **CFG scale** to suit that model. SillyTavern's defaults are 20 and 7; check `default_steps` and `default_guidance` on [`/health`](api.md#get-health) for what the loaded model actually wants (Z-Image-Turbo: 9 steps, no guidance at all).
+
+Step 4 matters more than it looks. SillyTavern sends both values on every request, from sliders it always shows, and this server **honours `steps` and drops `cfg_scale` where the model can't use it** rather than rejecting either — so a mismatch is slow or ignored, never an error you'd see. [The API reference](api.md#why-this-endpoint-drops-what-the-native-api-rejects) has the full reasoning; the short version is that SillyTavern replaces any upstream error with a bare `500` and no body, so a 400 explaining itself would reach you as an unexplained failed generation.
+
+Two consequences worth knowing:
+
+- **The sampler and scheduler dropdowns do nothing here.** They're populated from a hardcoded stable-diffusion.cpp list, and mflux picks its own sampler; the values are accepted and ignored.
+- **Anything else that needs a real A1111 server is out of scope** — img2img, upscaling, and the progress bar all use endpoints this shim doesn't implement. Text-to-image is what works.

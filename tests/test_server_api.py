@@ -381,3 +381,205 @@ def test_a_rejected_request_still_says_exactly_why(client):
     resp = client.post("/mfluxible/v1/images/generations", json={"prompt": "a cat", "image_strength": 0.5})
     assert resp.status_code == 400
     assert resp.json()["message"] == "image_strength requires image to also be set."
+
+
+# --- The SillyTavern-facing shim (OPTIONS ping + /sdapi/v1/txt2img) ------------------
+#
+# See server.py's comment on POST /sdapi/v1/txt2img for what SillyTavern's `sdcpp`
+# source actually calls and why this endpoint drops fields the native API rejects.
+
+
+def test_a1111_ping_answers_a_bare_options_request(client):
+    # SillyTavern's "Validate" button is a server-side `fetch(url, {method: 'OPTIONS'})`
+    # with no Access-Control-Request-Method header, so the CORS middleware doesn't
+    # handle it and a missing route would 405. It checks only the status.
+    resp = client.options("/v1/images/generations")
+    assert resp.status_code == 204
+    assert resp.headers["allow"] == "POST, OPTIONS"
+
+
+def test_a1111_txt2img_returns_a_base64_png_in_images(client):
+    resp = client.post(
+        "/sdapi/v1/txt2img",
+        json={"prompt": "a cat", "width": 32, "height": 32, "steps": 1, "seed": 5, "batch_size": 1},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+
+    image = Image.open(io.BytesIO(base64.b64decode(body["images"][0])))
+    assert image.size == (32, 32)
+
+    # A1111 puts a JSON *string* here, not an object -- a client parses it a second time.
+    info = json.loads(body["info"])
+    assert info["seed"] == 5
+    assert info["steps"] == 1
+    assert info["sd_model_name"] == "toy-solid-color"
+
+
+def test_a1111_txt2img_drops_guidance_the_model_cannot_use(client):
+    # toy-solid-color has supports_guidance False, so this is the exact request the
+    # native API answers with a 400. Here it must succeed, and `info` is where the
+    # caller can see the field had no effect.
+    resp = client.post(
+        "/sdapi/v1/txt2img",
+        json={"prompt": "a cat", "width": 32, "height": 32, "steps": 1, "cfg_scale": 7.0},
+    )
+    assert resp.status_code == 200
+    assert json.loads(resp.json()["info"])["cfg_scale"] is None
+
+
+def test_a1111_txt2img_drops_a_negative_prompt_the_model_cannot_use(client):
+    resp = client.post(
+        "/sdapi/v1/txt2img",
+        json={
+            "prompt": "a cat",
+            "width": 32,
+            "height": 32,
+            "steps": 1,
+            "negative_prompt": "blurry",
+        },
+    )
+    assert resp.status_code == 200
+    assert json.loads(resp.json()["info"])["negative_prompt"] == ""
+
+
+def test_a1111_txt2img_treats_a_negative_seed_as_random(client):
+    # A1111 spells "pick one for me" as -1; passing it through would be a literal --
+    # and reproducible -- seed. SillyTavern omits the field instead, so this is for
+    # every other A1111 client.
+    resp = client.post(
+        "/sdapi/v1/txt2img",
+        json={"prompt": "a cat", "width": 32, "height": 32, "steps": 1, "seed": -1},
+    )
+    assert resp.status_code == 200
+    seed = json.loads(resp.json()["info"])["seed"]
+    assert isinstance(seed, int) and seed >= 0
+
+
+def test_a1111_txt2img_reports_the_models_own_step_count_when_none_was_sent(client):
+    resp = client.post("/sdapi/v1/txt2img", json={"prompt": "a cat", "width": 32, "height": 32})
+    assert resp.status_code == 200
+    # toy-solid-color's default_steps is 2 (see tests/doubles/toy_model.py).
+    assert json.loads(resp.json()["info"])["steps"] == 2
+
+
+def test_a1111_txt2img_rejects_asking_for_more_than_one_image(client):
+    # The one thing this endpoint does reject: unlike a dropped cfg_scale, answering
+    # "give me 4" with one image is a concretely wrong result to a request that named
+    # a number. SillyTavern hardcodes batch_size: 1, so it can never see this.
+    for payload in ({"batch_size": 2}, {"n_iter": 2}):
+        resp = client.post("/sdapi/v1/txt2img", json={"prompt": "a cat", **payload})
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "invalid_request"
+
+
+def test_a1111_txt2img_ignores_a_stale_model_name(client):
+    # SillyTavern only auto-selects from a freshly loaded model list when its stored
+    # sd.model is empty, so a name left over from a previously configured source is
+    # sent here while the dropdown shows something else. Validating it would turn that
+    # invisible stale setting into an unexplained failure -- see the endpoint's comment.
+    resp = client.post(
+        "/sdapi/v1/txt2img",
+        json={
+            "prompt": "a cat",
+            "width": 32,
+            "height": 32,
+            "steps": 1,
+            "model": "sd_xl_base_1.0.safetensors",
+        },
+    )
+    assert resp.status_code == 200
+    assert json.loads(resp.json()["info"])["sd_model_name"] == "toy-solid-color"
+
+
+def test_a1111_shim_never_builds_a_request_its_own_model_rejects(monkeypatch):
+    """The drops in _a1111_to_generate_request duplicate request_problem's rules, so
+    this pins the two together across every model in the real table: whatever
+    SillyTavern sends, what comes out the other side must be a request the loaded model
+    actually accepts. If request_problem grows a clause this doesn't mirror, this fails
+    here rather than as a bare 500 in someone's chat window.
+
+    No weights are touched: MfluxEngine resolves its spec in __init__ and downloads
+    nothing until load().
+    """
+    import server as server_module
+    from engine import MfluxEngine
+    from schemas import A1111Txt2ImgRequest
+
+    # The maximal payload SillyTavern can send, across the cfg_scale values that
+    # matter: its own default, one at the CFG floor (where a negative prompt would be
+    # encoded and never consulted -- Krea-2's default guidance is exactly this), and
+    # the field omitted entirely so the model's own default applies.
+    for spec in MODELS:
+        engine = MfluxEngine(model=spec.key, quantize=None, model_cache_dir=None)
+        monkeypatch.setattr(server_module, "engine", engine)
+        try:
+            for cfg_scale in (7.0, 1.0, None):
+                req = A1111Txt2ImgRequest(
+                    prompt="a cat",
+                    negative_prompt="blurry",
+                    cfg_scale=cfg_scale,
+                    steps=20,
+                    seed=-1,
+                )
+                gen_req = server_module._a1111_to_generate_request(req)
+                problem = engine.request_problem(gen_req)
+                assert problem is None, f"{spec.key} (cfg_scale={cfg_scale}): {problem}"
+        finally:
+            engine.shutdown()
+
+
+def test_a1111_ping_route_does_not_shadow_a_real_cors_preflight(client):
+    # The new OPTIONS route sits on a path the CORS middleware also handles. The two
+    # don't collide only because Starlette routes a preflight by the presence of
+    # Access-Control-Request-Method -- so a browser still gets its
+    # Access-Control-Allow-Origin here, rather than the bare 204 above.
+    resp = client.options(
+        "/v1/images/generations",
+        headers={"Origin": "http://localhost:3000", "Access-Control-Request-Method": "POST"},
+    )
+    assert resp.status_code == 200
+    assert resp.headers["access-control-allow-origin"] == "http://localhost:3000"
+
+
+def test_a1111_txt2img_accepts_sillytaverns_actual_default_payload(client):
+    """The literal request a stock SillyTavern install emits, as assembled by
+    `generateSdcppImage` and then rebuilt by the `sdcpp` backend router (which deletes
+    undefined/null/empty-string keys, so an unset negative prompt and a -1 seed never
+    arrive at all). Its defaults are 512x512, 20 steps and CFG 7, with sampler and
+    scheduler names from a hardcoded stable-diffusion.cpp list that means nothing here.
+
+    Written out in full rather than built from the helpers above: the thing most likely
+    to break this integration is a field appearing in that payload that this endpoint
+    chokes on, and that only gets caught by sending the real shape.
+    """
+    resp = client.post(
+        "/sdapi/v1/txt2img",
+        json={
+            "model": "toy-solid-color",
+            "prompt": "a cat",
+            "width": 32,
+            "height": 32,
+            "steps": 1,
+            "cfg_scale": 7,
+            "batch_size": 1,
+            "sampler_name": "euler_a",
+            "scheduler": "discrete",
+        },
+    )
+    assert resp.status_code == 200
+    assert Image.open(io.BytesIO(base64.b64decode(resp.json()["images"][0]))).size == (32, 32)
+
+
+def test_a1111_txt2img_failure_does_not_quote_the_exception(client):
+    # The fourth sink for the invariant the three _LEAKY_MESSAGE tests above cover: a
+    # new endpoint that turns a failed generation into a response body is a new place
+    # for an upstream message (and the absolute cache path in it) to reach a client.
+    _make_generation_fail(client)
+    resp = client.post(
+        "/sdapi/v1/txt2img",
+        json={"prompt": "a cat", "width": 32, "height": 32, "steps": 2},
+    )
+    assert resp.status_code == 500
+    assert "/Users/someone" not in resp.text
+    assert "server log" in resp.json()["detail"]

@@ -210,3 +210,46 @@ It plays exactly one deterministic turn of OpenAI's function-calling protocol:
 It only ever recognizes a tool literally named `generate_image` — the name [Open WebUI's own builtin tool uses](https://github.com/open-webui/open-webui/blob/main/backend/open_webui/tools/builtin.py) — offered in that specific request's `tools` list; it never guesses at one that wasn't offered. There's no general conversation, no other tools, no multi-turn reasoning — if that's what's needed, point the chat connection at a real model instead.
 
 Both streaming and non-streaming (`stream: true`/`false`) are supported, in OpenAI's own chat-completion / chat-completion-chunk shapes. `model` in the request isn't validated against anything — unlike the image endpoints, there's no real model here to be inconsistent with.
+
+## `OPTIONS /v1/images/generations`
+
+`204`, with an `Allow: POST, OPTIONS` header and no body. A reachability probe, not CORS — it exists because SillyTavern's "Validate" button is a bare server-side `OPTIONS` on this path, sent without an `Access-Control-Request-Method` header and therefore never seen by the CORS middleware (which would otherwise answer it). See [`POST /sdapi/v1/txt2img`](#post-sdapiv1txt2img) below.
+
+A browser's real preflight on this path is still handled by CORS as before; the two don't collide, because Starlette tells them apart by that header. This says nothing about whether the weights have finished loading — that's `model_loaded` on [`/health`](#get-health).
+
+## `POST /sdapi/v1/txt2img`
+
+An [AUTOMATIC1111](https://github.com/AUTOMATIC1111/stable-diffusion-webui)-shaped `txt2img`, deliberately narrow: it exists for [SillyTavern](clients.md#sillytavern), which has no OpenAI-compatible image source, and it implements only what SillyTavern's `sdcpp` source actually sends. It is not an A1111 emulation — there is no `/sdapi/v1/options`, `/progress`, `/interrupt`, img2img, or model switching.
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `prompt` | string | `""` | |
+| `negative_prompt` | string | unset | **Dropped** rather than rejected on a model that can't act on it (see below) |
+| `width` / `height` | int | 512 | Floored to a multiple of 16, as everywhere else |
+| `steps` | int | the model's own default | Honoured as sent — it's a visible slider in the caller's UI |
+| `cfg_scale` | float | the model's own default | Maps to `guidance`. **Dropped** rather than rejected on a guidance-distilled model |
+| `seed` | int | random | A1111's `-1` means random, and is mapped to that rather than used as a literal seed |
+| `batch_size` / `n_iter` | int | 1 | A **400** if either is anything but 1 — mfluxible generates one image per request |
+| `model` | string | unset | **Accepted and ignored.** One model runs per process; [`GET /v1/models`](#get-v1models) is the honest answer to what's loaded, and `info.sd_model_name` below reports what actually ran |
+
+Everything else A1111's much larger payload can carry (`sampler_name`, `scheduler`, `clip_skip`, ...) is accepted and ignored — mflux picks its own sampler and has no equivalent for the rest.
+
+Response (A1111's shape; `info` is a JSON **string**, parsed a second time by the caller):
+
+```json
+{
+  "images": ["<base64 png>"],
+  "parameters": {"prompt": "a puffin", "width": 1024, "...": "the request as received"},
+  "info": "{\"prompt\": \"a puffin\", \"negative_prompt\": \"\", \"seed\": 42, \"all_seeds\": [42], \"width\": 1024, \"height\": 1024, \"steps\": 9, \"cfg_scale\": null, \"sd_model_name\": \"z-image-turbo\"}"
+}
+```
+
+`parameters` echoes the request; `info` reports what actually took effect. That distinction is the point: a `cfg_scale` of 7 in `parameters` against `"cfg_scale": null` in `info` is how a caller sees that this model ignored the field.
+
+### Why this endpoint drops what the native API rejects
+
+Everywhere else, a field the loaded model can't act on is a **400** rather than a silent no-op — see [Models](server.md#models) for that reasoning. This endpoint inverts it, for one caller-specific reason: SillyTavern's `sdcpp` routes answer every upstream failure with a bare `500` and no body, logging the real message only to its own server console. A 400 from here reaches the user as a failed generation with no reason attached, so the careful wording of a rejection buys nothing — and since SillyTavern sends `cfg_scale` and `steps` on *every* request from its own sliders (whose defaults, 7 and 20, suit neither a guidance-distilled model nor a 9-step one), rejecting them would make the source unusable rather than correcting anyone.
+
+The line between ignoring and rejecting is whether the caller could otherwise detect the difference. A dropped `cfg_scale` changes the image, but the caller named no specific image and has nothing to compare against. `batch_size: 4` answered with one image is a concretely wrong result to a request that named a number — so that one is still a 400.
+
+A negative prompt is dropped under exactly the conditions that would otherwise reject it: no negative branch on this model, *or* classifier-free guidance not actually switched on above the floor, which is the "necessary but not sufficient" case described in [Models](server.md#models). The drops mirror those rules rather than sharing code with them, so the endpoint re-checks its own output against the real validator — a rule this ever fails to mirror surfaces as a 400 instead of a silently wrong image.

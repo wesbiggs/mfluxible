@@ -134,3 +134,39 @@ class ChatCompletionRequest(BaseModel):
     messages: list[ChatMessage]
     tools: list[dict[str, Any]] | None = None
     stream: bool = False
+
+
+class A1111Txt2ImgRequest(BaseModel):
+    """Request body for the AUTOMATIC1111-shaped `POST /sdapi/v1/txt2img` shim -- see
+    server.py for what that endpoint exists for (SillyTavern's image-generation
+    extension, whose `sdcpp` source posts this shape).
+
+    Every field a caller can send that mflux has no equivalent for -- `sampler_name`,
+    `scheduler`, `clip_skip`, and the rest of A1111's much larger payload -- is
+    accepted and ignored rather than rejected, which is the opposite of how
+    `GenerateRequest` treats a field the loaded model can't act on. The reason is in
+    server.py's comment on the endpoint: this caller never shows the user a 400's
+    message, so rejecting a field it sends on every request would be an unexplained
+    failure rather than the useful correction it is on the native API.
+
+    Defaults are A1111's own where mflux has a matching concept and `None` where it
+    doesn't: `steps` and `cfg_scale` default to None rather than A1111's 50 and 7 so
+    an omitted field means "whatever the loaded model picks" (as on GenerateRequest),
+    not a number this schema invented.
+    """
+
+    prompt: str = ""
+    negative_prompt: str | None = None
+    width: int = 512
+    height: int = 512
+    steps: int | None = None
+    cfg_scale: float | None = None
+    # A1111 spells "random" as -1 here, where GenerateRequest spells it None; the
+    # endpoint maps between them rather than passing -1 through as a literal seed.
+    seed: int | None = None
+    batch_size: int = 1
+    n_iter: int = 1
+    # Accepted, never acted on -- one model runs per process, so there is nothing to
+    # switch to. See the endpoint's comment for why this one is ignored rather than
+    # validated the way OpenAIImageGenerationRequest.model is.
+    model: str | None = None

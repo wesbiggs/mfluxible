@@ -42,9 +42,9 @@ or use one of the [clients](docs/clients.md) for something more visual.
 
 ## Documentation
 
-- **[Clients](docs/clients.md)** — the bundled terminal scripts, the browser harness, and pointing an OpenAI-compatible frontend at the server.
+- **[Clients](docs/clients.md)** — the bundled terminal scripts, the browser harness, and pointing a third-party frontend (OpenAI-compatible, or SillyTavern) at the server.
 - **[MCP tool](docs/mcp.md)** — generating images from an MCP client: what the tool does, how to register it with each tested client, and its own environment variables.
-- **[API](docs/api.md)** — every endpoint: the native streaming endpoint and its SSE event schema, image-to-image and fractional start, and the OpenAI-compatible `/v1` endpoints.
+- **[API](docs/api.md)** — every endpoint: the native streaming endpoint and its SSE event schema, image-to-image and fractional start, the OpenAI-compatible `/v1` endpoints, and the AUTOMATIC1111-shaped `txt2img` shim SillyTavern needs.
 - **[Server](docs/server.md)** — running it: how a synchronous mflux call is streamed out of an async server, environment variables (memory, model cache, LoRAs, CORS), the models it can run, binding to the network, and troubleshooting.
 - **[Contributing](CONTRIBUTING.md)** — for developers: the weight-free test suite and CI, and what it takes to add another mflux model.
 
