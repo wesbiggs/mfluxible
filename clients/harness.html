@@ -632,6 +632,9 @@
           <label>Server URL
             <input type="text" id="url" value="/mfluxible/v1/images/generations">
           </label>
+          <label><span>API token <span class="opt">(only if an auth proxy is in front)</span></span>
+            <input type="password" id="token" autocomplete="off" placeholder="none">
+          </label>
           <label><span>Preview every N steps <span class="opt">(0 disables)</span></span>
             <input type="number" id="previewEvery" value="0">
           </label>
@@ -682,6 +685,7 @@
 <script>
 const form = document.getElementById("form");
 const urlEl = document.getElementById("url");
+const tokenEl = document.getElementById("token");
 const promptEl = document.getElementById("prompt");
 const modelInfoEl = document.getElementById("modelInfo");
 const stepsEl = document.getElementById("steps");
@@ -992,6 +996,41 @@ useLastBtn.addEventListener("click", () => {
 });
 clearImageBtn.addEventListener("click", clearBaseImage);
 
+// Where a credential gets attached, and the only place. An empty field means no
+// proxy in front -- the default -- and has to stay a request carrying no
+// Authorization header at all: sending `Bearer ` with nothing after it would turn
+// "none configured" into a credential the server can only reject.
+function authHeaders() {
+  const token = tokenEl.value.trim();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+// Persisted, because the alternative is retyping 64 hex characters every reload.
+// Both directions are wrapped: storage isn't always reachable -- a private window,
+// or a browser set to block site data, throws on access rather than returning null --
+// and an uncaught throw here would take the rest of this script with it. Falling back
+// to a blank field still leaves the page working for the session.
+const TOKEN_KEY = "mfluxible.token";
+
+function savedToken() {
+  try {
+    return window.localStorage.getItem(TOKEN_KEY) || "";
+  } catch (err) {
+    return "";
+  }
+}
+
+tokenEl.value = savedToken();
+tokenEl.addEventListener("change", () => {
+  try {
+    window.localStorage.setItem(TOKEN_KEY, tokenEl.value.trim());
+  } catch (err) { /* unavailable: the field still holds it for this page */ }
+  // Re-probe. /health is left open by the bundled Caddyfile, but a stricter proxy may
+  // gate it -- in which case the model fields are sitting in their "unknown" state and
+  // a token is exactly the thing that resolves them.
+  refreshModel();
+});
+
 function healthUrl(generationsUrl) {
   // Base against the page's own location so a relative Server URL (the default,
   // now that the server can serve this page itself at its root) still resolves.
@@ -1004,7 +1043,7 @@ function healthUrl(generationsUrl) {
 async function refreshModel() {
   let unknown;
   try {
-    const resp = await fetch(healthUrl(urlEl.value));
+    const resp = await fetch(healthUrl(urlEl.value), { headers: authHeaders() });
     if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
     modelInfo = (await resp.json()).model || null;
     // A 200 with no model block means a server predating this field, which is a
@@ -1045,7 +1084,7 @@ async function refreshModel() {
 async function generate(body, url) {
   const resp = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(body),
   });
   if (!resp.ok) {
@@ -1117,6 +1156,11 @@ function handleEvent(event) {
 // doesn't own: the image-to-image inputs, the last result, and the output panes.
 function resetAll() {
   form.reset();
+  // form.reset() blanks the token field along with everything else, but the token is
+  // saved separately -- leaving it cleared here would put the field and storage out of
+  // step and 401 the next generation. It isn't form state in the sense the others are:
+  // it's how you reach this server at all, not a parameter of the image.
+  tokenEl.value = savedToken();
   clearBaseImage();
   lastResultB64 = null;
   useLastBtn.disabled = true;

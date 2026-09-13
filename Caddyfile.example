@@ -1,0 +1,75 @@
+# A bearer-token auth layer for mfluxible, as a reverse proxy.
+#
+# This and MFLUXIBLE_BASIC_AUTH_* are alternatives, not layers -- running both means
+# two secrets for one server. The built-in Basic auth gates *everything* with one
+# credential a browser supplies on its own; this gates only the paths that cost GPU
+# time, with a token the OpenAI-compatible clients already speak (Open WebUI's "API
+# key" field sends exactly this header).
+#
+# Deliberately a bare site block with no global `{ ... }` options, so it can be pasted
+# straight into an existing Caddyfile: a Caddyfile may only have one global block, and
+# a second one is a parse error rather than a merge. Standalone, `caddy run --config
+# Caddyfile` serves it as-is.
+#
+# Generate a token with:  openssl rand -hex 32
+#
+# The app itself must stay on loopback. `uvicorn server:app --app-dir server` binds
+# 127.0.0.1 by default, which is what makes this proxy the only way in; binding it to
+# 0.0.0.0 so something else can reach it puts the *unauthenticated* app on the network
+# beside this proxy rather than behind it, and the token stops meaning anything.
+
+# `tls internal` issues from Caddy's own CA, which is what makes a `.test` name (or any
+# name that doesn't resolve publicly) serve real HTTPS -- worth having, since a bearer
+# token crossing plaintext is readable by anything on the path, exactly as Basic is.
+# Devices need to trust that CA once: `caddy trust` on this machine, or install the root
+# from ~/.local/share/caddy/pki/authorities/local/root.crt elsewhere. On a tailnet,
+# `tls <host>.<tailnet>.ts.net` gets a publicly-trusted cert instead and skips that step.
+# Swap in a public hostname and drop the `tls` line entirely to have Caddy fetch from
+# Let's Encrypt on its own.
+mfluxible.test {
+	tls internal
+
+	# Open, deliberately. The harness at / is a page whose source is in the public
+	# repo, /openapi.json is its schema, and /health reports the model name and MLX
+	# memory counters -- no filesystem paths, nothing the README doesn't already say.
+	#
+	# Leaving /health open is load-bearing rather than lazy: the harness hides its
+	# guidance and negative-prompt fields based on that response, so gating it would
+	# leave an unauthenticated visitor looking at a page offering fields the loaded
+	# model rejects. Open, the page renders correctly and simply can't generate.
+	#
+	# Serving these openly is only safe because everything below costs GPU time and is
+	# gated. A stranger gets a working-looking harness and a 401 on Generate.
+	@public path / /docs /docs/* /openapi.json /health
+	handle @public {
+		reverse_proxy 127.0.0.1:8420
+	}
+
+	# Everything else: the native streaming endpoint, both OpenAI-compatible ones, the
+	# A1111 shim and the chat stub. Gating by exclusion rather than by listing them is
+	# the safe direction -- a new endpoint is protected the day it's added, and
+	# tests/test_proxy_config.py fails if one ever lands in @public above.
+	#
+	# `header` is a core matcher, so this needs no plugin and no xcaddy build. It is an
+	# exact match on the whole value, not a prefix. Note it is also a plain string
+	# comparison, not the constant-time one server/auth.py uses for Basic: with a
+	# high-entropy token that difference isn't practically exploitable across a network,
+	# but it is a difference, and it's the reason to use `openssl rand` rather than a
+	# passphrase.
+	@bearer header Authorization "Bearer REPLACE-WITH-A-LONG-RANDOM-TOKEN"
+	handle @bearer {
+		# No flush_interval needed: Caddy detects text/event-stream and streams it
+		# through unbuffered, which this server depends on -- its `thinking` events
+		# carry per-step previews a client renders live. nginx in this position needs
+		# an explicit `proxy_buffering off;` for the same reason.
+		reverse_proxy 127.0.0.1:8420
+	}
+
+	handle {
+		# OpenAI's error envelope, matching what server/auth.py's own 401 returns, so a
+		# client that parses one parses the other. No WWW-Authenticate header: it would
+		# make a browser pop a Basic prompt that can never succeed here.
+		header Content-Type application/json
+		respond `{"error":{"message":"authentication required -- send Authorization: Bearer <token>","type":"invalid_request_error","param":null,"code":"unauthorized"}}` 401
+	}
+}

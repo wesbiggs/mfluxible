@@ -7,8 +7,9 @@ Rather than a full node-graph tool (ComfyUI) or a proprietary format (Draw Thing
 ## Layout
 
 ```
-server/   the model + HTTP API (FastAPI)
-clients/   everything that talks to it: terminal scripts, a browser harness, an MCP tool
+server/             the model + HTTP API (FastAPI)
+clients/            everything that talks to it: terminal scripts, a browser harness, an MCP tool
+Caddyfile.example   optional: a reverse proxy that puts a bearer token in front of the API
 ```
 
 Nothing in `clients/` needs `server/`'s dependencies (mflux, PyTorch, etc.) or vice versa — install only what you need for what you're doing.
@@ -45,7 +46,7 @@ or use one of the [clients](docs/clients.md) for something more visual.
 - **[Clients](docs/clients.md)** — the bundled terminal scripts, the browser harness, and pointing a third-party frontend (OpenAI-compatible, or SillyTavern) at the server.
 - **[MCP tool](docs/mcp.md)** — generating images from an MCP client: what the tool does, how to register it with each tested client, and its own environment variables.
 - **[API](docs/api.md)** — every endpoint: the native streaming endpoint and its SSE event schema, image-to-image and fractional start, the OpenAI-compatible `/v1` endpoints, and the AUTOMATIC1111-shaped `txt2img` shim SillyTavern needs.
-- **[Server](docs/server.md)** — running it: how a synchronous mflux call is streamed out of an async server, environment variables (memory, model cache, LoRAs, CORS), the models it can run, binding to the network, and troubleshooting.
+- **[Server](docs/server.md)** — running it: how a synchronous mflux call is streamed out of an async server, environment variables (memory, model cache, LoRAs, CORS), the models it can run, binding to the network, authentication, and troubleshooting.
 - **[Contributing](CONTRIBUTING.md)** — for developers: the weight-free test suite and CI, and what it takes to add another mflux model.
 
 ## License

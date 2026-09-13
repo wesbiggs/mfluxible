@@ -1,10 +1,14 @@
 # Clients
 
-Both live in `clients/` and talk to the server over HTTP — neither loads the model itself, so the server from the [Quickstart](../README.md#quickstart) must already be running. The [MCP tool](mcp.md) is a third client in the same vein, on its own page.
+## Example clients
 
-## Terminal
+Fully usable example clients live in `clients/` and talk to the server over HTTP — neither loads the model itself, so the server from the [Quickstart](../README.md#quickstart) must already be running. The [MCP tool](mcp.md) is a third client in the same vein, documented on its own page.
 
-`stream_client.py` (`uv pip install -r clients/requirements.txt` first — just `requests`) or the dependency-free `stream_client.js` (Node 18+) render step progress and previews inline in the terminal as they stream, saving the final image to disk:
+All clients share the same Apache-2.0 license as the server and can be modified and/or used as the basis for other tools.
+
+### Python and node terminal scripts
+
+`stream_client.py` (`uv pip install -r clients/requirements.txt` first — just `requests`) and the dependency-free `stream_client.js` (Node 18+) render step progress and previews inline in the terminal as they stream, saving the final image to disk:
 
 ```bash
 uv run clients/stream_client.py "a puffin on a cliff at sunset" --preview-every 2 --out puffin.png
@@ -13,6 +17,8 @@ node clients/stream_client.js "a puffin on a cliff at sunset" --preview-every 2 
 ```
 
 Both take `--steps`, `--seed`, `--guidance` and `--negative-prompt`, and leave all four to the server when you don't pass them — so `--steps` is only worth setting to override the loaded model's own default. `--guidance` and `--negative-prompt` are refused (with a message naming the model) on models that can't act on them; see [Models](server.md#models).
+
+If the server is behind [authentication](server.md#authentication), both scripts carry it the same way. For a bearer token (a proxy in front), `export MFLUXIBLE_BEARER_TOKEN=...` — environment rather than a flag, so the secret stays out of shell history and out of `ps` for the length of a generation. For the server's own HTTP Basic, put the credentials in the URL: `--url http://user:pass@host:8420/mfluxible/v1/images/generations`. Setting `MFLUXIBLE_BEARER_TOKEN` *and* passing a URL with credentials is refused with a message rather than silently resolved — the two would collide in the request, and which one wins isn't worth leaving to the HTTP library.
 
 Both also take `--image PATH` for image-to-image (read from disk and base64-encoded, not a URL) and `--image-strength` (0.0–1.0, only valid alongside `--image`; the server's own default, 0.4, applies if you omit it) — see [Image-to-image](api.md#image-to-image) for what `image_strength` actually controls (mflux's convention is the inverse of some other tools'). `--fractional-start` (also only valid alongside `--image`) makes that strength continuous instead of quantized to `1/steps`, at no extra cost — see [Fractional start](api.md#fractional-start).
 
@@ -24,7 +30,7 @@ Images render at `width=auto` (height defaults to auto too) — the same default
 
 Not tmux-aware — iTerm2's protocol needs extra passthrough wrapping inside tmux that these scripts don't do.
 
-## Browser
+### Browser
 
 `clients/harness.html` is a dependency-free page (plain HTML/CSS/JS in one file, no build step, no CDN — nothing is fetched but the API itself) laid out as a two-pane app: a scrolling column of controls on the left with Generate and Reset pinned beneath it, and the image stage on the right with the run log along its bottom edge. It has a form for prompt/width/height/steps/seed/preview_every that calls the streaming endpoint directly from the browser via `fetch`, reads [`/health`](api.md#get-health) on load to show which model the server is running (leaving Steps blank uses that model's default, and Guidance / Negative prompt appear only if it accepts them), parsing the SSE stream the same way the terminal clients do, and renders previews and the final image as `<img>` elements (via `data:` URLs) plus a download link for the final PNG. **Lock aspect ratio**, the checkbox under the Width and Height boxes, is off by default; ticking it takes the ratio those two have at that moment and then moves whichever field you aren't editing to keep it, rounded to the nearest multiple of 16 (see below for why 16). The ratio is held from when you ticked it rather than re-read from the boxes on every keystroke, so nudging a dimension repeatedly can't walk it a rounding step at a time, and a half-typed number on the way to the real one corrects itself. Under 900px wide the panes stack — stage first, controls beneath, Generate stuck to the bottom of the viewport — so the image doesn't end up below a column of inputs taller than the screen. It follows the OS light/dark setting, drawing both schemes from one set of CSS custom properties at the top of the file.
 
@@ -33,6 +39,8 @@ It also does image-to-image. Get a base image onto the page either by dragging a
 **Reset all**, next to Generate, puts the page back the way it loads: every field to its default, the input image and the remembered last result dropped, and the log, preview and result panes cleared. It also re-checks `/health`, since the Server URL is one of the fields it resets. It's disabled while a generation is running, so a reset can't clear a log that's still being written to.
 
 The server itself serves this page at its root, `GET /` — just open `http://localhost:8420/` (or whichever host/port `server.py` is bound to) once it's up. The Server URL field defaults to the relative path `/mfluxible/v1/images/generations`, which resolves against whatever origin served the page, so no configuration is needed for this same-origin case.
+
+**Advanced → API token** is for the case where a reverse proxy is gating the API with a bearer token (see [Authentication](server.md#authentication)); leave it empty otherwise and the page sends no `Authorization` header at all. It's kept in `localStorage` rather than re-typed each visit, which means it survives a reload and is deliberately *not* cleared by **Reset all** — it's how you reach the server, not a parameter of the image. Entering one re-checks `/health`, so a deployment that gates that endpoint too fills in its model fields as soon as the token lands. The server's own HTTP Basic needs nothing here: the browser prompts for it and attaches it to the page's same-origin requests itself.
 
 If you'd rather host the page separately (e.g. to point one harness at multiple servers, or to exercise the CORS path), it still works opened from any static file server — just not as a `file://` URL, since the browser's `Origin` header for a local file is `null`, which the server's default CORS config won't match:
 
@@ -43,13 +51,23 @@ cd clients && python3 -m http.server 8000
 
 (CORS is on by default and reflects back any `http(s)://localhost:<any port>` or `127.0.0.1:<any port>` origin, so this works with no server-side configuration — see [CORS](server.md#cors) if you need something different.)
 
-## OpenAI-compatible frontends
+## Third party clients
 
-Neither of those, nor the [MCP tool](mcp.md), is this — they're the bundled clients, and they all speak mfluxible's own native API. But `POST /v1/images/generations` and `POST /v1/images/edits` (see the [API reference](api.md)) are genuine [OpenAI Images API](https://platform.openai.com/docs/api-reference/images/create)-compatible endpoints, so any tool built against that API can point at this server directly, with no code changes on its side. For example, [Open WebUI](https://docs.openwebui.com/features/chat-conversations/image-generation-and-editing/openai/)'s Settings → Admin → Images panel takes an arbitrary `IMAGES_OPENAI_API_BASE_URL` and a free-text model name — set the base URL to `http://127.0.0.1:8420/v1` and the model name to whatever `model.name` reports on [`/health`](api.md#get-health) (e.g. `z-image-turbo`), and Open WebUI's own chat UI becomes a frontend for this server.
+### OpenAI compatible frontends
+
+The example clients above all speak mfluxible's own native API. But `POST /v1/images/generations` and `POST /v1/images/edits` (see the [API reference](api.md)) are genuine [OpenAI Images API](https://platform.openai.com/docs/api-reference/images/create)-compatible endpoints, so any tool built against that API can point at this server directly, with no code changes on its side.
+
+#### Open WebUI
+
+For example, [Open WebUI](https://docs.openwebui.com/features/chat-conversations/image-generation-and-editing/openai/)'s Settings → Admin → Images panel takes an arbitrary `IMAGES_OPENAI_API_BASE_URL` and a free-text model name — set the base URL to `http://127.0.0.1:8420/v1` and the model name to whatever `model.name` reports on [`/health`](api.md#get-health) (e.g. `z-image-turbo`), and Open WebUI's own chat UI becomes a frontend for this server.
 
 Open WebUI's *Native* (agentic) mode also needs an actual chat model behind the connection to decide when to call the image tool — normally a separate LLM. If you'd rather not run one just for that, point Open WebUI's chat connection at mfluxible's own `POST /v1/chat/completions` (same base URL) too — see [that endpoint](api.md#post-v1chatcompletions) for what it does and, importantly, doesn't do.
 
-## SillyTavern
+### Stable Diffusion (sdcpp) compatible frontends
+
+mfluxible also provides a **stable-diffusion.cpp** image generation endpoint that can be used with compatible clients (with some caveats).
+
+#### SillyTavern
 
 [SillyTavern](https://github.com/SillyTavern/SillyTavern)'s image-generation extension has no OpenAI-compatible source — its `openai` one hardcodes `api.openai.com` inside SillyTavern's own backend, with no base-URL setting (unlike the "Custom (OpenAI-compatible)" source on its chat side). So the `/v1` endpoints above are no use here. Instead, this server answers the three calls its **stable-diffusion.cpp server** source makes, which is the one local-URL source whose surface is small enough to be worth implementing: a reachability probe on [`OPTIONS /v1/images/generations`](api.md#options-v1imagesgenerations), a model list from [`GET /v1/models`](api.md#get-v1models), and generation on [`POST /sdapi/v1/txt2img`](api.md#post-sdapiv1txt2img).
 
@@ -62,7 +80,7 @@ Setup, under Extensions → Image Generation:
 
 Step 4 matters more than it looks. SillyTavern sends both values on every request, from sliders it always shows, and this server **honours `steps` and drops `cfg_scale` where the model can't use it** rather than rejecting either — so a mismatch is slow or ignored, never an error you'd see. [The API reference](api.md#why-this-endpoint-drops-what-the-native-api-rejects) has the full reasoning; the short version is that SillyTavern replaces any upstream error with a bare `500` and no body, so a 400 explaining itself would reach you as an unexplained failed generation.
 
-**It also can't authenticate.** SillyTavern's `sdcpp` source sends no credentials on any of its three calls — unlike its AUTOMATIC1111 source, which has a Basic-auth field — so turning on [authentication](server.md#authentication) blocks this integration entirely, with no setting on either side to work around it. Credentials in the URL don't help either: Node's `fetch` rejects a URL containing them.
+**It also can't authenticate, under either scheme.** SillyTavern's `sdcpp` source sends no credentials on any of its three calls — unlike its AUTOMATIC1111 source, which has a Basic-auth field — so it 401s against the server's own [HTTP Basic](server.md#authentication) and against a bearer-token proxy alike, with no setting on either side to work around it. Credentials in the URL don't help either: Node's `fetch` rejects a URL containing them. If you need this integration, either keep the server unauthenticated on a trusted network, or accept the trade and open its three paths (`OPTIONS /v1/images/generations`, `GET /v1/models`, `POST /sdapi/v1/txt2img`) in your own proxy config — the last of those generates, so opening it means anyone who can reach the proxy can spend GPU time.
 
 Two consequences worth knowing:
 

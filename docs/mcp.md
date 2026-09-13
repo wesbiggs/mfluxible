@@ -119,6 +119,7 @@ Environment variables for `clients/mcp_server.py`, all optional. Set them where 
 | Variable | Default | Purpose |
 |---|---|---|
 | `MFLUXIBLE_URL` | `http://127.0.0.1:8420/mfluxible/v1/images/generations` | Which mfluxible server to proxy to |
+| `MFLUXIBLE_BEARER_TOKEN` | unset | Sent as `Authorization: Bearer <token>` on every call, for a server behind an auth proxy (see [Authentication](server.md#authentication)). Environment-only by necessity: an MCP host launches this as a stdio subprocess, so there's no command line to pass and no terminal to prompt at |
 | `MFLUXIBLE_HEALTH_URL` | `/health` on the same host | Read once to name the model and reject arguments it can't act on; only needed if `/health` isn't alongside the generations endpoint |
 | `MFLUXIBLE_MCP_WIDTH` | `768` | Default width, kept below the API's own default so most generations finish in one round-trip |
 | `MFLUXIBLE_MCP_HEIGHT` | `768` | Default height, same reason |

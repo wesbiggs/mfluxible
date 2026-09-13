@@ -6,6 +6,8 @@ FastAPI auto-generates interactive docs for all of this at `/docs` (Swagger UI) 
 
 None by default. If the server was started with `MFLUXIBLE_BASIC_AUTH_USERNAME` and `MFLUXIBLE_BASIC_AUTH_PASSWORD` set, **every** endpoint below — plus `GET /`, `/docs` and `/openapi.json` — requires HTTP Basic credentials, and answers `401` with a `WWW-Authenticate: Basic realm="mfluxible"` header otherwise. The 401 body is OpenAI's error envelope with `code: "unauthorized"`, and is identical whether the username or the password was wrong. See [Authentication](server.md#authentication) for how to turn it on and what it does and doesn't protect.
 
+A server can instead be gated by a reverse proxy holding a bearer token, in which case none of the above applies and the endpoints below answer exactly as documented — what changes is which of them are reachable without an `Authorization: Bearer` header. See [Authentication](server.md#authentication) for both options.
+
 CORS preflights are answered before the credential check, since a preflight carries none by spec. A *bare* `OPTIONS` (no `Access-Control-Request-Method`) is a normal request and is gated — which is what blocks SillyTavern's reachability probe when auth is on.
 
 ## `GET /health`

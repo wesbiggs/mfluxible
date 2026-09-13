@@ -142,7 +142,23 @@ Then everything else just points at that host instead of `127.0.0.1`, no code ch
 
 ### Authentication
 
-There's none by default. Set **both** `MFLUXIBLE_BASIC_AUTH_USERNAME` and `MFLUXIBLE_BASIC_AUTH_PASSWORD` to require HTTP Basic credentials on every endpoint — the API, `/health`, `/docs`, and the browser harness at `GET /`:
+There's none by default, and two ways to add it. They are alternatives rather than layers — running both means maintaining two secrets for one server.
+
+| | Built-in HTTP Basic | Reverse proxy + bearer token |
+|---|---|---|
+| Configured in | `MFLUXIBLE_BASIC_AUTH_*` | [`Caddyfile.example`](../Caddyfile.example), or any proxy |
+| Gates | every endpoint, `/` and `/docs` included | only the endpoints that cost GPU time |
+| Browser harness | the browser's own credential prompt | the harness's **API token** field |
+| Open WebUI | no — it sends a bearer token, not Basic | yes — its "API key" field is exactly this |
+| SillyTavern | no (see below) | no (see below) |
+| TLS | needs a proxy in front anyway | the proxy terminates it |
+| Extra moving parts | none | a proxy process to run and keep running |
+
+Pick the first if everything talking to the server is a terminal client or a browser and you'd rather not run a proxy. Pick the second if an OpenAI-compatible frontend is in the picture, or you want HTTPS, or you'd rather the harness stayed reachable without a credential.
+
+#### Built-in HTTP Basic
+
+Set **both** `MFLUXIBLE_BASIC_AUTH_USERNAME` and `MFLUXIBLE_BASIC_AUTH_PASSWORD` to require HTTP Basic credentials on every endpoint — the API, `/health`, `/docs`, and the browser harness at `GET /`:
 
 ```bash
 MFLUXIBLE_BASIC_AUTH_USERNAME=tavern MFLUXIBLE_BASIC_AUTH_PASSWORD='a long random string' \
@@ -151,14 +167,41 @@ MFLUXIBLE_BASIC_AUTH_USERNAME=tavern MFLUXIBLE_BASIC_AUTH_PASSWORD='a long rando
 
 Setting only one of the two leaves auth **off**: a half-finished deployment is far likelier than a deliberately blank username, and quietly serving unauthenticated is the failure worth avoiding. Bind to a non-loopback address without both set and the server logs a warning at startup, before it downloads anything.
 
-Each client carries the credentials its own way — `curl -u`, `--url http://user:pass@host:8420/...` for the terminal clients, and a browser will prompt you at `GET /`.
+Each client carries the credentials its own way — `curl -u`, `--url http://user:pass@host:8420/...` for either terminal client, and a browser will prompt you at `GET /`. The MCP tool has no Basic support; use a bearer token for it.
 
-Two things this is and isn't:
+#### A reverse proxy with a bearer token
 
-- **It is not a substitute for network placement.** Basic credentials travel base64-encoded, not encrypted, so on plain HTTP anything on the path can read them. Keep binding to `0.0.0.0` only on a network you trust (home LAN, Tailscale/VPN) and never expose it directly to the internet — auth is defence in depth on that network, not permission to skip it. Put it behind a TLS-terminating reverse proxy if it needs to cross anything less trusted.
-- **CORS is not a substitute either.** It's a browser policy, not access control: `curl` and every non-browser client ignore it entirely. It also doesn't apply to the bundled harness at all, whose Server URL defaults to a relative path and is therefore same-origin. See [CORS](#cors).
+[`Caddyfile.example`](../Caddyfile.example) in the repo root is a working site block: leave the app on `127.0.0.1:8420` with no `MFLUXIBLE_BASIC_AUTH_*` set, replace the placeholder token, and point the proxy at it.
 
-**Turning auth on blocks SillyTavern's image-generation source.** Its `stable-diffusion.cpp server` source sends no credentials on any of its three calls (unlike its AUTOMATIC1111 source, which has a Basic-auth field), so every request from it 401s. There's no setting to work around it, and embedding credentials in the URL doesn't help either — Node's `fetch` rejects a URL containing them. If you need that integration, keep the server on a trusted network without auth. See [SillyTavern](clients.md#sillytavern).
+```bash
+openssl rand -hex 32          # the token
+caddy run --config Caddyfile  # or paste the site block into an existing Caddyfile
+```
+
+It deliberately carries no global `{ ... }` options block, so it pastes into a Caddyfile you already have — a second global block is a parse error, not a merge.
+
+What it gates is the important part. `/`, `/docs`, `/openapi.json` and `/health` are served **without** a token, because none of them is anything the public repo doesn't already show, and leaving `/health` open is what lets the harness render the right fields for the loaded model before you've typed a credential. Everything that costs GPU time is gated by exclusion, so an endpoint added later is protected the day it lands. `tests/test_proxy_config.py` fails if a generating endpoint ever appears in the open list.
+
+Clients send the token as `Authorization: Bearer <token>`:
+
+- **Harness** — paste it into **Advanced → API token**. It's kept in `localStorage`, so it survives a reload and "Reset all"; entering it re-probes `/health`.
+- **`stream_client.py` / `stream_client.js`** — `export MFLUXIBLE_BEARER_TOKEN=...`. Environment rather than a flag so the secret stays out of shell history and `ps`. Setting it *and* putting credentials in `--url` is refused rather than silently resolved.
+- **`mcp_server.py`** — `MFLUXIBLE_BEARER_TOKEN` where the tool is registered; see [the MCP configuration table](mcp.md#configuration).
+- **Open WebUI** — its API-key field, which sends this header already.
+- **`curl`** — `-H "Authorization: Bearer $MFLUXIBLE_BEARER_TOKEN"`.
+
+Two caveats worth stating plainly. Caddy's `header` matcher is a plain string comparison, not the constant-time one `server/auth.py` uses — not practically exploitable across a network with a high-entropy token, but a reason to use `openssl rand` rather than a passphrase. And a bearer token over plain HTTP is readable in transit exactly as Basic is, so the `tls internal` line in the example is doing real work; on a tailnet, `tls <host>.<tailnet>.ts.net` gets a publicly-trusted certificate and needs no trust step on any device already on the tailnet.
+
+#### What neither of these is
+
+- **Not a substitute for network placement.** Keep binding to `0.0.0.0` only on a network you trust (home LAN, Tailscale/VPN) and never expose the server directly to the internet — auth is defence in depth on that network, not permission to skip it. With a proxy this matters doubly: the app must stay on loopback, or the unauthenticated original is sitting on the network *beside* the proxy rather than behind it.
+- **CORS is not access control.** It's a browser policy: `curl` and every non-browser client ignore it entirely. It also doesn't apply to the bundled harness at all, whose Server URL defaults to a relative path and is therefore same-origin. See [CORS](#cors).
+
+#### Clients with no credential setting are blocked by either scheme
+
+Both schemes are ordinary HTTP auth, so any client that can't be told to send an `Authorization` header 401s against both, and there's nothing configurable on this side that changes that. Worth checking per *integration* rather than per application: the same program often has a credential field on one connection type and none on another — SillyTavern as of 1.18.0 is the example to hand, where the `stable-diffusion.cpp server` source this server answers sends no credentials on any of its three calls, while its AUTOMATIC1111 source has a Basic-auth field and its chat side has its own.
+
+If you need one of these, either keep the server unauthenticated on a trusted network, or — understanding the trade — open just the paths that client needs in your own proxy config. For SillyTavern that's `OPTIONS /v1/images/generations`, `GET /v1/models` and `POST /sdapi/v1/txt2img`; the last of those generates, so opening it means anyone who can reach the proxy can spend GPU time on it. See [SillyTavern](clients.md#sillytavern).
 
 ## Troubleshooting
 

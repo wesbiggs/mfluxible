@@ -36,6 +36,13 @@ const https = require("node:https");
 const { URL } = require("node:url");
 const { parseArgs } = require("node:util");
 
+// Sent as a bearer token when set, for a server behind an auth proxy (see
+// Caddyfile.example). Environment rather than a --token flag on purpose: a flag would
+// put the secret into shell history and into `ps` output for the whole generation.
+// HTTP Basic, for the server's own MFLUXIBLE_BASIC_AUTH_*, goes in the URL instead
+// (--url http://user:pass@host:8420/...) and is picked up in postSSE below.
+const TOKEN = process.env.MFLUXIBLE_BEARER_TOKEN || "";
+
 // imgcat (iTerm2's own reference tool) uses 200-byte chunks, but its own
 // comment says that's specifically "to help it get through tmux" -- we're not
 // tmux-wrapping at all (see the header comment above), so we don't need chunks
@@ -83,9 +90,21 @@ function postSSE(url, body, onEvent) {
         port: parsed.port,
         path: parsed.pathname + parsed.search,
         method: "POST",
+        // URL is happy to parse credentials out of http://user:pass@host/... but they
+        // only reach the wire if handed to http.request under this key. Without it they
+        // were parsed and dropped, so a command line that looked right got a 401 with
+        // nothing to point at. Decoded because the WHATWG parser percent-encodes both
+        // halves, and `auth` wants the raw pair -- the same unquoting requests does in
+        // get_auth_from_url, so both clients read one URL the same way.
+        ...(parsed.username || parsed.password
+          ? {
+              auth: `${decodeURIComponent(parsed.username)}:${decodeURIComponent(parsed.password)}`,
+            }
+          : {}),
         headers: {
           "Content-Type": "application/json",
           "Content-Length": Buffer.byteLength(payload),
+          ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}),
         },
       },
       (res) => {
@@ -166,6 +185,14 @@ async function main() {
   const prompt = positionals[0];
   if (!prompt) {
     console.error("usage: stream_client.js <prompt> [--url URL] [--width N] [--height N] [--steps N] [--seed N] [--guidance F] [--negative-prompt TEXT] [--preview-every N] [--out FILE] [--image PATH] [--image-strength F] [--fractional-start]");
+    process.exit(1);
+  }
+
+  // Refused rather than resolved: `auth` and an explicit Authorization header would
+  // both be set, and which one http.request emits isn't something to leave to chance.
+  // stream_client.py rejects the same combination, for the same reason.
+  if (TOKEN && (new URL(values.url).username || new URL(values.url).password)) {
+    console.error("error: MFLUXIBLE_BEARER_TOKEN is set and --url carries credentials; use one or the other");
     process.exit(1);
   }
 

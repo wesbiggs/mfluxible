@@ -24,10 +24,19 @@ recompress anything: the terminal renders the exact bytes that get saved.
 import argparse
 import base64
 import json
+import os
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import requests
+
+# Sent as a bearer token when set, for a server behind an auth proxy (see
+# Caddyfile.example). Environment rather than a --token flag on purpose: a flag would
+# put the secret into shell history and into `ps` output for the whole generation.
+# HTTP Basic, for the server's own MFLUXIBLE_BASIC_AUTH_*, goes in the URL instead
+# (--url http://user:pass@host:8420/...), which requests turns into a header itself.
+TOKEN = os.environ.get("MFLUXIBLE_BEARER_TOKEN", "")
 
 # imgcat (iTerm2's own reference tool) uses 200-byte chunks, but its own
 # comment says that's specifically "to help it get through tmux" -- we're not
@@ -117,7 +126,20 @@ def main() -> None:
         "fractional_start": args.fractional_start,
     }
 
-    with requests.post(args.url, json=body, stream=True) as resp:
+    # Refused rather than resolved, because requests would resolve it the surprising
+    # way: userinfo in the URL becomes a Basic header during prepare_auth, which runs
+    # *after* headers are set and overwrites this one -- so a token set here would be
+    # silently discarded in favour of the URL's credentials.
+    if TOKEN and "@" in urlsplit(args.url).netloc:
+        print(
+            "error: MFLUXIBLE_BEARER_TOKEN is set and --url carries credentials; use one or the other",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    headers = {"Authorization": f"Bearer {TOKEN}"} if TOKEN else {}
+
+    with requests.post(args.url, json=body, stream=True, headers=headers) as resp:
         if resp.status_code != 200:
             # Worth unwrapping rather than raise_for_status()'ing: the server rejects
             # --guidance/--negative-prompt on a model that can't act on them, and its

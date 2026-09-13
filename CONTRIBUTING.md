@@ -49,6 +49,10 @@ The suite runs entirely against a fake, weight-free model (`tests/doubles/toy_mo
 
 Runs on GitHub Actions on every push/PR (`.github/workflows/tests.yml`). Since `mlx` (mflux's own dependency) has no Linux or Intel build, that workflow — and any other CI you point at this repo — has to run on an Apple Silicon macOS runner (`macos-14` on GitHub-hosted); `ubuntu-latest` will fail to install.
 
+Two things in the suite aren't about the model at all. `tests/test_docs.py` checks that the sample responses in `docs/` still match what the code emits, and `tests/test_proxy_config.py` checks `Caddyfile.example` against the app's own route table — that every path it serves without a token is one the server actually has, and that no endpoint accepting a `POST` has landed in that open list. Both exist for the same reason: a wrong answer there is silent, and nothing else would notice.
+
+What CI can't cover is the clients' own auth handling. `requirements-dev.txt` pulls in the server's dependencies and pytest, not `requests` or `mcp` — that separation is deliberate (see the dependency note in `CLAUDE.md`), so `clients/stream_client.py` and `clients/mcp_server.py` aren't importable on the CI runner and nothing there exercises what header they put on the wire. Changing how a client authenticates means checking it by hand against a real proxy; recording the `Authorization` header at a stub upstream is enough, and catches the failure mode that matters (a credential parsed and then silently dropped).
+
 The corollary of a weight-free suite is what it can't tell you: it exercises the request validation, the SSE plumbing, the step-callback timing and the preview/final-image encoding, but never that a given mflux model actually produces a good image. Anything that touches a real checkpoint — a new model, a change to the preview decode path, a mflux upgrade — needs at least one live generation against the running server before you trust it.
 
 

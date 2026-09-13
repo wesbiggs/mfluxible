@@ -148,6 +148,84 @@ stderr through `logging.lastResort` under uvicorn's own `LOGGING_CONFIG` (which
 configures only the `uvicorn*` loggers and leaves root without a handler) -- the
 same mechanism `engine.py` already depends on.
 
+## Two auth schemes, and the browser is what decides between them
+
+`MFLUXIBLE_BASIC_AUTH_*` (server/auth.py) and `Caddyfile.example` are **alternatives, not
+layers**. The thing that makes them genuinely different -- rather than two spellings of
+one idea -- is that a browser can satisfy exactly one of them unaided.
+
+`clients/harness.html` is served at `GET /` and its Server URL defaults to the relative
+`/mfluxible/v1/images/generations`, so its `fetch` is same-origin. Under Basic that is
+all it needs: the browser prompts on the 401, caches the credential against the realm,
+and reattaches it to the page's own requests with no code in the page at all. There is no
+equivalent for a bearer token -- no prompt, no cache, no automatic header -- which is why
+the **API token** field exists in the Advanced section and why it stores to
+`localStorage`. That field is not a convenience; without it, a bearer-gated deployment
+has no working browser client.
+
+The corollary is the shape of the Caddyfile: it leaves `/`, `/docs`, `/openapi.json` and
+`/health` open and gates everything else by exclusion. Serving those openly costs nothing
+(the harness's source is in the public repo, `/health` returns model metadata and MLX
+counters and *no filesystem paths* -- checked, given how carefully engine.py avoids
+leaking cache paths elsewhere). Leaving `/health` open is load-bearing rather than lazy:
+`refreshModel()` hides the guidance and negative-prompt fields based on that response, so
+gating it would show an unauthenticated visitor a page offering fields the loaded model
+rejects. Open, the page renders correctly and simply can't generate -- which is the
+correct end state, because the GPU is protected by the API gate, not by hiding the page.
+
+Gating by exclusion is also why `tests/test_proxy_config.py` exists. The dangerous
+direction is one-way: a new endpoint is protected the day it lands, but a path *added* to
+the open list silently becomes an ungated generation endpoint. That test parses the
+`@public` matcher and fails if anything accepting a `POST` matches it.
+
+**The app must stay on 127.0.0.1 under a proxy.** Anything that reaches it another way
+reaches it unauthenticated, sitting on the network beside the proxy rather than behind
+it -- which is exactly what `startup_warning` fires on, correctly. This is the specific
+reason Docker is a poor fit here on macOS: MLX needs Metal and Docker Desktop's Linux VM
+has no GPU passthrough, so only the proxy could be containerized, and a container
+reaching the host generally means binding past loopback. Running Caddy natively has no
+such tension.
+
+Two Caddy details worth not rediscovering. It detects `text/event-stream` and streams it
+through unbuffered with no `flush_interval` set, which this server depends on for its
+per-step preview events -- nginx in the same position needs an explicit
+`proxy_buffering off;`, and oauth2-proxy's non-zero default `--flush-interval` would
+clump them. And `Caddyfile.example` deliberately carries **no global `{ ... }` block**, so
+it pastes into an existing Caddyfile; a second global block is a parse error, not a merge,
+and an `auto_https off` in one would disable `tls internal` for every other site in the
+file.
+
+## Client credentials: one URL, two libraries, and a header that used to vanish
+
+`stream_client.js` parsed `http://user:pass@host/...` and silently dropped it. `URL`
+populates `.username`/`.password`, but `http.request` only emits the header if handed an
+`auth` option, and the options object didn't have one -- so a command line the docs said
+would work produced a bare 401 with nothing to point at. Verified by recording the
+`Authorization` header at a stub upstream: `requests` sent `Basic Ym9iOnBAc3M=` for the
+same URL and Node sent nothing. Both now produce that identical header, including the
+percent-decoding (`decodeURIComponent` here, `unquote` inside requests'
+`get_auth_from_url`) -- so one URL means one thing to both clients.
+
+The `MFLUXIBLE_` prefix is deliberate even though the server never holds this value.
+The prefix names the *destination*, the way `HF_TOKEN` does -- an unprefixed generic name
+like `HTTP_BEARER_TOKEN` reads more honestly but risks a token exported for some other
+service being attached to requests aimed at this one, which is a credential sent to the
+wrong host. `BEARER` rather than plain `TOKEN` is what keeps it distinguishable from the
+server-side `MFLUXIBLE_BASIC_AUTH_*` pair, which the server genuinely *is* configured
+with; `MFLUXIBLE_TOKEN` alone read like a third member of that family.
+
+`MFLUXIBLE_BEARER_TOKEN` is environment-only in all three clients, not a `--token` flag: a flag
+puts the secret in shell history and in `ps` output for the length of a generation, and
+`mcp_server.py` has no command line to take one on anyway (an MCP host launches it as a
+stdio subprocess).
+
+Setting `MFLUXIBLE_BEARER_TOKEN` *and* putting credentials in the URL is **refused** rather than
+resolved, in both terminal clients. It isn't defensiveness: requests derives Basic auth
+from userinfo inside `prepare_auth`, which runs *after* `prepare_headers`, so the URL
+would silently overwrite the bearer header rather than losing to it. Picking a winner
+quietly is the failure worth avoiding; the same check is mirrored in the JS client so one
+documented rule covers both.
+
 ## mflux is a fast-moving dependency
 
 `server/engine.py` reaches into mflux internals that aren't public API: `model.callbacks.before_loop/in_loop/interrupt` are mutated directly, since `CallbackRegistry` has no `unregister()` as of mflux 0.19.1. The VAE-decode branching in `_decode_preview_b64` mirrors mflux's own `StepwiseHandler` on purpose, with one deliberate deviation: the non-packed branch goes through `VAEUtil.decode` rather than calling `vae.decode()` directly the way `StepwiseHandler` does. Qwen-Image's VAE is a 3D (video) decoder returning `(B, C, 1, H, W)` and `ImageUtil.to_image` wants 4D — `VAEUtil.decode` is what drops the singleton frame axis, and it's the same call each variant's own final decode makes, so previews and final images stay on identical handling. Calling `vae.decode()` bare here works for Z-Image and FLUX and breaks only on Qwen previews. If `uv pip install -U mflux` breaks this file, check `mflux/callbacks/callback_registry.py` and `mflux/callbacks/instances/stepwise_handler.py` in the installed package first — that's where this was reverse-engineered from (mflux ships no public docs for the callback system).

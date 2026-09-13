@@ -41,6 +41,14 @@ MFLUXIBLE_HEALTH_URL = os.environ.get(
     urllib.parse.urlunsplit(urllib.parse.urlsplit(MFLUXIBLE_URL)._replace(path="/health", query="")),
 )
 
+# Sent as a bearer token on every call when set, for a server behind an auth proxy
+# (see Caddyfile.example). Environment-only because there is no other channel here:
+# an MCP host launches this as a stdio subprocess, so there is no command line to
+# pass and no terminal to prompt at. Empty means send no Authorization header at all
+# rather than an empty one, which a proxy could only reject.
+MFLUXIBLE_BEARER_TOKEN = os.environ.get("MFLUXIBLE_BEARER_TOKEN", "")
+AUTH_HEADERS = {"Authorization": f"Bearer {MFLUXIBLE_BEARER_TOKEN}"} if MFLUXIBLE_BEARER_TOKEN else {}
+
 # Claude caps a single tool result at ~1MB, and MCP ships images as base64, which
 # inflates bytes by 4/3. So the *raw* image has to come in around 750KB to clear
 # the cap once encoded; 700KB leaves room for the surrounding JSON. A full-res
@@ -229,7 +237,10 @@ async def _run(job: _Job, body: dict) -> None:
     waiting under its handle when the model comes back for it.
     """
     try:
-        async with httpx.AsyncClient(timeout=None) as client, client.stream("POST", MFLUXIBLE_URL, json=body) as resp:
+        async with (
+            httpx.AsyncClient(timeout=None) as client,
+            client.stream("POST", MFLUXIBLE_URL, json=body, headers=AUTH_HEADERS) as resp,
+        ):
             if resp.status_code != 200:
                 # Not raise_for_status(): the server refuses guidance/negative_prompt on
                 # a model that can't act on them and says which in the body, which
@@ -323,7 +334,7 @@ async def _model_info() -> dict | None:
     if _MODEL is None:
         try:
             async with httpx.AsyncClient(timeout=5) as client:
-                resp = await client.get(MFLUXIBLE_HEALTH_URL)
+                resp = await client.get(MFLUXIBLE_HEALTH_URL, headers=AUTH_HEADERS)
                 resp.raise_for_status()
                 _MODEL = resp.json().get("model")
         except Exception:  # noqa: BLE001 -- advisory only; the generation call reports failures
