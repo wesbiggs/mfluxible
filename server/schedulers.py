@@ -1,4 +1,11 @@
-"""A scheduler that lets image-to-image start *between* two rungs of the sigma schedule.
+"""Two things mflux's scheduler slot is used for here, and one of them is not a schedule.
+
+The first is below: a scheduler that lets image-to-image start *between* two rungs of the
+sigma schedule. The second is at the bottom of the file: masked inpainting, which needs a
+place to write the untouched region back once per step and finds it in `step()` -- the only
+call whose return value becomes the next step's latents. They share this module because
+they share the slot: mflux takes exactly one `scheduler=`, so the two can't be handed over
+separately and the combinations are spelled out as classes (see `scheduler_path`).
 
 mflux turns `image_strength` into a single integer -- `init_time_step = max(1, int(steps
 * image_strength))` (`mflux.models.common.config.config.Config`) -- and then uses that
@@ -52,6 +59,8 @@ well-defined either way, which is the other reason to do it this way round.
 """
 
 from __future__ import annotations
+
+from dataclasses import dataclass
 
 import mlx.core as mx
 from mflux.models.common.schedulers.linear_scheduler import LinearScheduler
@@ -114,3 +123,137 @@ class FractionalStartLinearScheduler(LinearScheduler):
         i = self.init_time_step
         moved = sigmas[i] * (1.0 - self.start_fraction) + sigmas[i + 1] * self.start_fraction
         return mx.concatenate([sigmas[:i], moved.reshape(1), sigmas[i + 1 :]])
+
+
+# ---------------------------------------------------------------------------
+# Masked inpainting
+# ---------------------------------------------------------------------------
+#
+# Regenerating only part of an image needs one thing mflux does not expose: a place
+# to put the untouched region back, once per step, *inside* the denoising loop. The
+# callback registry can't do it -- a variant's loop reads
+# `latents = config.scheduler.step(...)` and only then calls `ctx.in_loop(t, latents)`,
+# and MLX arrays are immutable, so a subscriber can observe the trajectory but never
+# influence it. `scheduler.step()` is the only call whose return value becomes the
+# next step's latents, which is why the blend lives here rather than in engine.py.
+#
+# What gets blended back is exact rather than approximate, because all three variants
+# noise an image by plain interpolation -- mflux's own
+# `LatentCreator.add_noise_by_interpolation` is `(1 - sigma) * clean + sigma * noise`.
+# So "the original, noised to the level this step just reached" is that one line at
+# `sigmas[timestep + 1]`, using the same noise sample the run started from. On the
+# last step sigma is 0 and the kept region lands on the encoded original exactly.
+
+
+@dataclass(frozen=True)
+class MaskJob:
+    """The three packed arrays a masked generation blends between, all shaped exactly
+    like the latents the loop carries.
+
+    `keep` is 1.0 where the original must survive and 0.0 where the model is free --
+    the inverse of the API's mask, which is white where the user wants a change.
+    Fractional values in between are what a feathered mask edge becomes, and they
+    cross-fade rather than picking a side.
+    """
+
+    keep: mx.array
+    clean: mx.array
+    noise: mx.array
+
+    def blend(self, latents: mx.array, sigma: mx.array) -> mx.array:
+        known = (1.0 - sigma) * self.clean + sigma * self.noise
+        keep = self.keep.astype(latents.dtype)
+        return (1.0 - keep) * latents.astype(self.clean.dtype) + keep * known
+
+
+# The job for the generation currently on the MLX worker thread, or None.
+#
+# Out-of-band state, which the fractional-start scheduler above deliberately avoids --
+# it reads everything off the Config it is handed. There is no Config route for this:
+# mflux constructs the scheduler inside Config.__init__, from the config alone, and a
+# Config carries no mask, no encoded latents and no seed. Building them needs the VAE
+# and therefore the MLX worker thread, which is exactly where `Config(...)` is running.
+#
+# It is safe here for reasons that are properties of this server rather than of this
+# module, so they are worth naming: MfluxEngine serializes every generation behind an
+# asyncio.Lock and runs all MLX work on one dedicated worker thread, so at most one job
+# can ever be live. engine.py sets it inside the same `run()` that calls
+# generate_image() and clears it in that function's `finally`, so the window is one
+# generation wide and an exception cannot leave it set. If either of those two
+# invariants goes away, this has to become per-Config state, not a wider lock.
+_active_job: MaskJob | None = None
+
+
+def set_mask_job(job: MaskJob) -> None:
+    global _active_job
+    _active_job = job
+
+
+def clear_mask_job() -> None:
+    global _active_job
+    _active_job = None
+
+
+def active_mask_job() -> MaskJob | None:
+    return _active_job
+
+
+class _MaskedBlend:
+    """Mixin: hold the unmasked region to the input image after every step.
+
+    The job is read per step rather than captured at construction, and the check for
+    a missing one lives here rather than in __init__, because of *when* the job can
+    exist. Building it needs the floored width/height mflux actually generates at
+    (`Config` rounds both down to a multiple of 16), and the earliest that is knowable
+    is the `before_loop` callback -- by which point mflux has already resolved
+    `config.scheduler` to build the starting latents. So the scheduler necessarily
+    exists before its job does; only `step` can insist on one.
+
+    Missing means raise, not run unmasked. The raise lands inside generate_image() on
+    the worker thread, where engine.py's own `except Exception` turns it into a logged
+    traceback and a fixed client-facing message -- a visibly failed generation, where
+    the alternative is an image that looks fine and quietly ignored the mask.
+    """
+
+    def step(self, noise: mx.array, timestep: int, latents: mx.array, **kwargs) -> mx.array:
+        latents = super().step(noise=noise, timestep=timestep, latents=latents, **kwargs)
+        job = active_mask_job()
+        if job is None:
+            raise RuntimeError(
+                f"{type(self).__name__} ran with no mask job set; "
+                "engine.py must call schedulers.set_mask_job before the loop starts."
+            )
+        # self.sigmas, not the config's -- with FractionalStartLinearScheduler in the
+        # MRO this is the schedule with the starting rung moved, and the blend has to
+        # re-noise the kept region to the level the trajectory is actually on.
+        return job.blend(latents, self.sigmas[timestep + 1])
+
+
+class MaskedBlendLinearScheduler(_MaskedBlend, LinearScheduler):
+    """Masked inpainting on the stock linear schedule."""
+
+
+class MaskedFractionalStartScheduler(_MaskedBlend, FractionalStartLinearScheduler):
+    """Masked inpainting with the fractional starting rung as well.
+
+    Two classes rather than one that reads a flag, because mflux is told which
+    scheduler to use by a dotted path and nothing else: without a mask, *not* passing
+    SCHEDULER_PATH is what says "no fractional start". Once a mask forces a scheduler
+    to be passed on every request, that signal is gone, and a single class would have
+    to infer the fractional start from `config.image_strength` -- silently turning it
+    on for anyone whose strength happens to fall between two rungs, which is a
+    different image than they asked for.
+    """
+
+
+# The only four values engine.py may pass to mflux as `scheduler=`. A dotted path is
+# an arbitrary module import in the server process, so this is a fixed table keyed by
+# two bools rather than anything assembled from a request -- see SCHEDULER_PATH above.
+def scheduler_path(*, masked: bool, fractional: bool) -> str | None:
+    if masked and fractional:
+        return "schedulers.MaskedFractionalStartScheduler"
+    if masked:
+        return "schedulers.MaskedBlendLinearScheduler"
+    if fractional:
+        return SCHEDULER_PATH
+    return None

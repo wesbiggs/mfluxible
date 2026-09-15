@@ -153,6 +153,11 @@ async def health():
             # that predates this field should treat a missing value as "unknown, let
             # the server decide", the same way it treats a missing `model`.
             "supports_fractional_start": spec.supports_fractional_start,
+            # Same "missing means unknown" rule as the field above. A client that
+            # shows a mask editor should hide it when this is False: the request
+            # would come back a 400, since holding the unmasked region in place
+            # means replacing the variant's scheduler (see ModelSpec.supports_mask).
+            "supports_mask": spec.supports_mask,
         },
         "memory": {
             "active_bytes": mx.get_active_memory(),
@@ -384,15 +389,19 @@ async def openai_generate(req: OpenAIImageGenerationRequest):
 # model the way every other endpoint uses one.
 #
 # This maps onto mflux's strength-based img2img (see README's "Image-to-image" section
-# on /mfluxible/v1/images/generations), not true masked inpainting: OpenAI's `mask`
-# selects a region to regenerate while leaving the rest untouched, and mflux has no
-# masked-region pipeline wired up here to honour that with, so `mask` is rejected with a
-# 400 if present rather than silently ignored (letting a caller believe only the masked
-# region changed, when actually the whole image was reinterpreted, would be worse than
-# refusing outright). `image_strength` isn't part of OpenAI's request shape at all, so
-# it's accepted as a non-standard extension the same way `partial_images` already is on
-# `POST /v1/images/generations` above -- mfluxible's own default (0.4) applies if it's
-# left out.
+# on /mfluxible/v1/images/generations), and `mask` is still a 400 here even though the
+# native endpoint now inpaints -- for a different reason than it used to be. The two
+# APIs disagree about what a mask *is*: OpenAI's is read from the alpha channel and
+# marks the editable region by being **transparent** there, while the native `mask`
+# field is read as luminance and marks it **white** (see engine._decode_mask). Feeding
+# one to the other doesn't fail, it inpaints the complement -- every region the caller
+# meant to keep -- which is the worst shape a failure can take. Honouring OpenAI's
+# convention is a real piece of work (alpha handling, and the flatten-to-opaque choice
+# for a fully opaque mask), not an alias, so until it exists this refuses and names the
+# endpoint that does support one. `image_strength` isn't part of OpenAI's request shape
+# at all, so it's accepted as a non-standard extension the same way `partial_images`
+# already is on `POST /v1/images/generations` above -- mfluxible's own default (0.4)
+# applies if it's left out.
 @app.post("/v1/images/edits")
 async def openai_edit_image(
     prompt: str = Form(...),
@@ -423,9 +432,11 @@ async def openai_edit_image(
     if mask is not None:
         return _openai_error(
             400,
-            "mask is not supported -- mfluxible has no masked-region inpainting pipeline; "
-            "this endpoint does whole-image edits only, via mflux's strength-based "
-            "img2img (see the 'Image-to-image' section of README.md).",
+            "mask is not supported on this endpoint -- OpenAI marks the editable region "
+            "with transparency, and reading it the way mfluxible's own mask field is read "
+            "(white = regenerate) would inpaint exactly the region you meant to keep. Use "
+            "POST /mfluxible/v1/images/generations, which takes `mask` as a base64 image, "
+            "for masked inpainting; this endpoint does whole-image edits only.",
         )
 
     parsed_size = _parse_openai_size(size)

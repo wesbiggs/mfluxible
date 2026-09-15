@@ -75,6 +75,17 @@ class ModelSpec:
     def supports_fractional_start(self) -> bool:
         return self.default_scheduler == "linear"
 
+    @property
+    def supports_mask(self) -> bool:
+        # Two capabilities, one precondition: masked inpainting also reaches the model
+        # by replacing its scheduler (server/schedulers.py's MaskedBlend* classes
+        # subclass the same LinearScheduler), so it is safe in exactly the same place
+        # a fractional start is. Kept as its own property rather than an alias because
+        # a client asks two different questions of /health -- and because the two
+        # could diverge: a flow-match sibling of MaskedBlendLinearScheduler would make
+        # this true on models where the fractional rung move still isn't.
+        return self.default_scheduler == "linear"
+
 
 def _load_z_image(model_config_name: str):
     def loader():

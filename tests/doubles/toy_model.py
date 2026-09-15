@@ -37,9 +37,10 @@ from models import ModelSpec
 
 # A fictitious ModelConfig for the toy model. supports_guidance/requires_sigma_shift
 # are both False, so the schedule stays a plain linspace and nothing here ever pays for
-# a real one -- neither engine.py nor ToyModel reads Config.scheduler (a request asking
-# for a fractional start is recorded as last_scheduler, not acted on: the schedule it
-# selects is covered directly in tests/test_schedulers.py, against a real ModelConfig).
+# a real one. ToyModel's loop does step through config.scheduler, so a request that
+# selects one of server/schedulers.py's classes really resolves and runs it -- but the
+# *schedule* those classes produce is covered directly in tests/test_schedulers.py,
+# against real ModelConfigs, since a linspace would hide any sigma-shift mistake.
 TOY_MODEL_CONFIG = ModelConfig(
     priority=0,
     aliases=["toy"],
@@ -64,14 +65,26 @@ def _seed_color(seed: int) -> tuple[float, float, float]:
 
 
 class ToyLatentCreator:
-    """Identity unpacking -- ToyModel never packs latents in the first place, so
-    there's nothing for a real LatentCreator's unpack step to undo. Exists only
-    because engine.py's _decode_preview_b64 calls self._latent_creator.unpack_latents
-    unconditionally."""
+    """Identity packing/unpacking -- ToyModel never packs latents in the first place,
+    so there's nothing for a real LatentCreator's pack step to do or undo. Exists
+    because engine.py calls these through self._latent_creator: unpack_latents from
+    _decode_preview_b64, and create_noise/pack_latents from _build_mask_job."""
 
     @staticmethod
     def unpack_latents(latents: mx.array, height: int, width: int) -> mx.array:
         return latents
+
+    @staticmethod
+    def pack_latents(latents: mx.array, height: int, width: int) -> mx.array:
+        return latents
+
+    @staticmethod
+    def create_noise(seed: int, height: int, width: int) -> mx.array:
+        # Zeros rather than real noise: the masked blend re-noises the kept region to
+        # `(1 - sigma) * clean + sigma * noise`, and zero noise makes that a plain
+        # scaling of the encoded input -- easy to assert against, and it keeps this
+        # double's output a function of the seed colour alone.
+        return mx.zeros((1, _ToyVAE.latent_channels, max(1, height // _SPATIAL_SCALE), max(1, width // _SPATIAL_SCALE)))
 
 
 class _ToyVAE:
@@ -82,6 +95,12 @@ class _ToyVAE:
     so leaving it off exercises the same branch Z-Image/FLUX take."""
 
     latent_channels = 3
+
+    def encode(self, image: mx.array) -> mx.array:
+        """Point-sample every _SPATIAL_SCALE'th pixel. Real VAEs do rather more, but
+        what engine.py's _build_mask_job needs from an encoder is only its output
+        *shape* -- that's what tells it the latent grid the mask has to be resized to."""
+        return image[:, :, ::_SPATIAL_SCALE, ::_SPATIAL_SCALE]
 
     def decode(self, latent: mx.array) -> mx.array:
         h = latent.shape[-2] * _SPATIAL_SCALE
@@ -169,8 +188,14 @@ class ToyModel:
         # schedule, so steps 1..init_time_step never fire an in-loop callback at all.
         steps = range(config.init_time_step, num_inference_steps)
         for t in steps:
-            # No real denoising: the "answer" is already in `latents`, so each step
-            # just gives engine.py's in-loop callback something to fire against.
+            # No real denoising -- the "answer" is already in `latents` -- but the
+            # step still goes through config.scheduler, as every real variant's loop
+            # does. With a zero "prediction" mflux's LinearScheduler returns the
+            # latents untouched, so the toy output is unchanged by this; what it buys
+            # is that a request carrying a mask genuinely resolves and runs
+            # server/schedulers.py's masked scheduler here rather than only recording
+            # the string in last_scheduler.
+            latents = config.scheduler.step(noise=mx.zeros_like(latents), timestep=t, latents=latents)
             ctx.in_loop(t, latents, time_steps=steps)
             mx.eval(latents)
         ctx.after_loop(latents)

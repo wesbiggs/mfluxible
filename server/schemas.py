@@ -56,6 +56,46 @@ class GenerateRequest(BaseModel):
         ),
     )
 
+    mask: str | None = Field(
+        default=None,
+        description=(
+            "Base64-encoded mask image (no data: URI prefix) selecting the region to "
+            "regenerate: white where the model is free to change the image, black where "
+            "the input must be preserved, greys crossfading between the two. Must be the "
+            "same pixel dimensions as `image`, and only accepted alongside it. Everything "
+            "black is held to the input image at every denoising step, so it comes back "
+            "unchanged -- but the model still sees it, which is what lets the new content "
+            "match the original's lighting and perspective. Only accepted on models "
+            "running mflux's linear schedule (`supports_mask` on /health)."
+        ),
+    )
+    mask_feather: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Gaussian blur radius, in input-image pixels, applied to `mask` before it is "
+            "used. Its job is to hide the latent grid's 8-pixel staircase along a mask "
+            "edge, and it wants to stay within a few cells of that: 8-16 is the useful "
+            "range and 0 disables it. It is NOT a way to blend two regions together. A "
+            "grey mask value means 'hold this pixel partway to the original at every "
+            "denoising step', so a wide feather pins a wide band to a ghost of the input "
+            "and the result cross-fades the old content with the new rather than "
+            "replacing it -- at radius 96 on a 1024px image, visibly a double exposure. "
+            "Only accepted alongside `mask`."
+        ),
+    )
+    mask_composite: bool = Field(
+        default=True,
+        description=(
+            "Paste the generated image back over the input through `mask`, so the pixels "
+            "outside it are byte-identical to what was sent. The masked blend already "
+            "holds that region during denoising, but it still passes through the VAE, "
+            "which shifts it by roughly 1.5/255 on average -- invisible on a photograph "
+            "and not on text or a logo. Set false to get the model's own decode of the "
+            "whole frame. Only accepted alongside `mask`."
+        ),
+    )
+
     fractional_start: bool = Field(
         default=False,
         description=(

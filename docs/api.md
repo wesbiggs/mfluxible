@@ -28,7 +28,8 @@ Returns:
     "supports_guidance": false,
     "default_guidance": null,
     "supports_negative_prompt": false,
-    "supports_fractional_start": true
+    "supports_fractional_start": true,
+    "supports_mask": true
   },
   "memory": {"active_bytes": 10307921920, "cache_bytes": 1073741824, "peak_bytes": 12884901888}
 }
@@ -36,7 +37,7 @@ Returns:
 
 `model_loaded` is useful for waiting on startup (weight download + quantization can take a while the first time) before sending a generation request.
 
-`model` describes what this process is running and which request fields it will accept, so a client can fill in sensible defaults without being told how the server was configured: `default_steps` is what `steps` falls back to, and `supports_guidance` / `supports_negative_prompt` / `supports_fractional_start` say whether `guidance` / `negative_prompt` / `fractional_start` are accepted or rejected with a 400. `available` lists every model this build knows how to run — all but `model.name` would need a restart (and a download) to use.
+`model` describes what this process is running and which request fields it will accept, so a client can fill in sensible defaults without being told how the server was configured: `default_steps` is what `steps` falls back to, and `supports_guidance` / `supports_negative_prompt` / `supports_fractional_start` / `supports_mask` say whether `guidance` / `negative_prompt` / `fractional_start` / `mask` are accepted or rejected with a 400. `available` lists every model this build knows how to run — all but `model.name` would need a restart (and a download) to use.
 
 Treat any of those `supports_*` keys being **absent** as "unknown, let the server decide" rather than as `false` — that is what a server predating the key means, and it is how the bundled harness and MCP tool read them. Note also that `supports_negative_prompt` is necessary but not sufficient: a negative prompt also needs classifier-free guidance switched on, so on a model whose `default_guidance` is `1.0` (Krea-2) sending one without raising `guidance` is still a 400. See [Models](server.md#models).
 
@@ -63,6 +64,9 @@ mfluxible's own, native endpoint — everything below (step-by-step `thinking` e
 | `stream` | bool | true | SSE stream vs a single JSON response |
 | `image` | string or null | unset | base64-encoded input image (no `data:` URI prefix) for image-to-image. Accepted by every model this server can run — see [Image-to-image](#image-to-image) below |
 | `image_strength` | float or null | 0.4 if `image` is set | how strongly `image` constrains the output, `0.0`–`1.0`; only meaningful, and only accepted, alongside `image` — a **400** if set without it |
+| `mask` | string or null | unset | base64-encoded mask image (no `data:` URI prefix) selecting the region to regenerate — **white = change this, black = keep this**, greys crossfade. Must be the same pixel dimensions as `image`, and only accepted alongside it. Only on a model whose own scheduler is linear (`supports_mask` on [`/health`](#get-health)) — a **400** otherwise. See [Inpainting a region](#inpainting-a-region) |
+| `mask_feather` | int | 0 | Gaussian blur radius applied to `mask`, in base-image pixels, to hide the latent grid's 8px staircase along the mask edge. Useful range is 8–16; it is **not** a region blend — see below. A **400** without `mask` |
+| `mask_composite` | bool | `true` | paste the result back over the input through `mask`, so the pixels outside it are byte-identical to what was sent. A **400** without `mask` |
 | `fractional_start` | bool | `false` | start image-to-image *between* two steps of the sigma schedule instead of flooring to one, making `image_strength` continuous at no extra compute; only accepted alongside `image`, and only on a model that runs mflux's linear schedule (`supports_fractional_start` on [`/health`](#get-health)) — a **400** otherwise. See [Fractional start](#fractional-start) |
 
 ## Streaming response (`stream: true`, default)
@@ -93,7 +97,7 @@ The final image's PNG bytes (`data` on the `image` event) carry embedded metadat
 
 ## Non-streaming response (`stream: false`)
 
-Returns the same `image` event object as a single JSON body (or a 500 with the `error` object on failure). A request the configured model cannot honour — `guidance` or `negative_prompt` where it has no effect, or `image_strength` without `image` — is rejected up front with a 400 carrying the same `error` object, in both modes: for a stream that check has to happen before the first byte, since by then the status line is already sent. A malformed `image` (not valid base64, or not a decodable image) gets the same 400 treatment.
+Returns the same `image` event object as a single JSON body (or a 500 with the `error` object on failure). A request the configured model cannot honour — `guidance` or `negative_prompt` where it has no effect, `image_strength` or `mask` without `image`, or a `mask` that isn't the same size as the `image` — is rejected up front with a 400 carrying the same `error` object, in both modes: for a stream that check has to happen before the first byte, since by then the status line is already sent. A malformed `image` or `mask` (not valid base64, or not a decodable image) gets the same 400 treatment.
 
 ## Image-to-image
 
@@ -128,6 +132,40 @@ uv run clients/stream_client.py "a lighthouse" --steps 10 --image input.png --im
 ```
 
 The image is scaled to the request's `width`/`height` before use, so it need not match them. Internally, the base64 payload is decoded to a temp file for the duration of one generation (mflux's `image_path` wants an actual path, not bytes) and removed once that generation finishes — nothing is written that outlives the request.
+
+
+### Inpainting a region
+
+Send a `mask` alongside `image` to regenerate only part of the frame. White in the mask means "the model may change this"; black means "hold this to the input". The mask must be the same pixel size as `image` — a mismatch is a 400 rather than a stretch-to-fit, because a stretched mask silently selects a different region than the one that was painted.
+
+```bash
+curl -N http://127.0.0.1:8000/mfluxible/v1/images/generations \
+  -H 'Content-Type: application/json' \
+  -d "{\"prompt\": \"a green potted cactus on a wooden table\",
+       \"image\": \"$(base64 -i table.png)\",
+       \"image_strength\": 0.0,
+       \"mask\": \"$(base64 -i mask.png)\",
+       \"mask_feather\": 8}"
+```
+
+**Set `image_strength` near `0`.** This is the one place mflux's inverted convention bites hardest: with a mask, `image_strength` no longer governs how much of the *frame* survives — the mask does that — it governs only how much of the original content *inside* the mask survives. The harness's usual `0.4` leaves the old object standing in the region you just painted, which reads as the mask having been ignored. `0.0` starts the masked region from rung 1 of the schedule, near pure noise, and is what actually replaces content. Because the useful range is narrow and still quantized to `1/steps`, [`fractional_start`](#fractional-start) is worth more here than it is for plain image-to-image.
+
+How it works: the kept region is written back over the latents after **every** denoising step, re-noised to exactly the level that step reached. That is exact rather than approximate because every model here noises an image by plain interpolation — mflux's own `add_noise_by_interpolation` is `(1 - sigma) * clean + sigma * noise` — so "the original at this step's noise level" is that one line, and on the last step `sigma` is 0 and the kept region lands on the encoded original. The model still *sees* the kept region at every step, which is what lets new content match the original's lighting, perspective and grain.
+
+`mask_composite` (on by default) then pastes the result back over the input through the mask in pixel space. The blend already holds the kept region during denoising, but the whole frame still passes through the VAE on the way out, which moves it by roughly 1.5/255 on average — at the encode/decode floor, not something the blend did wrong. Invisible on a photograph; visible on text, a logo or a flat colour. Turn it off to get the model's own decode of the whole frame.
+
+**`mask_feather` is for the staircase, not for blending regions.** A grey mask value doesn't soften a seam in the finished image; it means "hold this pixel partway to the original *at every denoising step*", which pins that band to a ghost of the input and stops the model committing to anything there. At radius 8–16 that band is a couple of latent cells wide and the effect is what you want. At radius 96 on a 1024px image it covers most of the masked object and the result is a visible double exposure — the old content and the new one cross-faded. The bundled harness caps its field at 32 for this reason.
+
+Three things this approach does **not** do, all inherent rather than incidental:
+
+- **It fills, it does not erase.** Nothing tells the model the region is a hole to continue the background across; it only knows your prompt belongs there. Masking an object and prompting "an empty wooden table" gets you a table-shaped object in the hole, not a gap. On a guidance-distilled model there isn't even a negative prompt to say "nothing here" with.
+- **The mask edge is a hard boundary.** Content that wants to cross it is cut off at it — a tall vase masked tightly around a mug comes back with its flowers sliced flat. Give the mask room for everything the new content needs, shadow and reflection included.
+- **It doesn't have to match the tone of what it keeps.** Nothing constrains the new content to the kept region's exact exposure or colour, so on a large flat area — a wall, a sky — the model can render its own slightly different grey and the hard mask edge turns that into a visible rectangle. Measured on a 1024×1024 Z-Image-Turbo run: the wall inside the mask came back at luminance ~159 where the input's was ~149, which is the model's choice and not an artefact of `mask_composite` (the same gap is in the raw decode with compositing off). Masking tightly around the subject rather than boxing a swathe of background is the practical answer.
+- **The mask is quantized to the latent grid**, one cell per 8 pixels — 128×128 cells at 1024×1024. Detail finer than that is averaged away before the model sees it, which is also why `mask_feather` below 8 does almost nothing.
+
+Which models accept a mask is the same question as [`fractional_start`](#fractional-start)'s, for the same reason: holding the region in place means handing mflux a scheduler, and that *replaces* the one the variant would have picked for itself. So it is offered where that default is already linear and rejected with a 400 elsewhere. `supports_mask` on [`/health`](#get-health) is the machine-readable form.
+
+The mask is read as **luminance**, and any alpha channel is ignored. This is worth knowing because OpenAI's `/v1/images/edits` uses the opposite convention — transparency marks the editable region — so a mask drawn for that API would inpaint the complement of what you meant here. That endpoint therefore still rejects `mask` outright rather than reading it with the wrong convention; see [`POST /v1/images/edits`](#post-v1imagesedits).
 
 ## `POST /v1/images/generations`
 
@@ -172,7 +210,7 @@ A genuine [OpenAI Images-Edit-API](https://platform.openai.com/docs/api-referenc
 | `prompt` | string (form field) | required | |
 | `model` | string (form field) | required | same validation as [`/v1/images/generations`](#post-v1imagesgenerations) |
 | `image` | file | required | the input image |
-| `mask` | file | — | **not supported** — a 400 if present, rather than silently ignored. mflux has no masked-region inpainting pipeline wired up here; this endpoint does whole-image edits only (see [Image-to-image](#image-to-image)), and a caller expecting only the masked region to change would otherwise get a silently wrong result |
+| `mask` | file | — | **not supported** — a 400 if present, rather than silently ignored. The native endpoint does inpaint (see [Inpainting a region](#inpainting-a-region)), but the two APIs disagree about what a mask is: OpenAI marks the editable region with **transparency**, mfluxible's own `mask` field marks it **white**. Reading one as the other doesn't fail, it inpaints the complement — every region you meant to keep — so this refuses until the alpha convention is actually honoured. Use `POST /mfluxible/v1/images/generations` for masked work |
 | `n` | int (form field) | 1 | same as `/v1/images/generations` |
 | `size` | string (form field) | `"1024x1024"` | same as `/v1/images/generations` |
 | `response_format` | string (form field) | `"b64_json"` | same as `/v1/images/generations` |

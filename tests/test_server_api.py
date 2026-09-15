@@ -22,6 +22,9 @@ def test_health_reports_the_configured_model(client):
     # and both read it as "unknown" when absent -- so it going missing would silently
     # re-offer a knob the server now rejects rather than failing anywhere visible.
     assert body["model"]["supports_fractional_start"] is True
+    # Same contract for the mask editor in harness.html: hidden when this is False,
+    # shown when the field is missing entirely (an older server, "let it decide").
+    assert body["model"]["supports_mask"] is True
     assert body["available"] == [m.key for m in MODELS]
 
 
@@ -583,3 +586,49 @@ def test_a1111_txt2img_failure_does_not_quote_the_exception(client):
     assert resp.status_code == 500
     assert "/Users/someone" not in resp.text
     assert "server log" in resp.json()["detail"]
+
+
+def _b64(img, fmt="PNG") -> str:
+    buf = io.BytesIO()
+    img.save(buf, format=fmt)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def test_a_masked_generation_keeps_the_unmasked_pixels(client):
+    mask = Image.new("L", (32, 32), 0)
+    mask.paste(255, (0, 0, 16, 32))
+    resp = client.post(
+        "/mfluxible/v1/images/generations",
+        json={
+            "prompt": "a cat",
+            "width": 32,
+            "height": 32,
+            "steps": 2,
+            "seed": 5,
+            "stream": False,
+            "image": _b64(Image.new("RGB", (32, 32), (10, 200, 30))),
+            "image_strength": 0.0,
+            "mask": _b64(mask),
+        },
+    )
+    assert resp.status_code == 200
+    image = Image.open(io.BytesIO(base64.b64decode(resp.json()["data"])))
+    assert image.getpixel((24, 16)) == (10, 200, 30)
+    assert image.getpixel((8, 16)) != (10, 200, 30)
+
+
+def test_a_mismatched_mask_is_a_400_before_the_stream_starts(client):
+    # The point of validating in the endpoint rather than the generator: a 400 with a
+    # readable body, not a 200 status line followed by a torn SSE stream.
+    resp = client.post(
+        "/mfluxible/v1/images/generations",
+        json={
+            "prompt": "a cat",
+            "width": 32,
+            "height": 32,
+            "image": _b64(Image.new("RGB", (32, 32), (1, 2, 3))),
+            "mask": _b64(Image.new("L", (16, 16), 255)),
+        },
+    )
+    assert resp.status_code == 400
+    assert "same size" in resp.json()["message"]

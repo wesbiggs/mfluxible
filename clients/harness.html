@@ -23,6 +23,12 @@
     --accent-ring:   #3538cd33;
     --danger:        #d92d20;
     --danger-soft:   #fef3f2;
+    /* The painted-region wash and the latent-grid rule. Danger's hue rather than the
+       accent's: the mask marks what is about to be thrown away, and it has to stay
+       legible over an arbitrary photograph the accent might blend into. */
+    --mask-wash:     rgba(217, 45, 32, 0.46);
+    --mask-edge:     #d92d20;
+    --grid-line:     rgb(16 24 40 / 0.22);
     --shadow-sm: 0 1px 2px rgb(16 24 40 / 0.05);
     --shadow-md: 0 2px 4px -1px rgb(16 24 40 / 0.06), 0 8px 20px -6px rgb(16 24 40 / 0.10);
     --r-sm: 6px;
@@ -50,6 +56,9 @@
       --accent-ring:   #7b7ff64d;
       --danger:        #ff7b72;
       --danger-soft:   #2d1618;
+      --mask-wash:     rgba(255, 123, 114, 0.42);
+      --mask-edge:     #ff7b72;
+      --grid-line:     rgb(230 237 243 / 0.24);
       --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.3);
       --shadow-md: 0 2px 4px -1px rgb(0 0 0 / 0.4), 0 8px 20px -6px rgb(0 0 0 / 0.5);
     }
@@ -357,6 +366,141 @@
      baseImageB64 is null (setBaseImage / clearBaseImage), so :has() reads the state the
      script already maintains -- same trick as the empty stage and the progress bar. */
   #baseSection:has(#imagePreview.hidden) .baseOnly { display: none; }
+  /* The same derivation, but scoped to the body rather than the section: one of the
+     .maskOnly controls lives on the result pane, on the other side of the layout.
+     Both conditions are read off state the rest of the script already maintains, so
+     nothing has to remember to keep them in sync. */
+  body:has(#imagePreview.hidden) .maskOnly,
+  body:has(#inpaint:not(:checked)) .maskOnly { display: none; }
+
+  /* ---------- mask ---------- */
+
+  .maskRow {
+    display: grid;
+    grid-template-columns: 56px minmax(0, 1fr);
+    gap: 0.6rem;
+    align-items: center;
+  }
+  .maskThumb {
+    position: relative;
+    width: 56px; height: 56px;
+    border-radius: var(--r-sm);
+    overflow: hidden;
+    border: 1px solid var(--border-strong);
+    background: var(--panel-sunken);
+  }
+  .maskThumb img, .maskThumb canvas {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    display: block;
+    object-fit: cover;
+  }
+  .maskMeta { display: grid; gap: 0.3rem; min-width: 0; }
+  .maskCoverage {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--muted);
+  }
+  .maskCoverage b { color: var(--text); font-weight: 600; }
+  .maskActions { display: flex; gap: 0.35rem; flex-wrap: wrap; }
+
+  .note {
+    margin: 0;
+    font-size: 0.72rem;
+    line-height: 1.4;
+    color: var(--faint);
+  }
+  .note.warn {
+    color: var(--muted);
+    background: var(--danger-soft);
+    border-left: 2px solid var(--danger);
+    padding: 0.4rem 0.55rem;
+    border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  }
+
+  /* The painting surface: the base image with a canvas laid over it at exactly the
+     same displayed size. The canvas's *backing* store is the image's natural pixel
+     size, which is the size the server requires the mask to be -- so what gets sent
+     is what was painted, at full resolution, however small this is on screen. */
+  #maskEditor {
+    position: relative;
+    line-height: 0;
+    border-radius: var(--r-lg);
+    overflow: hidden;
+    box-shadow: var(--shadow-md);
+    touch-action: none;
+    max-width: 100%;
+  }
+  #maskEditor img {
+    display: block;
+    max-width: 100%;
+    max-height: max(180px, calc(100dvh - var(--header) - var(--console) - 78px));
+    user-select: none;
+    -webkit-user-drag: none;
+  }
+  #maskSurface {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    cursor: none;
+  }
+  /* One rule per latent cell, which is what the mask is really quantized to: the VAE
+     downsamples by 8, so --mask-cells is naturalWidth/8 and detail finer than one
+     cell is averaged away before the model ever sees it. */
+  #maskGrid {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.15s;
+    background-image:
+      repeating-linear-gradient(to right, var(--grid-line) 0 1px, transparent 1px calc(100% / var(--mask-cells, 128))),
+      repeating-linear-gradient(to bottom, var(--grid-line) 0 1px, transparent 1px calc(100% / var(--mask-cells, 128)));
+  }
+  #maskEditor.showGrid #maskGrid { opacity: 1; }
+  /* Follows the pointer at the brush's real size, so "128 px" is something you can
+     see against the image rather than a number to guess at. */
+  #brushRing {
+    position: absolute;
+    border: 1px solid var(--mask-edge);
+    border-radius: 50%;
+    pointer-events: none;
+    transform: translate(-50%, -50%);
+    opacity: 0;
+    box-shadow: 0 0 0 1px rgb(255 255 255 / 0.5);
+  }
+  #maskEditor:hover #brushRing { opacity: 1; }
+
+  .tools { display: inline-flex; border: 1px solid var(--border-strong); border-radius: var(--r-sm); overflow: hidden; }
+  .tools button {
+    font: inherit;
+    font-size: 0.74rem;
+    font-weight: 550;
+    color: var(--muted);
+    background: var(--panel);
+    border: 0;
+    border-right: 1px solid var(--border-strong);
+    padding: 0.25rem 0.6rem;
+    cursor: pointer;
+  }
+  .tools button:last-child { border-right: 0; }
+  .tools button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+  .tools button:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent); }
+
+  .sizeCtl { display: inline-flex; align-items: center; gap: 0.4rem; }
+  .sizeCtl input[type="range"] { width: 90px; }
+  .sizeCtl output {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--faint);
+    min-width: 46px;
+  }
+  .paneBar .sep { width: 1px; align-self: stretch; background: var(--border); }
+  .paneAction[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+  .tag.mask { background: var(--danger-soft); color: var(--danger); }
 
   /* ---------- stage ---------- */
 
@@ -460,11 +604,12 @@
   .paneAction:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
   .paneAction:disabled { opacity: 0.45; cursor: default; }
 
-  /* Empty state, shown only while neither pane is. Pure CSS off the .hidden class the
-     script already toggles, which is why the three have to stay adjacent siblings in
-     this order -- adjacent-sibling selectors are what read that state. */
+  /* Empty state, shown only while no pane is. Reads the .hidden class the script
+     already toggles, via :has() rather than the adjacent-sibling chain this used to
+     be: that chain named every pane in order, so the mask editor couldn't be added
+     without rewriting it, and a fourth pane would have the same problem again. */
   #emptyState { display: none; }
-  #previewWrap.hidden + #finalWrap.hidden + #emptyState {
+  .canvas:not(:has(> .pane:not(.hidden))) #emptyState {
     display: grid;
     place-items: center;
     gap: 0.5rem;
@@ -619,10 +764,51 @@
               <input type="checkbox" id="fractionalStart"> Fractional start
               <span class="info">
                 <button type="button" aria-label="About fractional start" aria-describedby="tipFractional">i</button>
-                <span class="tip" id="tipFractional" role="tooltip">Image strength normally quantizes to 1/steps &mdash; at 9 steps, 0.35 and 0.4 are the same image. Fractional start places the noise level exactly where the strength asks, at the same step count and the same speed. Changes the pixels a given strength produces, so leave it off to reproduce an earlier run.</span>
+                <span class="tip" id="tipFractional" role="tooltip">Image strength normally quantizes to 1/steps &mdash; at 9 steps, 0.35 and 0.4 are the same image. Fractional start places the noise level exactly where the strength asks, at the same step count and the same speed. Changes the pixels a given strength produces, so leave it off to reproduce an earlier run. Worth more with a mask than without, since the useful strength range there is narrow.</span>
               </span>
             </label>
           </div>
+
+          <label class="check baseOnly" id="inpaintWrap">
+            <input type="checkbox" id="inpaint"> Inpaint a region
+            <span class="info">
+              <button type="button" aria-label="About inpainting" aria-describedby="tipInpaint">i</button>
+              <span class="tip" id="tipInpaint" role="tooltip">Regenerate only the part of the base image you paint. Everything outside the mask is held to the original at every denoising step, so it comes back unchanged &mdash; but the model still sees it, which is what lets the new content match the original's lighting and perspective.</span>
+            </span>
+          </label>
+
+          <div class="maskRow maskOnly">
+            <div class="maskThumb">
+              <img id="maskThumbImg" alt="">
+              <canvas id="maskThumbCanvas" width="96" height="96" aria-hidden="true"></canvas>
+            </div>
+            <div class="maskMeta">
+              <span class="maskCoverage" id="maskCoverage">nothing painted yet</span>
+              <div class="maskActions">
+                <button type="button" class="paneAction" id="editMaskBtn">Edit mask</button>
+                <button type="button" class="paneAction" id="clearMaskBtn">Clear</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid2 maskOnly">
+            <label><span>Mask feather <span class="info">
+              <button type="button" aria-label="About mask feather" aria-describedby="tipFeather">i</button>
+              <span class="tip" id="tipFeather" role="tooltip">Blurs the mask edge, in base-image pixels, to hide the latent grid's 8&nbsp;px staircase. One cell is 8&nbsp;px, so below 8 there is nothing left to express &mdash; and this is not a way to blend two regions: a grey mask value holds that pixel partway to the original at every step, so a wide feather cross-fades the old content with the new instead of replacing it. Capped at 32 for that reason.</span>
+            </span></span>
+              <input type="number" id="maskFeather" value="8" min="0" max="32" step="8">
+            </label>
+            <label class="check">
+              <input type="checkbox" id="maskComposite" checked> Pixel-exact outside
+              <span class="info">
+                <button type="button" aria-label="About pixel-exact compositing" aria-describedby="tipComposite">i</button>
+                <span class="tip" id="tipComposite" role="tooltip">The kept region is held in place during denoising but still passes through the VAE, which shifts it by about 1.5/255 on average &mdash; invisible on a photograph, not on text or a logo. This pastes the result back over the original through the mask, so outside it the pixels are identical to what you sent.</span>
+              </span>
+            </label>
+          </div>
+
+          <p class="note maskOnly">Leave image strength near <b>0</b> to actually replace what's inside the mask. Higher values keep more of what's already there, and by 0.5 on a short schedule the original object usually survives.</p>
+          <p class="note warn maskOnly">The mask edge is a hard boundary: whatever you ask for has to fit inside it, shadow and all, or it gets cut off. And the region is filled with your prompt rather than erased &mdash; asking for "an empty table" gets you something table-shaped, not a gap.</p>
         </div>
       </section>
 
@@ -652,6 +838,32 @@
   <main class="stage">
     <div class="canvas">
 
+      <div id="maskWrap" class="pane hidden">
+        <div id="maskEditor">
+          <img id="maskBaseImg" alt="base image being masked">
+          <canvas id="maskSurface"></canvas>
+          <div id="maskGrid"></div>
+          <div id="brushRing"></div>
+        </div>
+        <div class="paneBar">
+          <span class="tag mask">Mask</span>
+          <div class="tools" role="group" aria-label="Mask tool">
+            <button type="button" id="toolBrush" aria-pressed="true">Brush</button>
+            <button type="button" id="toolRect" aria-pressed="false">Rect</button>
+            <button type="button" id="toolErase" aria-pressed="false">Erase</button>
+          </div>
+          <span class="sizeCtl">
+            <label for="brushSize">Size</label>
+            <input type="range" id="brushSize" min="8" max="512" step="8" value="128">
+            <output id="brushSizeOut" for="brushSize">128 px</output>
+          </span>
+          <span class="sep"></span>
+          <button type="button" class="paneAction" id="invertMaskBtn">Invert</button>
+          <button type="button" class="paneAction" id="clearMaskBtn2">Clear</button>
+          <button type="button" class="paneAction" id="gridBtn" aria-pressed="false">Latent grid</button>
+        </div>
+      </div>
+
       <div id="previewWrap" class="pane hidden">
         <img id="previewImg" alt="preview">
         <div class="paneBar"><span class="tag live">Live preview</span></div>
@@ -663,6 +875,7 @@
           <span class="tag">Result</span>
           <a id="downloadLink" class="paneAction" download="output.png">Download PNG</a>
           <button type="button" class="paneAction" id="useLastBtn" disabled>Use as Base Image</button>
+          <button type="button" class="paneAction maskOnly" id="backToMaskBtn">Back to mask</button>
         </div>
       </div>
 
@@ -714,6 +927,20 @@ const previewImg = document.getElementById("previewImg");
 const finalWrap = document.getElementById("finalWrap");
 const finalImg = document.getElementById("finalImg");
 const downloadLink = document.getElementById("downloadLink");
+const inpaintEl = document.getElementById("inpaint");
+const inpaintWrap = document.getElementById("inpaintWrap");
+const maskWrap = document.getElementById("maskWrap");
+const maskEditor = document.getElementById("maskEditor");
+const maskBaseImg = document.getElementById("maskBaseImg");
+const maskSurface = document.getElementById("maskSurface");
+const maskThumbImg = document.getElementById("maskThumbImg");
+const maskThumbCanvas = document.getElementById("maskThumbCanvas");
+const maskCoverageEl = document.getElementById("maskCoverage");
+const maskFeatherEl = document.getElementById("maskFeather");
+const maskCompositeEl = document.getElementById("maskComposite");
+const brushSizeEl = document.getElementById("brushSize");
+const brushSizeOut = document.getElementById("brushSizeOut");
+const brushRing = document.getElementById("brushRing");
 
 function log(line) {
   logEl.textContent += line + "\n";
@@ -819,6 +1046,11 @@ function setBaseImage(b64, mimeType) {
     // would reintroduce on the next width tweak. Assigning .value fires no "input"
     // event, so nothing here fights the lock; it just adopts the new ratio.
     captureRatio();
+    // Resizing a canvas clears it, so a differently-sized image drops the mask on its
+    // own and a same-sized one keeps it -- which is what chaining wants: "Use as Base
+    // Image" then Generate again re-runs the same region on the previous result.
+    sizeMaskToBaseImage();
+    updateMaskCoverage();
   };
   // Re-loading the same image leaves .src untouched, so no load event fires -- hence
   // the complete check rather than a bare listener.
@@ -832,6 +1064,10 @@ function clearBaseImage() {
   imagePreview.classList.add("hidden");
   dropZoneText.classList.remove("hidden");
   clearImageBtn.disabled = true;
+  // There is nothing left to mask a region of. The CSS hides the controls off
+  // #imagePreview.hidden either way; this is the state behind them.
+  clearMask();
+  maskWrap.classList.add("hidden");
 }
 
 // mflux embeds full generation metadata -- including the exact prompt -- as an
@@ -1075,6 +1311,16 @@ async function refreshModel() {
   const noFractional = modelInfo ? modelInfo.supports_fractional_start === false : false;
   if (noFractional) fractionalStartEl.checked = false;
   fractionalWrap.classList.toggle("hidden", noFractional);
+  // Same rule again for masks, and for the same reason: a field hidden while ticked
+  // would keep sending something the server is about to 400. Deliberately touches no
+  // canvas state -- this function runs once at load, before the mask module's own
+  // top-level consts have initialised.
+  const noMask = modelInfo ? modelInfo.supports_mask === false : false;
+  if (noMask) {
+    inpaintEl.checked = false;
+    maskWrap.classList.add("hidden");
+  }
+  inpaintWrap.classList.toggle("hidden", noMask);
   stepsEl.placeholder = modelInfo ? `model default (${modelInfo.default_steps})` : "model default";
   guidanceEl.placeholder = modelInfo && modelInfo.default_guidance !== null
     ? `model default (${modelInfo.default_guidance})`
@@ -1161,7 +1407,8 @@ function resetAll() {
   // step and 401 the next generation. It isn't form state in the sense the others are:
   // it's how you reach this server at all, not a parameter of the image.
   tokenEl.value = savedToken();
-  clearBaseImage();
+  clearBaseImage();  // also clears the mask and closes the editor
+  brushSizeOut.textContent = `${brushSizeEl.value} px`;  // form.reset() moved the slider
   lastResultB64 = null;
   useLastBtn.disabled = true;
   logEl.textContent = "";
@@ -1181,11 +1428,271 @@ resetBtn.addEventListener("click", resetAll);
 urlEl.addEventListener("change", refreshModel);
 refreshModel();
 
+// ---------------------------------------------------------------------------
+// Mask editor
+// ---------------------------------------------------------------------------
+//
+// Two canvases, and the split is the whole design. `maskAlpha` is the mask: solid
+// white where the model may change the image, transparent elsewhere, at the base
+// image's *natural* pixel size -- which is the size the server requires, so what
+// gets sent is what was painted regardless of how small the editor is on screen.
+// `#maskSurface` is only ever a tinted render of it. Painting straight onto the
+// visible canvas instead would stack overlapping brush strokes into a darker wash
+// than a single one, and leave no clean thing to export.
+const maskAlpha = document.createElement("canvas");
+const maskCtx = maskAlpha.getContext("2d", { willReadFrequently: true });
+const surfaceCtx = maskSurface.getContext("2d");
+// Read at the latent resolution rather than in pixels, because that is the grid the
+// model works on: the VAE downsamples by 8, so this says how many of the cells it
+// can actually address are free, not how many pixels were covered.
+const LATENT_SCALE = 8;
+const probe = document.createElement("canvas");
+const probeCtx = probe.getContext("2d", { willReadFrequently: true });
+
+let maskTool = "brush";
+let painting = false;
+let lastPoint = null;
+let rectStart = null;
+let maskCells = 0;
+
+function maskWash() {
+  return getComputedStyle(document.documentElement).getPropertyValue("--mask-wash").trim();
+}
+
+// Sized from the image, not from the width/height fields: the request's dimensions
+// get floored to a multiple of 16 and the mask is validated against the *image*.
+function sizeMaskToBaseImage() {
+  const w = imagePreview.naturalWidth;
+  const h = imagePreview.naturalHeight;
+  if (!w || !h) return;
+  if (maskAlpha.width !== w || maskAlpha.height !== h) {
+    maskAlpha.width = maskSurface.width = w;
+    maskAlpha.height = maskSurface.height = h;
+  }
+  probe.width = Math.max(1, Math.floor(w / LATENT_SCALE));
+  probe.height = Math.max(1, Math.floor(h / LATENT_SCALE));
+  maskEditor.style.setProperty("--mask-cells", probe.width);
+  maskCells = probe.width * probe.height;
+  maskBaseImg.src = imagePreview.src;
+  maskThumbImg.src = imagePreview.src;
+  renderMask();
+}
+
+function tint(ctx, canvas) {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(maskAlpha, 0, 0, canvas.width, canvas.height);
+  ctx.globalCompositeOperation = "source-in";
+  ctx.fillStyle = maskWash();
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.globalCompositeOperation = "source-over";
+}
+
+function renderMask(previewRect) {
+  surfaceCtx.clearRect(0, 0, maskSurface.width, maskSurface.height);
+  surfaceCtx.drawImage(maskAlpha, 0, 0);
+  if (previewRect) {
+    surfaceCtx.fillStyle = "#fff";
+    surfaceCtx.fillRect(previewRect.x, previewRect.y, previewRect.w, previewRect.h);
+  }
+  surfaceCtx.globalCompositeOperation = "source-in";
+  surfaceCtx.fillStyle = maskWash();
+  surfaceCtx.fillRect(0, 0, maskSurface.width, maskSurface.height);
+  surfaceCtx.globalCompositeOperation = "source-over";
+  tint(maskThumbCanvas.getContext("2d"), maskThumbCanvas);
+}
+
+function maskCellsPainted() {
+  if (!maskCells) return 0;
+  probeCtx.clearRect(0, 0, probe.width, probe.height);
+  probeCtx.drawImage(maskAlpha, 0, 0, probe.width, probe.height);
+  const data = probeCtx.getImageData(0, 0, probe.width, probe.height).data;
+  let on = 0;
+  for (let i = 3; i < data.length; i += 4) if (data[i] > 127) on++;
+  return on;
+}
+
+function updateMaskCoverage() {
+  const on = maskCellsPainted();
+  maskCoverageEl.innerHTML = on
+    ? `<b>${Math.round((on / maskCells) * 100)}%</b> of ${maskCells.toLocaleString()} latent cells`
+    : "nothing painted yet";
+}
+
+// Opaque black under the strokes, so what leaves here is a plain white-on-black PNG
+// -- the server reads it as luminance and ignores any alpha channel (unlike OpenAI's
+// edits endpoint, which uses the opposite convention). Doing it in an export canvas
+// rather than filling maskAlpha keeps erasing possible.
+function maskToBase64() {
+  const out = document.createElement("canvas");
+  out.width = maskAlpha.width;
+  out.height = maskAlpha.height;
+  const ctx = out.getContext("2d");
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, out.width, out.height);
+  ctx.drawImage(maskAlpha, 0, 0);
+  const url = out.toDataURL("image/png");
+  return url.slice(url.indexOf(",") + 1);
+}
+
+function maskIsActive() {
+  return Boolean(baseImageB64) && inpaintEl.checked && !inpaintWrap.classList.contains("hidden");
+}
+
+function clearMask() {
+  maskCtx.clearRect(0, 0, maskAlpha.width, maskAlpha.height);
+  renderMask();
+  updateMaskCoverage();
+}
+
+function invertMask() {
+  // "xor" with a full-canvas fill is exactly inversion: painted areas overlap and
+  // cancel, unpainted ones take the fill.
+  maskCtx.globalCompositeOperation = "xor";
+  maskCtx.fillStyle = "#fff";
+  maskCtx.fillRect(0, 0, maskAlpha.width, maskAlpha.height);
+  maskCtx.globalCompositeOperation = "source-over";
+  renderMask();
+  updateMaskCoverage();
+}
+
+// The editor and the output panes are alternatives, not a stack: .canvas lays its
+// children out in rows, so leaving a result visible underneath would push the image
+// being painted off screen.
+function showMaskEditor(on) {
+  if (on && !maskIsActive()) return;
+  maskWrap.classList.toggle("hidden", !on);
+  if (on) {
+    previewWrap.classList.add("hidden");
+    finalWrap.classList.add("hidden");
+    sizeMaskToBaseImage();
+  }
+}
+
+function surfacePoint(e) {
+  const r = maskSurface.getBoundingClientRect();
+  return {
+    x: ((e.clientX - r.left) / r.width) * maskAlpha.width,
+    y: ((e.clientY - r.top) / r.height) * maskAlpha.height,
+  };
+}
+
+function strokeBetween(a, b) {
+  maskCtx.globalCompositeOperation = maskTool === "erase" ? "destination-out" : "source-over";
+  maskCtx.strokeStyle = "#fff";
+  maskCtx.lineWidth = Number(brushSizeEl.value);
+  maskCtx.lineCap = "round";
+  maskCtx.lineJoin = "round";
+  maskCtx.beginPath();
+  maskCtx.moveTo(a.x, a.y);
+  maskCtx.lineTo(b.x, b.y);
+  maskCtx.stroke();
+  maskCtx.globalCompositeOperation = "source-over";
+}
+
+function moveBrushRing(e) {
+  const r = maskSurface.getBoundingClientRect();
+  if (!r.width) return;
+  const onScreen = (Number(brushSizeEl.value) * r.width) / maskAlpha.width;
+  brushRing.style.width = brushRing.style.height = `${onScreen}px`;
+  brushRing.style.left = `${e.clientX - r.left}px`;
+  brushRing.style.top = `${e.clientY - r.top}px`;
+}
+
+maskSurface.addEventListener("pointerdown", (e) => {
+  maskSurface.setPointerCapture(e.pointerId);
+  painting = true;
+  const p = surfacePoint(e);
+  if (maskTool === "rect") { rectStart = p; return; }
+  lastPoint = p;
+  strokeBetween(p, p);
+  renderMask();
+});
+
+maskSurface.addEventListener("pointermove", (e) => {
+  moveBrushRing(e);
+  if (!painting) return;
+  const p = surfacePoint(e);
+  if (maskTool === "rect") {
+    renderMask({
+      x: Math.min(rectStart.x, p.x), y: Math.min(rectStart.y, p.y),
+      w: Math.abs(p.x - rectStart.x), h: Math.abs(p.y - rectStart.y),
+    });
+    return;
+  }
+  strokeBetween(lastPoint, p);
+  lastPoint = p;
+  renderMask();
+});
+
+function endStroke(e) {
+  if (!painting) return;
+  painting = false;
+  if (maskTool === "rect" && rectStart) {
+    const p = surfacePoint(e);
+    maskCtx.fillStyle = "#fff";
+    maskCtx.fillRect(
+      Math.min(rectStart.x, p.x), Math.min(rectStart.y, p.y),
+      Math.abs(p.x - rectStart.x), Math.abs(p.y - rectStart.y),
+    );
+    rectStart = null;
+  }
+  lastPoint = null;
+  renderMask();
+  updateMaskCoverage();
+}
+maskSurface.addEventListener("pointerup", endStroke);
+maskSurface.addEventListener("pointercancel", endStroke);
+
+const maskTools = {
+  brush: document.getElementById("toolBrush"),
+  rect: document.getElementById("toolRect"),
+  erase: document.getElementById("toolErase"),
+};
+Object.entries(maskTools).forEach(([name, btn]) => {
+  btn.addEventListener("click", () => {
+    maskTool = name;
+    Object.entries(maskTools).forEach(([n, b]) => b.setAttribute("aria-pressed", String(n === name)));
+  });
+});
+
+brushSizeEl.addEventListener("input", () => {
+  brushSizeOut.textContent = `${brushSizeEl.value} px`;
+});
+
+document.getElementById("invertMaskBtn").addEventListener("click", invertMask);
+document.getElementById("clearMaskBtn").addEventListener("click", clearMask);
+document.getElementById("clearMaskBtn2").addEventListener("click", clearMask);
+document.getElementById("editMaskBtn").addEventListener("click", () => showMaskEditor(true));
+document.getElementById("backToMaskBtn").addEventListener("click", () => showMaskEditor(true));
+document.getElementById("gridBtn").addEventListener("click", (e) => {
+  const on = maskEditor.classList.toggle("showGrid");
+  e.currentTarget.setAttribute("aria-pressed", String(on));
+});
+
+inpaintEl.addEventListener("change", () => {
+  // Checking the box moves image strength to where inpainting wants it. 0.4 is an
+  // img2img number: with a mask it leaves the original object standing inside the
+  // region the user just painted, which reads as the mask having been ignored.
+  imageStrengthEl.value = inpaintEl.checked ? "0" : "0.4";
+  showMaskEditor(inpaintEl.checked);
+});
+
 form.addEventListener("submit", async (e) => {
   e.preventDefault();
+  const masked = maskIsActive();
+  if (masked && maskCellsPainted() === 0) {
+    // Caught here rather than by disabling Generate: the progress bar across the top
+    // of the canvas is drawn by `body:has(#submitBtn:disabled)`, so a button disabled
+    // for any reason other than a running generation would leave it sweeping forever.
+    logEl.textContent = "";
+    log("error: inpainting is on but nothing is painted -- open the mask editor and paint the region to change");
+    showMaskEditor(true);
+    return;
+  }
   logEl.textContent = "";
   previewWrap.classList.add("hidden");
   finalWrap.classList.add("hidden");
+  maskWrap.classList.add("hidden");
   submitBtn.disabled = true;
   resetBtn.disabled = true;
   submitBtn.textContent = "Generating...";
@@ -1210,6 +1717,12 @@ form.addEventListener("submit", async (e) => {
     // Gated on the image the same way image_strength is: the server 400s on either
     // without one, and an unchecked box shouldn't be able to produce that.
     fractional_start: baseImageB64 ? fractionalStartEl.checked : false,
+    // All three gated together on `masked`, not just on the image: the server 400s on
+    // mask_feather or a false mask_composite arriving without a mask, so an unchecked
+    // box must send the defaults rather than whatever the hidden fields still hold.
+    mask: masked ? maskToBase64() : null,
+    mask_feather: masked ? Number(maskFeatherEl.value) : 0,
+    mask_composite: masked ? maskCompositeEl.checked : true,
   };
 
   try {

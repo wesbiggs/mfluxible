@@ -254,3 +254,91 @@ def test_an_interruption_still_says_which_step_it_stopped_on():
     callback.call_interrupt(4, seed=1, prompt="x", latents=None, config=None, time_steps=None)
 
     assert emitted == [{"type": "error", "message": "generation interrupted at step 5"}]
+
+
+# --- Masked inpainting --------------------------------------------------------------
+
+
+def _b64_mask(size=(32, 32)) -> str:
+    """White down the left half: regenerate there, keep the right half."""
+    mask = Image.new("L", size, 0)
+    mask.paste(255, (0, 0, size[0] // 2, size[1]))
+    buf = io.BytesIO()
+    mask.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _masked_request(**overrides):
+    base = dict(
+        prompt="a cat",
+        width=32,
+        height=32,
+        steps=3,
+        seed=5,
+        image=_b64_png(size=(32, 32), color=(10, 200, 30)),
+        image_strength=0.0,
+        mask=_b64_mask(),
+    )
+    return GenerateRequest(**{**base, **overrides})
+
+
+async def test_a_masked_request_runs_the_masked_scheduler_and_clears_its_job(toy_engine):
+    import schedulers
+
+    events = await _collect(toy_engine, _masked_request())
+    assert events[-1]["type"] == "image"
+    # The whole wiring is this string: engine.py picks it from schedulers.scheduler_path
+    # and mflux imports it. ToyModel steps through config.scheduler, and _MaskedBlend
+    # raises when no job is set -- so a completed generation is also proof the job was
+    # there for every step.
+    assert toy_engine.model.last_scheduler == "schedulers.MaskedBlendLinearScheduler"
+    # Cleared in run()'s finally, not after_loop's: a job surviving the call would be
+    # picked up by whatever generates next.
+    assert schedulers.active_mask_job() is None
+
+
+async def test_the_kept_region_comes_back_byte_identical(toy_engine):
+    events = await _collect(toy_engine, _masked_request())
+    out = Image.open(io.BytesIO(base64.b64decode(events[-1]["data"])))
+
+    # Right half is the input, exactly -- that's mask_composite, on by default.
+    assert out.getpixel((24, 16)) == (10, 200, 30)
+    # Left half is whatever the model produced, which for ToyModel is its seed colour.
+    assert out.getpixel((8, 16)) != (10, 200, 30)
+
+
+async def test_mask_composite_off_leaves_the_model_s_own_decode_alone(toy_engine):
+    # ToyModel's VAE paints one colour across the whole frame, so with the composite
+    # off there is nothing left to make the two halves differ.
+    events = await _collect(toy_engine, _masked_request(mask_composite=False))
+    out = Image.open(io.BytesIO(base64.b64decode(events[-1]["data"])))
+    assert out.getpixel((8, 16)) == out.getpixel((24, 16))
+
+
+async def test_a_mask_and_a_fractional_start_select_the_combined_scheduler(toy_engine):
+    await _collect(toy_engine, _masked_request(image_strength=0.35, fractional_start=True))
+    assert toy_engine.model.last_scheduler == "schedulers.MaskedFractionalStartScheduler"
+
+
+async def test_an_unmasked_request_still_passes_no_scheduler_at_all(toy_engine):
+    # The regression this guards: once masking made a scheduler routine, it would be
+    # easy to start passing one unconditionally -- which is a silent sampler swap on
+    # every model whose own default isn't linear.
+    await _collect(toy_engine, GenerateRequest(prompt="a cat", width=16, height=16, steps=1))
+    assert toy_engine.model.last_scheduler is None
+
+
+async def test_the_mask_job_is_cleared_even_when_generation_fails(toy_engine, monkeypatch):
+    import schedulers
+
+    # Fails at the VAE decode, i.e. *after* before_loop has set the job and the loop
+    # has run -- which is the case that matters. A failure before the job exists would
+    # pass this assertion without exercising anything. after_loop never runs on this
+    # path either, which is exactly why the clear lives in run()'s finally.
+    def boom(latent):
+        raise RuntimeError("mflux fell over")
+
+    monkeypatch.setattr(toy_engine.model.vae, "decode", boom)
+    events = await _collect(toy_engine, _masked_request())
+    assert events[-1]["type"] == "error"
+    assert schedulers.active_mask_job() is None

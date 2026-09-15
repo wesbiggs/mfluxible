@@ -35,13 +35,15 @@ import time
 from pathlib import Path
 
 import mlx.core as mx
-from PIL import Image
+import numpy as np
+from PIL import Image, ImageFilter, ImageOps
 
+from mflux.models.common.latent_creator.latent_creator import LatentCreator
 from mflux.models.common.vae.vae_util import VAEUtil
 from mflux.utils.image_util import ImageUtil
 
 from models import CFG_GUIDANCE_FLOOR, ModelSpec, resolve
-from schedulers import SCHEDULER_PATH, start_fraction
+from schedulers import MaskJob, clear_mask_job, scheduler_path, set_mask_job, start_fraction
 from schemas import GenerateRequest
 
 # Where anything a *client* must not see goes instead: exception text out of mflux,
@@ -136,6 +138,100 @@ def _decode_input_image(b64_data: str) -> bytes:
     return base64.b64decode(b64_data, validate=True)
 
 
+def _oriented(raw: bytes) -> Image.Image:
+    """An image decoded with its EXIF Orientation applied, the way mflux's own
+    ImageUtil.load_image does it.
+
+    Used for the mask as well as for measuring the input, and that is the point: mflux
+    rotates the input image before encoding it, so a mask compared or composited
+    against the unrotated bytes would be measured in one frame and applied in another.
+    A mask straight out of a canvas carries no EXIF and this is a no-op for it.
+    """
+    with Image.open(io.BytesIO(raw)) as img:
+        return ImageOps.exif_transpose(img)
+
+
+def _decode_mask(b64_data: str, feather: int = 0) -> Image.Image:
+    """The client's mask as a single-channel image: white where the model may change
+    the image, black where the input must survive.
+
+    Read as luminance, so an RGB mask works and an alpha channel is ignored. That is
+    worth stating because OpenAI's own edits endpoint uses the opposite convention --
+    transparent means "edit here" -- so a mask drawn for that API would come out
+    inverted here rather than failing. See docs/api.md.
+
+    Feathering is applied at the mask's own resolution, before any resampling, which
+    is why mask_feather is documented in input-image pixels: request_problem has
+    already established that the mask and the input image are the same size.
+    """
+    mask = _oriented(base64.b64decode(b64_data, validate=True)).convert("L")
+    if feather > 0:
+        mask = mask.filter(ImageFilter.GaussianBlur(feather))
+    return mask
+
+
+def _composite_through_mask(generated: Image.Image, image_path: str, mask_b64: str, feather: int) -> Image.Image:
+    """The generated image pasted back over the input, through the mask.
+
+    The masked blend already holds the kept region during denoising, but the whole
+    frame still goes through the VAE on the way out -- measured at roughly 1.5/255
+    mean absolute error against the input, which is the encode/decode floor rather
+    than anything the blend did wrong. Invisible on a photograph and not on text, a
+    logo or a flat colour, so this exists to make "unchanged" mean unchanged.
+
+    Sized off the *generated* image rather than the request: Config floors width and
+    height to multiples of 16, so a request for 1000px produces a 992px image, and
+    that is the frame both the original and the mask have to land in. The input is
+    re-read from the same file mflux encoded, through mflux's own loader, so the two
+    agree on orientation and on the resampling filter used to scale it.
+    """
+    width, height = generated.size
+    original = ImageUtil.scale_to_dimensions(
+        image=ImageUtil.load_image(image_path).convert("RGB"), target_width=width, target_height=height
+    )
+    mask = _decode_mask(mask_b64, feather).resize((width, height), Image.LANCZOS)
+    return Image.composite(generated.convert("RGB"), original, mask)
+
+
+def _input_mask_problem(mask_b64: str, image_b64: str) -> str | None:
+    """Why a client-supplied mask can't be used, or None if it can. Same contract as
+    _input_image_problem: a reason written here, never an exception's own text.
+
+    The size check is strict on purpose. mflux scales the *input image* to
+    width/height with a plain resize and no aspect-ratio handling, and a mask that
+    doesn't match would be stretched the same way -- silently selecting a different
+    region than the one the user painted. Every other failure mode here is loud, so
+    this one is too.
+    """
+    try:
+        raw = base64.b64decode(mask_b64, validate=True)
+    except Exception:
+        log.warning("rejecting mask: not valid base64", exc_info=True)
+        return "mask is not valid base64."
+    try:
+        with Image.open(io.BytesIO(raw)) as img:
+            img.verify()
+    except Exception:
+        log.warning("rejecting mask: not a decodable image", exc_info=True)
+        return "mask could not be decoded as an image."
+
+    mask_img = _oriented(raw)
+    mask_size = mask_img.size
+    # Before feathering, which can only spread white that is already there: an
+    # all-black mask asks for nothing to change, which is a request nobody means to
+    # make and which would otherwise spend a full generation reproducing the input.
+    empty = mask_img.convert("L").getextrema()[1] == 0
+    image_size = _oriented(base64.b64decode(image_b64, validate=True)).size
+    if mask_size != image_size:
+        return (
+            f"mask is {mask_size[0]}x{mask_size[1]} but image is {image_size[0]}x{image_size[1]}; "
+            "they must be the same size, or the mask selects a different region than it looks like."
+        )
+    if empty:
+        return "mask is entirely black, which selects no region to regenerate; omit it or paint some white."
+    return None
+
+
 def _encode_final_png_with_metadata(image) -> bytes:
     # `image` (mflux's GeneratedImage, not the bare PIL image) already carries
     # everything -- prompt, seed, steps, model, quantize, LoRA config,
@@ -157,15 +253,44 @@ def _encode_final_png_with_metadata(image) -> bytes:
 class _StreamCallback:
     """One-shot InLoopCallback: registered for a single generation, then discarded."""
 
-    def __init__(self, engine: "MfluxEngine", preview_every: int, emit, fractional_start: bool = False):
+    def __init__(
+        self,
+        engine: "MfluxEngine",
+        preview_every: int,
+        emit,
+        fractional_start: bool = False,
+        mask: tuple[str, int] | None = None,
+    ):
         self.engine = engine
         self.preview_every = preview_every
         self.emit = emit
         self.fractional_start = fractional_start
+        # (base64 mask, feather radius), or None. Held rather than pre-encoded
+        # because building the job has to happen in call_before_loop -- see there.
+        self.mask = mask
         self.start_ts = 0.0
         self.last_ts = 0.0
 
     def call_before_loop(self, seed, prompt, latents, config, **kwargs):
+        if self.mask is not None:
+            # The first and only hook that has all three things the job needs at once:
+            # the MLX worker thread (it encodes through the VAE), the floored
+            # width/height mflux is really generating at (Config rounds both down to a
+            # multiple of 16 -- encoding at the requested size instead would produce
+            # latents a different shape to the ones the loop carries), and the seed
+            # mflux noised the input with. The matching clear_mask_job() is in
+            # generate_stream's run().
+            mask_b64, feather = self.mask
+            set_mask_job(
+                self.engine._build_mask_job(
+                    mask_b64=mask_b64,
+                    feather=feather,
+                    image_path=config.image_path,
+                    seed=seed,
+                    width=config.width,
+                    height=config.height,
+                )
+            )
         self.start_ts = self.last_ts = time.monotonic()
         # Image-to-image doesn't start the denoising loop at step 0: mflux noises the
         # input image to the sigma partway down the schedule and starts there, so the
@@ -361,6 +486,46 @@ class MfluxEngine:
         )
         return _pil_to_b64_png(wrapped.image)
 
+    def _build_mask_job(
+        self, *, mask_b64: str, feather: int, image_path: str, seed: int, width: int, height: int
+    ) -> MaskJob:
+        """The three packed arrays schedulers.MaskJob blends between.
+
+        Runs on the MLX worker thread -- it encodes through the VAE, and this engine's
+        whole threading rule (see the module docstring) is that every MLX graph is
+        built and evaluated on the one thread the model was loaded on.
+
+        No per-model branching, for the same reason the rest of this file has none.
+        `clean` goes through mflux's own LatentCreator.encode_image, which is exactly
+        what the img2img path already called to build the starting latents, so the two
+        agree by construction rather than by matching implementations. `noise` is
+        regenerated from the same seed mflux used, so the kept region is re-noised
+        with the sample the trajectory actually started from. And the mask reaches the
+        latents' own layout through the model's own pack_latents -- packing is a pure
+        spatial rearrangement, so replicating one mask value across the channel axis
+        and packing it lands each element's mask on that element, whether the variant
+        packs 2x2 patches into channels (FLUX, Qwen) or only shuffles axes (Z-Image).
+        """
+        model = self.model
+        tiling = getattr(model, "tiling_config", None)
+        encoded = LatentCreator.encode_image(
+            vae=model.vae, image_path=image_path, width=width, height=height, tiling_config=tiling
+        )
+        clean = self._latent_creator.pack_latents(encoded, height, width)
+        noise = self._latent_creator.create_noise(seed, height, width)
+
+        # The encoder's own output shape, rather than a hardcoded /8: it is the one
+        # place that knows this VAE's downsample factor and channel count.
+        _, channels, lat_h, lat_w = encoded.shape
+        # BOX, not LANCZOS: this is an area average down to the latent grid, and a
+        # windowed filter would ring past [0, 1] at a hard mask edge -- overshoot that
+        # becomes "more than the original" or "less than nothing" in the blend.
+        mask = _decode_mask(mask_b64, feather).resize((lat_w, lat_h), Image.BOX)
+        keep = 1.0 - np.asarray(mask, dtype=np.float32) / 255.0
+        keep = mx.repeat(mx.array(keep).reshape(1, 1, lat_h, lat_w), channels, axis=1)
+        keep = self._latent_creator.pack_latents(keep, height, width)
+        return MaskJob(keep=keep.astype(clean.dtype), clean=clean, noise=noise)
+
     def request_problem(self, req: GenerateRequest) -> str | None:
         """Why this model cannot honour `req`, or None if it can.
 
@@ -404,8 +569,37 @@ class MfluxEngine:
             problem = _input_image_problem(req.image)
             if problem is not None:
                 return problem
-        elif req.fractional_start:
-            return "fractional_start requires image to also be set."
+            if req.mask is not None:
+                # After the image, not before: the size check needs an image it can
+                # open, and running it on one already known to be undecodable would
+                # report the wrong field.
+                problem = _input_mask_problem(req.mask, req.image)
+                if problem is not None:
+                    return problem
+        else:
+            if req.fractional_start:
+                return "fractional_start requires image to also be set."
+            if req.mask is not None:
+                return "mask requires image to also be set -- there is nothing to mask a region of."
+        if req.mask is None:
+            # Both fields only describe how a mask is applied, so sending one without
+            # a mask is a request that can't be honoured rather than a harmless extra
+            # -- the same rule image_strength follows above. Only a *non-default*
+            # value is a request: the defaults are what every maskless call sends.
+            if req.mask_feather:
+                return "mask_feather requires mask to also be set."
+            if not req.mask_composite:
+                return "mask_composite requires mask to also be set."
+        elif not self.spec.supports_mask:
+            # Same root cause as the fractional_start check below: holding the
+            # unmasked region in place means replacing the variant's scheduler, and
+            # replacing it is only free on a model that would have run linear anyway.
+            # See ModelSpec.supports_mask and schedulers.py's masked-inpainting note.
+            return (
+                f"{self.spec.label} runs mflux's {self.spec.default_scheduler!r} scheduler, and "
+                "mask needs the linear schedule server/schedulers.py extends; omit the field "
+                "(image alone still works, regenerating the whole frame)."
+            )
         if req.fractional_start and not self.spec.supports_fractional_start:
             # SCHEDULER_PATH *replaces* whatever scheduler the variant would have picked
             # for itself, so it is only a fractional start on a model that would have
@@ -459,7 +653,13 @@ class MfluxEngine:
         seed = req.seed if req.seed is not None else random.randint(0, 2**32 - 1)
         steps = req.steps if req.steps is not None else self.spec.default_steps
         kwargs = self._generation_kwargs(req)
-        callback = _StreamCallback(self, req.preview_every, emit, fractional_start=req.fractional_start)
+        callback = _StreamCallback(
+            self,
+            req.preview_every,
+            emit,
+            fractional_start=req.fractional_start,
+            mask=(req.mask, req.mask_feather) if req.mask is not None else None,
+        )
 
         # mflux's image_path wants an actual file on disk, not bytes or a PIL.Image (see
         # _decode_input_image) -- written up front, outside the lock, since encoding a
@@ -475,11 +675,13 @@ class MfluxEngine:
                 f.write(image_bytes)
             kwargs["image_path"] = tmp_image_path
             kwargs["image_strength"] = req.image_strength if req.image_strength is not None else DEFAULT_IMAGE_STRENGTH
-            if req.fractional_start:
-                # A dotted path mflux imports, never built from request data -- see
-                # SCHEDULER_PATH's comment. Passed only when asked for, so an ordinary
-                # request keeps whatever scheduler the variant picks for itself.
-                kwargs["scheduler"] = SCHEDULER_PATH
+            # A dotted path mflux imports, chosen from a fixed table and never built
+            # from request data -- see SCHEDULER_PATH's comment. None for an ordinary
+            # img2img request, which leaves the variant whatever scheduler it picks
+            # for itself.
+            path = scheduler_path(masked=req.mask is not None, fractional=req.fractional_start)
+            if path is not None:
+                kwargs["scheduler"] = path
 
         try:
             # Only one generation at a time: MLX/Metal + the shared callback list on
@@ -500,6 +702,12 @@ class MfluxEngine:
                             **kwargs,
                         )
                     finally:
+                        # Set in the before_loop callback, cleared here rather than
+                        # there: an exception anywhere in the loop skips after_loop
+                        # entirely, and a job left behind would be picked up by the
+                        # next generation's scheduler. This finally is the one place
+                        # that runs on every path out of generate_image().
+                        clear_mask_job()
                         emit({"type": _DONE})
 
                 # run_in_executor submits to the executor immediately and returns a Future
@@ -513,6 +721,14 @@ class MfluxEngine:
                         yield item
 
                     image = await task
+                    if req.mask is not None and req.mask_composite:
+                        # On the event loop rather than the worker thread on purpose:
+                        # this is Pillow, not MLX, so it is not bound by this engine's
+                        # single-thread rule, and it runs after the generation has
+                        # released its hold on the model.
+                        image.image = _composite_through_mask(
+                            image.image, tmp_image_path, req.mask, req.mask_feather
+                        )
                     yield {
                         "type": "image",
                         "mime_type": "image/png",
