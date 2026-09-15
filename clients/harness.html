@@ -472,6 +472,13 @@
     box-shadow: 0 0 0 1px rgb(255 255 255 / 0.5);
   }
   #maskEditor:hover #brushRing { opacity: 1; }
+  /* The rectangle tool has no brush radius, so it swaps the ring for a plain
+     crosshair: a circle the size of a brush that isn't being used would name a
+     dimension the drag doesn't have. Read off the button's own aria-pressed so the
+     tool state lives in one place -- and `display`, not `opacity`, because the
+     :hover rule above has the same specificity and would otherwise win on order. */
+  #maskWrap:has(#toolRect[aria-pressed="true"]) #brushRing { display: none; }
+  #maskWrap:has(#toolRect[aria-pressed="true"]) #maskSurface { cursor: crosshair; }
 
   .tools { display: inline-flex; border: 1px solid var(--border-strong); border-radius: var(--r-sm); overflow: hidden; }
   .tools button {
@@ -491,13 +498,17 @@
 
   .sizeCtl { display: inline-flex; align-items: center; gap: 0.4rem; }
   .sizeCtl input[type="range"] { width: 90px; }
-  .sizeCtl output {
+  /* Narrow and explicit: the global input[type="number"] rule is width:100%, which in
+     a flex toolbar would push everything after it off the row. */
+  .sizeCtl input[type="number"] {
+    width: 4.4rem;
+    padding: 0.15rem 0.35rem;
     font-family: var(--mono);
-    font-size: 0.7rem;
+    font-size: 0.72rem;
     font-variant-numeric: tabular-nums;
-    color: var(--faint);
-    min-width: 46px;
+    text-align: right;
   }
+  .sizeCtl .unit { font-size: 0.7rem; color: var(--faint); }
   .paneBar .sep { width: 1px; align-self: stretch; background: var(--border); }
   .paneAction[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
   .tag.mask { background: var(--danger-soft); color: var(--danger); }
@@ -854,8 +865,12 @@
           </div>
           <span class="sizeCtl">
             <label for="brushSize">Size</label>
-            <input type="range" id="brushSize" min="8" max="512" step="8" value="128">
-            <output id="brushSizeOut" for="brushSize">128 px</output>
+            <!-- step 1 on the slider so it can land on any value the box accepts and the
+                 two never disagree; the box steps in 8s, one latent cell, for its arrows. -->
+            <input type="range" id="brushSize" min="8" max="512" step="1" value="128">
+            <input type="number" id="brushSizeNum" min="8" max="512" step="8" value="128"
+                   aria-label="Brush size in pixels">
+            <span class="unit">px</span>
           </span>
           <span class="sep"></span>
           <button type="button" class="paneAction" id="invertMaskBtn">Invert</button>
@@ -939,7 +954,7 @@ const maskCoverageEl = document.getElementById("maskCoverage");
 const maskFeatherEl = document.getElementById("maskFeather");
 const maskCompositeEl = document.getElementById("maskComposite");
 const brushSizeEl = document.getElementById("brushSize");
-const brushSizeOut = document.getElementById("brushSizeOut");
+const brushSizeNum = document.getElementById("brushSizeNum");
 const brushRing = document.getElementById("brushRing");
 
 function log(line) {
@@ -1408,7 +1423,7 @@ function resetAll() {
   // it's how you reach this server at all, not a parameter of the image.
   tokenEl.value = savedToken();
   clearBaseImage();  // also clears the mask and closes the editor
-  brushSizeOut.textContent = `${brushSizeEl.value} px`;  // form.reset() moved the slider
+  setBrushSize(128);  // editor state, and outside <form> -- form.reset() doesn't reach it
   lastResultB64 = null;
   useLastBtn.disabled = true;
   logEl.textContent = "";
@@ -1448,6 +1463,24 @@ const surfaceCtx = maskSurface.getContext("2d");
 const LATENT_SCALE = 8;
 const probe = document.createElement("canvas");
 const probeCtx = probe.getContext("2d", { willReadFrequently: true });
+
+const BRUSH_MIN = 8;   // one latent cell; a smaller brush can't address one reliably
+const BRUSH_MAX = 512;
+
+// The number box is the authority and the slider mirrors it, so a typed value is
+// used exactly as typed -- clamped here rather than by the input's own min/max,
+// which these controls don't get for free: they sit in the <main> stage, outside
+// <form>, so no HTML5 validation (and no form.reset()) applies to them.
+function brushSize() {
+  const value = Math.round(Number(brushSizeNum.value));
+  return Number.isFinite(value) ? Math.min(BRUSH_MAX, Math.max(BRUSH_MIN, value)) : 128;
+}
+
+function setBrushSize(px) {
+  const value = Math.min(BRUSH_MAX, Math.max(BRUSH_MIN, Math.round(Number(px)) || 128));
+  brushSizeEl.value = value;
+  brushSizeNum.value = value;
+}
 
 let maskTool = "brush";
 let painting = false;
@@ -1579,7 +1612,7 @@ function surfacePoint(e) {
 function strokeBetween(a, b) {
   maskCtx.globalCompositeOperation = maskTool === "erase" ? "destination-out" : "source-over";
   maskCtx.strokeStyle = "#fff";
-  maskCtx.lineWidth = Number(brushSizeEl.value);
+  maskCtx.lineWidth = brushSize();
   maskCtx.lineCap = "round";
   maskCtx.lineJoin = "round";
   maskCtx.beginPath();
@@ -1592,7 +1625,7 @@ function strokeBetween(a, b) {
 function moveBrushRing(e) {
   const r = maskSurface.getBoundingClientRect();
   if (!r.width) return;
-  const onScreen = (Number(brushSizeEl.value) * r.width) / maskAlpha.width;
+  const onScreen = (brushSize() * r.width) / maskAlpha.width;
   brushRing.style.width = brushRing.style.height = `${onScreen}px`;
   brushRing.style.left = `${e.clientX - r.left}px`;
   brushRing.style.top = `${e.clientY - r.top}px`;
@@ -1655,9 +1688,15 @@ Object.entries(maskTools).forEach(([name, btn]) => {
   });
 });
 
-brushSizeEl.addEventListener("input", () => {
-  brushSizeOut.textContent = `${brushSizeEl.value} px`;
+brushSizeEl.addEventListener("input", () => setBrushSize(brushSizeEl.value));
+// While typing, the slider follows only once the value is usable -- rewriting the
+// field on every keystroke would fight anyone typing "12" on the way to "120", or
+// clearing it to start again. Committing (blur or Enter) normalises whatever is left.
+brushSizeNum.addEventListener("input", () => {
+  const value = Number(brushSizeNum.value);
+  if (Number.isFinite(value) && value >= BRUSH_MIN && value <= BRUSH_MAX) brushSizeEl.value = value;
 });
+brushSizeNum.addEventListener("change", () => setBrushSize(brushSizeNum.value));
 
 document.getElementById("invertMaskBtn").addEventListener("click", invertMask);
 document.getElementById("clearMaskBtn").addEventListener("click", clearMask);
