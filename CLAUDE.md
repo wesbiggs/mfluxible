@@ -559,15 +559,32 @@ can't disagree -- both are 0.0 -- and the client sending an explicit 0.0 means t
 own default never fires for an MCP call either way. It has to be a literal 0.0 rather than
 None, since None is what routes to 0.4 on an older server.
 
-**The prompt describes the whole finished frame, not the masked region -- but this is a
-preference, not a rule, and the difference is smaller than it sounds.** The model denoises
-the entire image and sees the region it is holding, so the prompt is what decides how the
-new content sits in the scene around it. Tested rather than assumed, because the instinct
-carried over from other tools is that a region-only prompt fails outright: it doesn't. The
-same run prompted "a small green toy dinosaur figurine" instead of the full scene gave a
-perfectly good image, 44.5/255 of change inside the mask against the full-scene version's
-41.6, and 38.4 apart from it. So it is a different image rather than a broken one, and what
-a bare region prompt actually costs is the caller's control over which one.
+**The prompt describes the whole finished frame, not the masked region, and how much that
+matters scales with the mask.** The model composes for the entire image; the masked region
+is a window onto that composition. So a prompt naming only the new object is composed at
+full-frame scale and the window lands somewhere inside it -- which on a small mask returns a
+giant cropped fragment of the thing that was asked for.
+
+**The first measurement of this was misleading, and the conclusion drawn from it was wrong.**
+Replacing a mug with a toy dinosaur across ~35% of the frame, a bare "a small green toy
+dinosaur figurine" gave a perfectly good image: 44.5/255 of change inside the mask against
+the full-scene version's 41.6, and 38.4 apart from it -- a different image rather than a
+broken one. Generalizing from that single large-mask case to "a preference, not a rule" did
+not survive the next real use. Replacing a chest emblem across ~6% of the frame, "a stylized
+bold letter F emblem, heroic shield badge shape" produced a letterform several times too big
+for the region and cut flat at the mask edge. The identical seed and box, prompted "a cartoon
+superhero frog with a red cape ... a bold letter F emblem on its chest, pale cream
+background", produced a properly scaled badge. A three-way ablation settles which term
+dominates: correcting the box while keeping the region-only prompt was *still* bad, while
+fixing the prompt alone -- leaving the misplaced box -- was already good. So the prompt is
+the dominant cause and box placement the secondary one, and the lesson for anything measured
+here once is that mask area is a variable, not a constant.
+
+Box placement is that secondary term and is worth its own check: in the failing case the
+model's box sat about 13% of the frame left of the emblem it was meant to replace and clipped
+its right edge, which by itself cost a flat-cut badge. Localization is good enough to be
+useful and not good enough to skip verifying -- see the fractions note below for why the
+coordinates are normalized in the first place.
 
 `mask_path` exists beside `mask_boxes` rather than instead of it because the two serve
 different hosts. Authoring a mask PNG needs a filesystem the MCP host may not give the

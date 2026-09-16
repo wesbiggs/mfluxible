@@ -486,13 +486,23 @@ async def generate_image(
     mask_boxes and mask_path inpaint: they regenerate one region and hold the rest of
     the frame to the input. Pass one or the other, never both, and only with image_path.
 
-    prompt still describes the WHOLE FINISHED FRAME, not the masked region on its own.
-    The model denoises the entire image and can see the part it is holding, so the
-    prompt is the one control over how what it invents sits in the scene around it:
-    "a toy dinosaur on a wooden desk beside a notebook, daylight from a window", not
-    "a toy dinosaur". A bare region prompt is not fatal -- enough is inferred from the
-    held context that it often looks fine -- but it is a different image, and which one
-    you get stops being something the caller decides.
+    prompt describes the WHOLE FINISHED FRAME, not the masked region on its own, and
+    this matters more the smaller the mask is. The model composes for the entire image
+    and the region is a window onto that composition, so a prompt naming only the new
+    object gets composed at full-frame scale and the window lands somewhere inside it --
+    which on a small mask returns a giant cropped fragment of the thing that was asked
+    for. Replacing a chest emblem across 6% of a frame, "a stylized bold letter F emblem,
+    heroic shield badge shape" gave a letterform several times too large, cut off flat at
+    the mask edge; the identical seed and box prompted "a cartoon superhero frog with a
+    red cape, a bold letter F emblem on its chest, pale cream background" gave a properly
+    sized badge. Across a third of a frame the difference is cosmetic. Describe the frame
+    either way -- it costs nothing and it is the only control over how the new content is
+    scaled and placed within the region.
+
+    Check the box against what is actually being replaced, rather than trusting a first
+    estimate. In that same case the box was offset about 13% of the frame to the left of
+    the emblem and clipped its right edge, which on its own cost a flat-cut badge -- a
+    smaller error than the prompt, but the two compound.
 
     mask_boxes is the one to reach for -- a list of [x0, y0, x1, y1] rectangles covering
     what should be replaced, given as fractions of the image from 0.0 to 1.0, reading
