@@ -95,7 +95,7 @@ def test_a_box_is_rasterized_at_the_pixels_its_fractions_name():
     """
     mask = _mask_array([BOX], (768, 768))
     assert mask.mode == "L"
-    assert mask.getbbox() == (296, 150, 741, 611)  # getbbox()'s bounds are half-open
+    assert mask.getbbox() == (296, 150, 740, 610)  # getbbox() is half-open, as the boxes are
 
 
 def test_a_full_frame_box_stays_inside_the_image():
@@ -103,6 +103,21 @@ def test_a_full_frame_box_stays_inside_the_image():
     # here is what keeps the rectangle drawn identical to the one the numbers describe.
     mask = _mask_array([[0.0, 0.0, 1.0, 1.0]], (64, 64))
     assert mask.getextrema() == (255, 255)
+
+
+def test_boxes_meeting_at_a_fraction_tile_rather_than_overlapping():
+    """Half-open coordinates, which is why _mask_png_from_boxes subtracts one.
+
+    Inclusive ends would make a 0.0-0.5 box 385 pixels wide on a 768px axis rather than
+    384, so two boxes meeting at 0.5 would share a column -- and the coverage figure
+    preview_mask prints would be a touch over the fraction it was given.
+    """
+    left = _mask_array([[0.0, 0.0, 0.5, 1.0]], (768, 768))
+    right = _mask_array([[0.5, 0.0, 1.0, 1.0]], (768, 768))
+    assert left.getbbox() == (0, 0, 384, 768)
+    assert right.getbbox() == (384, 0, 768, 768)
+    both = _mask_array([[0.0, 0.0, 0.5, 1.0], [0.5, 0.0, 1.0, 1.0]], (768, 768))
+    assert both.getextrema() == (255, 255)  # they meet with no seam and no overlap
 
 
 def test_boxes_accumulate_and_leave_the_gap_between_them_black():
@@ -333,7 +348,7 @@ async def test_a_masked_call_sends_the_feather_and_a_mask_matching_the_image(
     assert body["mask_feather"] == mcp_server.DEFAULT_MASK_FEATHER
     mask = Image.open(io.BytesIO(base64.b64decode(body["mask"])))
     assert mask.size == Image.open(base_image).size
-    assert mask.getbbox() == (296, 150, 741, 611)
+    assert mask.getbbox() == (296, 150, 740, 610)
 
 
 async def test_a_masked_call_defaults_image_strength_to_zero_rather_than_the_api_s_0_4(
@@ -388,6 +403,109 @@ async def test_a_supplied_mask_is_forwarded_unchanged(base_image, tmp_path, sent
         prompt="x", image_path=str(base_image), mask_path=str(mask)
     )
     assert base64.b64decode(sent[0]["mask"]) == raw
+
+
+# --------------------------------------------------------------------------
+# preview_mask
+# --------------------------------------------------------------------------
+
+
+async def test_the_preview_reports_the_same_selection_the_generation_would_send(
+    base_image, sent, offline
+):
+    """The one property that makes a preview worth having rather than dangerous.
+
+    A preview built by its own code path would drift from the real one eventually, and a
+    drifted preview is worse than none: it reassures the caller about a selection the
+    server never sees. Both tools resolve the mask through _resolve_mask, and this checks
+    that from the outside -- the pixel bounds preview_mask prints against the bounding box
+    of the mask generate_image actually put on the wire.
+    """
+    preview = await mcp_server.preview_mask(image_path=str(base_image), mask_boxes=[BOX])
+    await mcp_server.generate_image(prompt="x", image_path=str(base_image), mask_boxes=[BOX])
+
+    sent_mask = Image.open(io.BytesIO(base64.b64decode(sent[0]["mask"])))
+    x0, y0, x1, y1 = sent_mask.getbbox()
+    assert f"x {x0}-{x1} and y {y0}-{y1}" in preview[1].text
+
+
+async def test_the_preview_needs_no_server_at_all(base_image, monkeypatch):
+    """It is local work on a local file, and has to stay that way: the moment a caller
+    most wants to check a box is while composing a request, which is exactly when the
+    HTTP server may not be up yet."""
+
+    async def _explode():
+        raise AssertionError("preview_mask must not read /health")
+
+    monkeypatch.setattr(mcp_server, "_model_info", _explode)
+    out = await mcp_server.preview_mask(image_path=str(base_image), mask_boxes=[BOX])
+    assert out[0].type == "image"
+
+
+async def test_the_preview_reports_coverage_and_pixel_bounds(base_image):
+    out = await mcp_server.preview_mask(image_path=str(base_image), mask_boxes=[[0.0, 0.0, 0.5, 0.5]])
+    text = out[1].text
+    assert "768x768" in text
+    assert "25.0% of the frame" in text  # half the width by half the height, exactly
+    assert "x 0-384 and y 0-384" in text
+
+
+async def test_a_small_selection_is_flagged_and_a_large_one_is_not(base_image):
+    # The threshold only decides whether a sentence of advice prints, but the advice is
+    # what the frog case needed, so it has to fire on a frog-sized selection.
+    small = await mcp_server.preview_mask(image_path=str(base_image), mask_boxes=[[0.32, 0.42, 0.62, 0.62]])
+    assert "small selection" in small[1].text  # 6% -- the measured failure
+    big = await mcp_server.preview_mask(image_path=str(base_image), mask_boxes=[[0.1, 0.1, 0.9, 0.9]])
+    assert "small selection" not in big[1].text
+
+
+async def test_the_overlay_keeps_the_selection_legible_and_dims_the_rest(base_image, tmp_path):
+    """Dimming outside rather than tinting inside is the whole design: the caller is
+    judging whether the right thing is selected, so the selected pixels have to look
+    exactly as they did in the original."""
+    src = tmp_path / "flat.png"
+    src.write_bytes(_png_bytes((200, 200), (200, 120, 60)))
+    out = await mcp_server.preview_mask(image_path=str(src), mask_boxes=[[0.25, 0.25, 0.75, 0.75]])
+    img = Image.open(io.BytesIO(base64.b64decode(out[0].data))).convert("RGB")
+
+    assert img.getpixel((100, 100)) == (200, 120, 60)  # inside: untouched
+    outside = img.getpixel((5, 5))
+    assert outside != (200, 120, 60) and all(o < c for o, c in zip(outside, (200, 120, 60)))
+    # and the edge is drawn, in a colour nothing in a flat orange image could produce.
+    # (50, 100) is on the boundary: the box starts at 0.25 * 200, and the morphological
+    # gradient puts the ring on the pixels either side of that.
+    assert img.getpixel((50, 100)) == (255, 0, 255)
+
+
+async def test_an_all_black_mask_is_called_out_rather_than_previewed_silently(base_image, tmp_path):
+    # generate_image would get a 400 for this from the server. Saying so here is the
+    # point of a preview: it is the cheap place to find out.
+    blank = tmp_path / "blank.png"
+    blank.write_bytes(_png_bytes((768, 768), 0, "L"))
+    out = await mcp_server.preview_mask(image_path=str(base_image), mask_path=str(blank))
+    assert "entirely black" in out[1].text
+
+
+async def test_the_preview_measures_a_rotated_photo_in_its_displayed_frame(tmp_path):
+    photo = tmp_path / "photo.jpg"
+    photo.write_bytes(_jpeg_with_orientation((40, 20), orientation=6))
+    out = await mcp_server.preview_mask(image_path=str(photo), mask_boxes=[[0.0, 0.0, 1.0, 1.0]])
+    assert "20x40" in out[1].text  # displayed, not stored
+
+
+async def test_the_preview_refuses_what_a_generation_would_refuse(base_image, tmp_path):
+    with pytest.raises(ToolError, match="needs mask_boxes or mask_path"):
+        await mcp_server.preview_mask(image_path=str(base_image))
+    with pytest.raises(ToolError, match="not both"):
+        await mcp_server.preview_mask(
+            image_path=str(base_image), mask_boxes=[BOX], mask_path=str(base_image)
+        )
+    with pytest.raises(ToolError, match="not pixels"):
+        await mcp_server.preview_mask(image_path=str(base_image), mask_boxes=[[296, 150, 740, 610]])
+    wrong = tmp_path / "wrong.png"
+    wrong.write_bytes(_png_bytes((100, 100), 255, "L"))
+    with pytest.raises(ToolError, match=r"100x100.*768x768"):
+        await mcp_server.preview_mask(image_path=str(base_image), mask_path=str(wrong))
 
 
 async def test_the_mcp_tool_never_builds_a_request_its_own_server_rejects(

@@ -28,7 +28,7 @@ import httpx
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp_types import Annotations, ImageContent, TextContent
-from PIL import Image as PILImage, ImageDraw, ImageOps
+from PIL import Image as PILImage, ImageChops, ImageDraw, ImageFilter, ImageOps
 
 MFLUXIBLE_URL = os.environ.get("MFLUXIBLE_URL", "http://127.0.0.1:8420/mfluxible/v1/images/generations")
 
@@ -95,6 +95,15 @@ DEFAULT_STEPS = int(_raw_steps) if _raw_steps else None
 # hide the latent grid's 8px staircase along the mask edge, far short of the width where
 # a feather stops being an edge treatment and starts cross-fading old content with new.
 DEFAULT_MASK_FEATHER = int(os.environ.get("MFLUXIBLE_MCP_MASK_FEATHER", 8))
+
+# Below this share of the frame, preview_mask adds a line about prompt scope. The model
+# composes for the whole image and the masked region is a window onto that composition,
+# so a prompt naming only the new object comes back as a cropped fragment of it -- and
+# how badly depends on how small the window is. Measured at the ends rather than at the
+# boundary: ~6% of a frame was visibly wrong and ~35% was fine. This is a midpoint
+# between those two, not a measured threshold, and all it decides is whether a sentence
+# of advice is printed.
+SMALL_MASK_FRACTION = 0.15
 
 # The returned image may be downscaled/recompressed to fit MAX_RESULT_BYTES, so the
 # untouched full-resolution PNG (metadata and all) is always written here first.
@@ -258,20 +267,111 @@ def _mask_png_from_boxes(boxes: list[tuple[float, float, float, float]], size: t
     mask = PILImage.new("L", size, 0)
     draw = ImageDraw.Draw(mask)
     for x0, y0, x1, y1 in boxes:
-        # Clamped to the last valid index: a box ending at 1.0 would otherwise land one
-        # pixel past the edge. PIL would clip it anyway; doing it here keeps the
-        # rectangle that gets drawn the same one the coordinates describe.
+        # Half-open, like a slice: the far edge is the first pixel *past* the box, so a
+        # span of 0.5 covers exactly half the axis and two boxes meeting at the same
+        # fraction tile instead of overlapping on a shared pixel. PIL's rectangle is
+        # inclusive at both ends, hence the -1. Then clamped, which is also what keeps a
+        # box ending at 1.0 inside the image.
+        left = max(0, min(width - 1, round(x0 * width)))
+        top = max(0, min(height - 1, round(y0 * height)))
         draw.rectangle(
             (
-                max(0, min(width - 1, round(x0 * width))),
-                max(0, min(height - 1, round(y0 * height))),
-                max(0, min(width - 1, round(x1 * width))),
-                max(0, min(height - 1, round(y1 * height))),
+                left,
+                top,
+                max(left, min(width - 1, round(x1 * width) - 1)),
+                max(top, min(height - 1, round(y1 * height) - 1)),
             ),
             fill=255,
         )
     buf = io.BytesIO()
     mask.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _read_image_bytes(image_path: str) -> bytes:
+    try:
+        return Path(image_path).expanduser().read_bytes()
+    except OSError as exc:
+        raise ToolError(f"could not read image_path {image_path!r}: {exc}")
+
+
+def _resolve_mask(
+    image_raw: bytes | None,
+    image_path: str | None,
+    mask_boxes: list[list[float]] | None,
+    mask_path: str | None,
+) -> tuple[bytes, tuple[int, int]]:
+    """The mask PNG this call means, and the oriented image size it was measured against.
+
+    Shared by generate_image and preview_mask rather than written twice, and that is the
+    point of the function rather than tidiness: a preview built by its own code path
+    would eventually drift, and a drifted preview is worse than none at all -- it
+    reassures the caller about a selection the server never sees.
+
+    Everything here happens before a generation starts, so a mask that was never going to
+    fit costs a round trip rather than a minute of GPU.
+    """
+    if mask_boxes is not None and mask_path is not None:
+        raise ToolError("pass either mask_boxes or mask_path, not both: they are two ways to say one thing.")
+    if image_raw is None:
+        raise ToolError("a mask requires image_path to also be set -- there is nothing to mask a region of.")
+    try:
+        image_size = _oriented(image_raw).size
+    except Exception:  # noqa: BLE001 -- Pillow raises several unrelated types here
+        # Deliberately not interpolating the exception, the way server.py's own decode
+        # checks don't: Pillow's message for an undecodable file is a repr of the
+        # in-memory buffer, memory address and all, which tells the caller nothing it can
+        # act on and the path already says which file was meant.
+        raise ToolError(f"image_path {image_path!r} could not be decoded as an image.")
+
+    if mask_boxes is not None:
+        return _mask_png_from_boxes(_checked_mask_boxes(mask_boxes), image_size), image_size
+
+    try:
+        mask_raw = Path(mask_path).expanduser().read_bytes()
+    except OSError as exc:
+        raise ToolError(f"could not read mask_path {mask_path!r}: {exc}")
+    try:
+        mask_size = _oriented(mask_raw).size
+    except Exception:  # noqa: BLE001 -- as above
+        raise ToolError(f"mask_path {mask_path!r} could not be decoded as an image.")
+    if mask_size != image_size:
+        raise ToolError(
+            f"mask is {mask_size[0]}x{mask_size[1]} but image is {image_size[0]}x{image_size[1]}; "
+            "they must be the same size, or the mask selects a different region than it looks like."
+        )
+    return mask_raw, image_size
+
+
+def _mask_overlay_png(image_raw: bytes, mask_raw: bytes) -> bytes:
+    """The input image with everything outside the mask dimmed and the edge drawn on.
+
+    Dimmed outside rather than tinted inside. The caller is answering one question --
+    "is the thing I meant to replace inside the selection?" -- so the selected pixels have
+    to stay exactly as legible as they were in the original, and it is the surroundings
+    that can afford to lose contrast.
+
+    The mask is used at full depth for the dimming, so a soft or hand-painted mask shows
+    its greys as partial dimming rather than being flattened to in/out. The drawn edge is
+    thresholded at the halfway point, since an outline is a line and has to pick one.
+    """
+    base = _oriented(image_raw).convert("RGB")
+    mask = _oriented(mask_raw).convert("L")
+    if mask.size != base.size:  # unreachable via _resolve_mask, cheap to not depend on
+        mask = mask.resize(base.size, PILImage.BOX)
+
+    dimmed = PILImage.blend(base, PILImage.new("RGB", base.size, (0, 0, 0)), 0.6)
+    out = PILImage.composite(base, dimmed, mask)
+
+    # Morphological gradient: the edge is what dilation adds over erosion. Scaled to the
+    # image so the line survives the downscale _fit_result may apply on the way back.
+    k = max(3, (round(min(base.size) / 200) * 2) + 1)
+    binary = mask.point(lambda v: 255 if v > 127 else 0)
+    edge = ImageChops.difference(binary.filter(ImageFilter.MaxFilter(k)), binary.filter(ImageFilter.MinFilter(k)))
+    out.paste(PILImage.new("RGB", base.size, (255, 0, 255)), mask=edge)
+
+    buf = io.BytesIO()
+    out.save(buf, format="PNG")
     return buf.getvalue()
 
 
@@ -502,7 +602,9 @@ async def generate_image(
     Check the box against what is actually being replaced, rather than trusting a first
     estimate. In that same case the box was offset about 13% of the frame to the left of
     the emblem and clipped its right edge, which on its own cost a flat-cut badge -- a
-    smaller error than the prompt, but the two compound.
+    smaller error than the prompt, but the two compound. preview_mask renders the
+    selection over the image for nothing, without a model or a wait, so there is no reason
+    to find this out from a finished generation instead.
 
     mask_boxes is the one to reach for -- a list of [x0, y0, x1, y1] rectangles covering
     what should be replaced, given as fractions of the image from 0.0 to 1.0, reading
@@ -587,10 +689,7 @@ async def generate_image(
     if image_path is not None:
         if image_strength is not None and not (0.0 <= image_strength <= 1.0):
             raise ToolError("image_strength must be between 0.0 and 1.0.")
-        try:
-            image_raw = Path(image_path).expanduser().read_bytes()
-        except OSError as exc:
-            raise ToolError(f"could not read image_path {image_path!r}: {exc}")
+        image_raw = _read_image_bytes(image_path)
         image_b64 = base64.b64encode(image_raw).decode("ascii")
     elif image_strength is not None:
         raise ToolError("image_strength requires image_path to also be set.")
@@ -601,36 +700,8 @@ async def generate_image(
     # fails before a generation is started, and -- for mask_boxes -- so the rasterizing
     # happens against the image's real oriented size, which only this side knows.
     mask_b64 = None
-    if mask_boxes is not None and mask_path is not None:
-        raise ToolError("pass either mask_boxes or mask_path, not both: they are two ways to say one thing.")
     if mask_boxes is not None or mask_path is not None:
-        if image_raw is None:
-            raise ToolError("a mask requires image_path to also be set -- there is nothing to mask a region of.")
-        try:
-            image_size = _oriented(image_raw).size
-        except Exception:  # noqa: BLE001 -- Pillow raises several unrelated types here
-            # Deliberately not interpolating the exception, the way server.py's own
-            # decode checks don't: Pillow's message for an undecodable file is a repr
-            # of the in-memory buffer, memory address and all, which tells the caller
-            # nothing it can act on and the path already says which file was meant.
-            raise ToolError(f"image_path {image_path!r} could not be decoded as an image.")
-
-        if mask_boxes is not None:
-            mask_raw = _mask_png_from_boxes(_checked_mask_boxes(mask_boxes), image_size)
-        else:
-            try:
-                mask_raw = Path(mask_path).expanduser().read_bytes()
-            except OSError as exc:
-                raise ToolError(f"could not read mask_path {mask_path!r}: {exc}")
-            try:
-                mask_size = _oriented(mask_raw).size
-            except Exception:  # noqa: BLE001 -- as above
-                raise ToolError(f"mask_path {mask_path!r} could not be decoded as an image.")
-            if mask_size != image_size:
-                raise ToolError(
-                    f"mask is {mask_size[0]}x{mask_size[1]} but image is {image_size[0]}x{image_size[1]}; "
-                    "they must be the same size, or the mask selects a different region than it looks like."
-                )
+        mask_raw, _ = _resolve_mask(image_raw, image_path, mask_boxes, mask_path)
         mask_b64 = base64.b64encode(mask_raw).decode("ascii")
     elif mask_feather != DEFAULT_MASK_FEATHER:
         raise ToolError("mask_feather requires mask_boxes or mask_path to also be set.")
@@ -687,6 +758,85 @@ async def generate_image(
 
     await _await_job(job, ctx, WAIT_SECONDS)
     return _result(job)
+
+
+@server.tool()
+async def preview_mask(
+    image_path: str,
+    mask_boxes: list[list[float]] | None = None,
+    mask_path: str | None = None,
+    ctx: Context | None = None,
+) -> list[TextContent | ImageContent]:
+    """Show what a mask actually selects, before spending a generation on it.
+
+    Returns the image with everything outside the mask dimmed and the mask's edge drawn
+    on, along with the selection's pixel bounds and its share of the frame. It runs
+    locally against the file on disk -- no model, no GPU, no waiting -- so it is cheap to
+    call, and just as cheap to call again after moving a box.
+
+    Worth doing whenever the region matters, because choosing a box off an image by eye is
+    less accurate than it feels. A measured example: asked to box the chest emblem on a
+    cartoon frog, a box came back centred on the frog's *torso* instead of on the emblem,
+    out by 13% of the frame -- taking in blank chest on one side and clipping the emblem
+    on the other. That is a plausible miss rather than a careless one, since the emblem
+    sat off-centre on the torso because of the pose, and it is exactly what one look at
+    this overlay catches.
+
+    Takes the same mask_boxes or mask_path that generate_image takes, and builds the mask
+    through the same code, so what it shows is what would be sent.
+    """
+    image_raw = _read_image_bytes(image_path)
+    if mask_boxes is None and mask_path is None:
+        raise ToolError("preview_mask needs mask_boxes or mask_path: there is nothing to show otherwise.")
+    mask_raw, (width, height) = _resolve_mask(image_raw, image_path, mask_boxes, mask_path)
+
+    mask_img = _oriented(mask_raw).convert("L")
+    # Through the histogram rather than the pixels: this is C-level, and a phone photo is
+    # ten million pixels to sum in Python otherwise. Greys count proportionally, which is
+    # what "share of the frame" should mean for a soft mask.
+    hist = mask_img.histogram()
+    coverage = sum(i * n for i, n in enumerate(hist)) / (255 * width * height)
+    bounds = mask_img.getbbox()
+
+    lines = [f"Image is {width}x{height}. The selection covers {coverage * 100:.1f}% of the frame."]
+    if bounds is None:
+        lines.append(
+            "The mask is entirely black, so it selects nothing and generate_image would "
+            "refuse it. Check the coordinates."
+        )
+    else:
+        lines.append(
+            f"It spans x {bounds[0]}-{bounds[2]} and y {bounds[1]}-{bounds[3]} in pixels "
+            f"({bounds[2] - bounds[0]}x{bounds[3] - bounds[1]}). Everything dimmed is held to "
+            f"the input; only the bright part is regenerated."
+        )
+        if coverage < SMALL_MASK_FRACTION:
+            # The smaller the window, the further the full-frame composition is from what
+            # fits in it -- see the prompt note in generate_image's docstring.
+            lines.append(
+                f"That is a small selection, which is where prompt scope starts to matter: "
+                f"prompt generate_image with the whole finished frame rather than with the "
+                f"new object alone, or it comes back several times too large and cut off at "
+                f"the mask edge."
+            )
+
+    data, mime, note = _fit_result(_mask_overlay_png(image_raw, mask_raw))
+    if note:
+        lines.append(f"(Preview {note}.)")
+
+    return [
+        ImageContent(
+            type="image",
+            data=base64.b64encode(data).decode(),
+            mime_type=mime,
+            annotations=Annotations(audience=["user", "assistant"], priority=1.0),
+        ),
+        TextContent(
+            type="text",
+            text=" ".join(lines),
+            annotations=Annotations(audience=["user", "assistant"], priority=0.4),
+        ),
+    ]
 
 
 @server.tool()

@@ -603,9 +603,20 @@ here once is that mask area is a variable, not a constant.
 
 Box placement is that secondary term and is worth its own check: in the failing case the
 model's box sat about 13% of the frame left of the emblem it was meant to replace and clipped
-its right edge, which by itself cost a flat-cut badge. Localization is good enough to be
-useful and not good enough to skip verifying -- see the fractions note below for why the
-coordinates are normalized in the first place.
+its right edge, which by itself cost a flat-cut badge. The error has a shape worth recording,
+since it was not random -- the box was centred within 0.014 of the *torso's* centre and 0.075
+off the *emblem's*, and 1.5x too large in both axes. It had grounded the semantic region
+("where a chest logo goes") rather than the object's extent, and the emblem sat off-centre on
+the torso because of the pose. All four coordinates were round two-decimal numbers with two
+identical, which is the signature of estimating on a coarse grid rather than measuring.
+
+`preview_mask` exists for exactly this and is why it is a separate tool rather than a flag:
+it renders the selection over the image with no model, no GPU and no HTTP -- not even a
+`/health` read, since a caller is most likely to be checking a box while composing a request,
+which is when the server may not be up. Both tools go through `_resolve_mask`, and that
+sharing is the whole point rather than deduplication: a preview built by its own path would
+drift, and a drifted preview is worse than none, because it reassures the caller about a
+selection the server never sees.
 
 `mask_path` exists beside `mask_boxes` rather than instead of it because the two serve
 different hosts. Authoring a mask PNG needs a filesystem the MCP host may not give the

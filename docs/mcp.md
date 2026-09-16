@@ -1,6 +1,6 @@
 # MCP tool (generate images from an MCP client)
 
-`clients/mcp_server.py` exposes two tools over MCP's stdio transport: `generate_image(prompt, width, height, steps, seed, guidance, negative_prompt, image_path, image_strength, fractional_start, mask_boxes, mask_path, mask_feather)`, which forwards each `thinking` step as an MCP progress update and returns the image as inline content, and `check_image(handle)`, which collects an image from a `generate_image` call that outlived its tool-call timeout (see below).
+`clients/mcp_server.py` exposes three tools over MCP's stdio transport: `generate_image(prompt, width, height, steps, seed, guidance, negative_prompt, image_path, image_strength, fractional_start, mask_boxes, mask_path, mask_feather)`, which forwards each `thinking` step as an MCP progress update and returns the image as inline content, `check_image(handle)`, which collects an image from a `generate_image` call that outlived its tool-call timeout (see below), and `preview_mask(image_path, mask_boxes, mask_path)`, which renders a mask over the image so the caller can check it before paying for a generation.
 
 `image_path` is a local file path (read from disk by the tool, not a URL) for image-to-image; `image_strength` (0.0–1.0, only meaningful alongside `image_path`, server default 0.4 if omitted) follows mflux's own convention — see [Image-to-image](api.md#image-to-image) — which is the *inverse* of "denoising strength" in some other tools, so the tool's own docstring spells this out for the model calling it. `fractional_start` is the same [flag](api.md#fractional-start) the API takes, described there as the thing to reach for when a user is tuning strength finely or asking why a small change to it did nothing.
 
@@ -18,7 +18,19 @@ Both ends are measured. Replacing a mug with a toy dinosaur across ~35% of the f
 
 This is what makes masking usable from a host where the model has no filesystem of its own: picking a rectangle off an image it can see is something it can do unaided, whereas authoring a mask PNG needs tools this server doesn't provide. `mask_path` covers the other case — a mask some other step already drew, `harness.html` included — and must match the input image's pixel size exactly, measured *after* EXIF orientation, since that's the frame mflux rotates the input into before encoding it.
 
+Box coordinates are **half-open**, like a slice: a span of `0.0`–`0.5` covers exactly half the axis, and two boxes meeting at the same fraction tile rather than sharing a pixel column.
+
 Masks are per-checkpoint in the same way guidance is (`supports_mask` on `/health`), so the tool rejects one up front on a model that can't take it, with the same local precheck it uses for `guidance` and `negative_prompt`.
+
+### `preview_mask`
+
+Takes the same `mask_boxes` or `mask_path` that `generate_image` does and returns the image with everything outside the mask dimmed and its edge drawn on, plus the selection's pixel bounds and its share of the frame. It is entirely local — no model, no GPU, no HTTP, and deliberately not even a `/health` read, since the moment a caller most wants to check a box is while composing a request, which is exactly when the server may not be up.
+
+It exists because picking a box off an image by eye is less accurate than it feels, and the failure is invisible until a generation has already been spent. Measured: asked to box the chest emblem on a cartoon frog, a box came back centred on the frog's *torso* rather than the emblem — 13% of the frame out, taking in blank chest on one side and clipping the emblem on the other. A plausible miss rather than a careless one, since the emblem sat off-centre on the torso because of the pose, and one look at the overlay catches it.
+
+Both tools build the mask through the same `_resolve_mask`, which is the property that makes the preview worth having: a preview from its own code path would drift, and a drifted preview is worse than none — it reassures the caller about a selection the server never sees. `test_the_preview_reports_the_same_selection_the_generation_would_send` checks that from the outside, against the mask actually put on the wire.
+
+The text it returns also reports coverage, and adds a line about prompt scope when the selection is under 15% of the frame — the regime where [a region-only prompt goes wrong](#masks).
 
 ```bash
 uv pip install -r clients/requirements-mcp.txt
