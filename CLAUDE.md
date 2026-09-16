@@ -339,7 +339,28 @@ what is inside the region rather than replace it is a real request.
 
 `harness.html` also moves its own field to 0 when the box is ticked, which is now belt and
 braces -- it always sends an explicit `image_strength`, so the server's default never fires
-for it. Keep it: the point there is that the user *sees* the value change. It also makes `fractional_start` worth
+for it. Keep it: the point there is that the user *sees* the value change.
+
+**Above 0, the useful range is 0.1-0.2 and it is a composition anchor rather than a strength
+dial -- which is also where a formula in `docs/api.md` was wrong.** `Config.init_time_step`
+gates on `image_strength > 0.0` *before* applying `max(1, int(steps * strength))`, so 0.0
+returns 0 and any non-zero strength returns at least 1. The docs stated only the `max()`,
+which implies 0.0 -> 1 and makes 0.0 and 0.1 look adjacent; they are a whole rung apart, and
+that rung is the entire effect. At 0.0 the masked region starts from pure noise and the
+prompt alone decides where the new content lands inside the box. At rung 1 it starts from the
+encoded original, so the new content inherits its position, scale and outline.
+
+That is what makes a non-zero strength worth having, and it is not "restyling": it is the
+only way to hold a replacement where the original sat when the prompt cannot reproduce the
+original composition. A photograph is the case that forces it -- "a man reading a book" will
+not be framed the way the photo was, so without an anchor the replacement is correctly
+painted and in the wrong place. The cost is bleed-through and it rises with the anchor:
+replacing an S chest emblem with an F, 0.0 gave a clean F at a prompt-chosen size, while 0.2
+with fractional_start held the shield exactly in place and let the old S contaminate the
+letterform. Anchor when the new content should share the old one's geometry, not otherwise;
+no single value does both, which is why this stays a documented dial rather than a smarter
+default. Note also that 0.1 and 0.2 are the same rung at 9 steps -- `fractional_start` is
+what makes them distinguishable. It also makes `fractional_start` worth
 more than it is for plain img2img, since the useful range is narrow and still quantized.
 
 **Measured, so it doesn't get re-litigated:** with the blend alone, outside-mask mean

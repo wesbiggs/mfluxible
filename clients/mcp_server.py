@@ -521,9 +521,21 @@ async def generate_image(
         when a mask is present rather than to the 0.4 above. With a mask it no longer
         decides how much of the *frame* survives -- the mask decides that -- only how
         much of the old content *inside the region* survives. At 0.4 the thing that was
-        meant to be replaced comes back very nearly intact, and the call still reports
-        success, so leave it alone unless the intent is to restyle what is already there
-        rather than replace it.
+        meant to be replaced comes back very nearly intact while the call still reports
+        success, so 0.4 is never what is wanted here.
+
+        The range worth knowing is 0.0 to about 0.2, and it is a composition anchor
+        rather than a strength. At 0.0 the region is reinvented from pure noise and
+        where the new content lands inside the box is the prompt's decision alone. One
+        rung in -- 0.1 to 0.2, with fractional_start to tell them apart -- it starts
+        from the encoded original instead, so the new content inherits the old one's
+        position, scale and outline. Reach for that when the prompt cannot reproduce the
+        original composition, which is the normal case for a photograph: "a man reading
+        a book" will not be framed the way the photo was, and anchoring is the only thing
+        that holds the replacement where the original sat. The cost is bleed-through --
+        replacing an S emblem with an F, 0.2 keeps the shield exactly in place and lets
+        the old S contaminate the letterform. Anchor when the new content should share
+        the old one's geometry; don't when it shouldn't. Nothing does both.
       - Give the box room for what the new content needs, shadow included. The mask edge
         is a hard boundary and anything crossing it is cut off flat at it. Room is not
         free, though: a box that takes in a swathe of flat background can come back a
