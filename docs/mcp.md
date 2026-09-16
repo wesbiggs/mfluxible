@@ -100,6 +100,10 @@ Desktop honors the display hints above: the image has been observed rendering in
 
 Desktop also reports `mfluxible` as connected as soon as `mcp_server.py` starts, which says nothing about whether the HTTP server it proxies to is up. If that server isn't running, you'll only find out when a `generate_image` call fails.
 
+**An image you paste or upload into the chat is not a file, and the tool cannot reach it.** `image_path` and `mask_path` are read from disk by `mcp_server.py`, which the host launches as a local subprocess; an attachment lives in the conversation, and in Desktop in its own container. Save it to disk first — drag it out of the chat, or use Save As — and pass that path.
+
+Sending the bytes instead is the obvious alternative and it does not work, for a structural reason rather than a missing feature. `CallToolRequestParams.arguments` is a plain JSON object with no attachment or content-block channel, so anything the tool receives has to be written into that JSON *by the model* — and a model shown an image holds visual tokens, not the file's bytes, so it cannot reproduce them (a 768×768 PNG would be ~800K characters of base64 if it could). The three requests a server may send back to a host — `ListRootsRequest`, `ElicitRequest`, `CreateMessageRequest` — don't fetch a file either. An `image_b64` argument would be unremarkable on the wire if a host ever gained the ability to substitute an attachment's bytes into a named argument, but nothing in MCP offers that today, so adding one would only move the failure later.
+
 ### oMLX
 
 [oMLX](https://omlx.ai/) is a local LLM inference server for Apple Silicon whose admin UI includes a chat that can call MCP tools. Tested against 0.6.4 (Homebrew).
