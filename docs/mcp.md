@@ -1,8 +1,18 @@
 # MCP tool (generate images from an MCP client)
 
-`clients/mcp_server.py` exposes two tools over MCP's stdio transport: `generate_image(prompt, width, height, steps, seed, guidance, negative_prompt, image_path, image_strength, fractional_start)`, which forwards each `thinking` step as an MCP progress update and returns the image as inline content, and `check_image(handle)`, which collects an image from a `generate_image` call that outlived its tool-call timeout (see below).
+`clients/mcp_server.py` exposes two tools over MCP's stdio transport: `generate_image(prompt, width, height, steps, seed, guidance, negative_prompt, image_path, image_strength, fractional_start, mask_boxes, mask_path, mask_feather)`, which forwards each `thinking` step as an MCP progress update and returns the image as inline content, and `check_image(handle)`, which collects an image from a `generate_image` call that outlived its tool-call timeout (see below).
 
 `image_path` is a local file path (read from disk by the tool, not a URL) for image-to-image; `image_strength` (0.0–1.0, only meaningful alongside `image_path`, server default 0.4 if omitted) follows mflux's own convention — see [Image-to-image](api.md#image-to-image) — which is the *inverse* of "denoising strength" in some other tools, so the tool's own docstring spells this out for the model calling it. `fractional_start` is the same [flag](api.md#fractional-start) the API takes, described there as the thing to reach for when a user is tuning strength finely or asking why a small change to it did nothing.
+
+### Masks
+
+`mask_boxes` and `mask_path` are the two ways to [inpaint](api.md#inpainting-a-region) — regenerate one region and hold the rest of the frame — and a call passes one or the other, never both, always alongside `image_path`. `mask_feather` is the API's [field](api.md#inpainting-a-region) of the same name, defaulting to `8` here rather than the API's `0`, on the grounds that the model calling this tool is working from a docstring rather than from that page and mostly won't pass it at all. Everything else about masking is the API's behaviour unchanged, including `mask_composite`, which this tool doesn't expose and the server therefore leaves on.
+
+**`mask_boxes` takes fractions of the image, not pixels** — a list of `[x0, y0, x1, y1]` rectangles reading left, top, right, bottom, each between `0.0` and `1.0`, which the tool rasterizes into a mask at the input image's own size. That it's normalized is the load-bearing part, and the reason is [`MFLUXIBLE_MCP_MAX_BYTES`](#configuration): the inline copy of a returned image is downscaled to fit the host's result cap, so a model that generates an image and then masks part of it has been *looking at* a smaller frame than the full-resolution PNG `image_path` points back at. Pixel coordinates read off the former would address the wrong region of the latter, quietly, and scaled by a factor only the caption's note ever mentions. A fraction means the same thing in both frames.
+
+This is what makes masking usable from a host where the model has no filesystem of its own: picking a rectangle off an image it can see is something it can do unaided, whereas authoring a mask PNG needs tools this server doesn't provide. `mask_path` covers the other case — a mask some other step already drew, `harness.html` included — and must match the input image's pixel size exactly, measured *after* EXIF orientation, since that's the frame mflux rotates the input into before encoding it.
+
+Masks are per-checkpoint in the same way guidance is (`supports_mask` on `/health`), so the tool rejects one up front on a model that can't take it, with the same local precheck it uses for `guidance` and `negative_prompt`.
 
 ```bash
 uv pip install -r clients/requirements-mcp.txt
@@ -128,3 +138,4 @@ Environment variables for `clients/mcp_server.py`, all optional. Set them where 
 | `MFLUXIBLE_MCP_JOB_RETENTION_S` | `900` | How long a finished generation stays collectable by handle |
 | `MFLUXIBLE_MCP_MAX_BYTES` | `700000` | Raw-byte budget for the inline image, sized so base64 clears the host's ~1MB result cap |
 | `MFLUXIBLE_MCP_SAVE_DIR` | `~/Pictures/mfluxible` | Where the untouched full-resolution PNG is written |
+| `MFLUXIBLE_MCP_MASK_FEATHER` | `8` | Feather applied to a mask when a call doesn't say; 8–16 is the useful range, and it is not a region blend (see [Inpainting a region](api.md#inpainting-a-region)) |

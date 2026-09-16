@@ -504,6 +504,42 @@ That distinction is the difference between the model being able to tell the user
 HTTP server isn't running and it being told nothing at all, so anything a caller could
 act on -- upstream errors, unknown handles -- must go out as `ToolError`.
 
+## The MCP tool's mask boxes are fractions because the model never saw the full-size image
+
+`generate_image`'s `mask_boxes` takes fractions of the frame rather than pixels, and that
+is not a taste call. `_fit_result` downscales the inline copy of any image past
+`MAX_RESULT_BYTES` -- a 1024x1280 PNG comes back at roughly half size -- while the
+full-resolution original goes to `SAVE_DIR` and is what `image_path` points back at on the
+next call. So the frame the model *looked at* when it chose a region and the file the mask
+is applied to are routinely different sizes, and nothing in the response states the factor
+outright: the displayed dimensions appear only inside the caption's prose note, and only
+when a downscale actually happened. Pixel coordinates would be wrong by that factor,
+silently, in exactly the two-call flow -- generate, then replace part of the result -- that
+the feature exists for. A fraction means the same thing in both frames.
+
+Rasterizing client-side follows from the same fact: it needs the input image's real size,
+which is a property of a file on the *client's* disk. It uses the **EXIF-oriented** size,
+and that is the trap. `_oriented` mirrors engine.py's function of the same name because
+mflux rotates an input image before encoding it and `_input_mask_problem` therefore
+compares oriented sizes. A phone photo is where the two diverge -- 4032x3024 of bytes
+carrying an Orientation tag, 3024x4032 as displayed -- so a mask rasterized at the raw
+size is rejected for a mismatch the caller has no way to see, and one drawn by hand
+against what the photo looks like is right.
+
+`mask_feather` defaults to 8 here against the API's 0, the one place this tool
+deliberately disagrees with the endpoint it proxies to: someone writing JSON has read that
+field's documentation, while the model calling this tool has read a docstring and will
+mostly not pass it at all. The asymmetry has a sharp edge -- `request_problem` rejects a
+non-default `mask_feather` *without* a mask, so a maskless call must send 0 rather than
+the default it was handed, which is why that field is conditional in the request body
+rather than passed straight through.
+
+`mask_path` exists beside `mask_boxes` rather than instead of it because the two serve
+different hosts. Authoring a mask PNG needs a filesystem the MCP host may not give the
+model -- in a Claude Desktop setup where mfluxible is the only server connected, it has no
+way to write one -- whereas naming a rectangle on an image it can see needs nothing but
+the image. `mask_path` is for a mask something else already drew.
+
 ## One model per process, and every per-model difference lives in models.py
 
 `server/models.py` is the whole multi-model story: which mflux variant class, which `ModelConfig`, which latent creator, the default step count, whether `guidance`/`negative_prompt` mean anything, and which scheduler the variant picks for itself. `engine.py` has no per-model branching and shouldn't grow any — mflux's ZImage, Flux1, QwenImage, Krea2, ErnieImage and Flux2Klein happen to share a constructor signature, a `generate_image()` signature, a `save_model(base_path)` and a `callbacks` registry, which is the only reason this works.

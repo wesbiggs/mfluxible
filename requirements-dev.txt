@@ -3,6 +3,15 @@
 # server doesn't pull in test tooling it'll never use.
 -r server/requirements.txt
 
+# The MCP client is under test too (tests/test_mcp_server.py), and importing it needs
+# the mcp SDK. Pulled in by reference rather than as a second `mcp>=...` pin here: the
+# version constraint belongs in one place, and a test env that drifts from what the
+# tool is actually installed with is the one thing this file must not do. Note the
+# direction -- the dev env is a superset of every component, which is the opposite of
+# the separation the four requirements files keep for *installs* (see CLAUDE.md): a
+# client-only or MCP-only install still never sees mflux.
+-r clients/requirements-mcp.txt
+
 pytest>=9.1.1
 pytest-asyncio>=1.4.0
 # fastapi.testclient.TestClient needs httpx at runtime; it's on the machine today only

@@ -28,7 +28,7 @@ import httpx
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp_types import Annotations, ImageContent, TextContent
-from PIL import Image as PILImage
+from PIL import Image as PILImage, ImageDraw, ImageOps
 
 MFLUXIBLE_URL = os.environ.get("MFLUXIBLE_URL", "http://127.0.0.1:8420/mfluxible/v1/images/generations")
 
@@ -87,6 +87,14 @@ DEFAULT_HEIGHT = int(os.environ.get("MFLUXIBLE_MCP_HEIGHT", 768))
 # running at Z-Image-Turbo's step count. Set it only to override that per-model default.
 _raw_steps = os.environ.get("MFLUXIBLE_MCP_STEPS", "").strip()
 DEFAULT_STEPS = int(_raw_steps) if _raw_steps else None
+
+# Feather applied to a mask unless a call overrides it. The HTTP API defaults this to
+# 0, and that difference is deliberate: a caller writing JSON by hand has read the
+# field's documentation, while the model calling this tool is working from a docstring
+# and will mostly not pass it at all. 8 is the low end of the useful range -- enough to
+# hide the latent grid's 8px staircase along the mask edge, far short of the width where
+# a feather stops being an edge treatment and starts cross-fading old content with new.
+DEFAULT_MASK_FEATHER = int(os.environ.get("MFLUXIBLE_MCP_MASK_FEATHER", 8))
 
 # The returned image may be downscaled/recompressed to fit MAX_RESULT_BYTES, so the
 # untouched full-resolution PNG (metadata and all) is always written here first.
@@ -184,6 +192,87 @@ def _fit_result(png: bytes) -> tuple[bytes, str, str]:
     data, width, height, quality = smallest
     note = f"shown as JPEG q{quality} at {width}x{height}; still {len(data) / 1e6:.1f}MB"
     return data, "image/jpeg", note
+
+
+def _oriented(raw: bytes) -> PILImage.Image:
+    """`raw` decoded with its EXIF Orientation applied, matching what the server does.
+
+    Load-bearing for the size check below rather than a nicety. mflux rotates an input
+    image before encoding it, so the server compares a mask against the image's
+    *oriented* size -- and a phone photo is exactly where raw and oriented differ
+    (4032x3024 bytes carrying an Orientation tag, displayed 3024x4032). A mask
+    rasterized at the raw size would be rejected for a mismatch the caller can't see,
+    and one drawn by hand at the displayed size would look wrong here but be right.
+    """
+    with PILImage.open(io.BytesIO(raw)) as img:
+        return ImageOps.exif_transpose(img)
+
+
+def _checked_mask_boxes(boxes: list[list[float]]) -> list[tuple[float, float, float, float]]:
+    """`boxes` as plain floats, or a ToolError naming the box that couldn't be used.
+
+    Every failure here has to leave as a ToolError specifically: mcp 2.x replaces any
+    other exception with a bare "Error executing tool generate_image" and drops the
+    text, so a box the model could have fixed would come back as a failure it can learn
+    nothing from. That includes the coercion itself -- the SDK validates arguments
+    against this function's annotations first and would normally reject a non-number
+    before it arrives, but a float() raising ValueError here is precisely the case that
+    would reach the model stripped.
+    """
+    if not boxes:
+        raise ToolError("mask_boxes is empty; pass at least one [x0, y0, x1, y1] box, or omit it.")
+    checked = []
+    for box in boxes:
+        if len(box) != 4:
+            raise ToolError(f"each mask box needs exactly 4 numbers, [x0, y0, x1, y1]; got {box!r}.")
+        try:
+            x0, y0, x1, y1 = (float(value) for value in box)
+        except (TypeError, ValueError):
+            raise ToolError(f"mask box {box!r} has a value that isn't a number.")
+        if not all(0.0 <= value <= 1.0 for value in (x0, y0, x1, y1)):
+            raise ToolError(
+                f"mask box {box!r} is out of range: these are fractions of the image, 0.0 to 1.0, "
+                "not pixels."
+            )
+        if x1 <= x0 or y1 <= y0:
+            raise ToolError(
+                f"mask box {box!r} encloses no area; it reads [left, top, right, bottom], so it "
+                "needs right > left and bottom > top."
+            )
+        checked.append((x0, y0, x1, y1))
+    return checked
+
+
+def _mask_png_from_boxes(boxes: list[tuple[float, float, float, float]], size: tuple[int, int]) -> bytes:
+    """Rasterize normalized boxes into a mask PNG: white inside them, black outside.
+
+    Normalized rather than pixel coordinates because of what the model picking them has
+    actually seen. _fit_result downscales the inline copy of any image past the host's
+    result cap, so for anything much larger than this tool's default size the frame the
+    model looked at is smaller than the PNG on disk that image_path points back to --
+    and pixel coordinates read off the former would select the wrong region of the
+    latter, silently and by a factor nothing in the response states outright. A fraction
+    of the frame means the same thing in both.
+    """
+    width, height = size
+    mask = PILImage.new("L", size, 0)
+    draw = ImageDraw.Draw(mask)
+    for x0, y0, x1, y1 in boxes:
+        # Clamped to the last valid index: a box ending at 1.0 would otherwise land one
+        # pixel past the edge. PIL would clip it anyway; doing it here keeps the
+        # rectangle that gets drawn the same one the coordinates describe.
+        draw.rectangle(
+            (
+                max(0, min(width - 1, round(x0 * width))),
+                max(0, min(height - 1, round(y0 * height))),
+                max(0, min(width - 1, round(x1 * width))),
+                max(0, min(height - 1, round(y1 * height))),
+            ),
+            fill=255,
+        )
+    buf = io.BytesIO()
+    mask.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def _build_content(job: _Job, event: dict) -> list[TextContent | ImageContent]:
@@ -354,6 +443,9 @@ async def generate_image(
     image_path: str | None = None,
     image_strength: float | None = None,
     fractional_start: bool = False,
+    mask_boxes: list[list[float]] | None = None,
+    mask_path: str | None = None,
+    mask_feather: int = DEFAULT_MASK_FEATHER,
     ctx: Context | None = None,
 ) -> list[TextContent | ImageContent]:
     """Generate an image from a text prompt, optionally seeded from an existing image.
@@ -391,6 +483,42 @@ async def generate_image(
     image -- so set it when the user wants to tune a strength finely, or is asking why
     a small change to it did nothing. It costs no extra time.
 
+    mask_boxes and mask_path inpaint: they regenerate one region and hold the rest of
+    the frame to the input. Pass one or the other, never both, and only with image_path.
+    mask_boxes is the one to reach for -- a list of [x0, y0, x1, y1] rectangles covering
+    what should be replaced, given as fractions of the image from 0.0 to 1.0, reading
+    left, top, right, bottom. Fractions rather than pixels because the copy of an image
+    returned inline may have been downscaled to fit the host's size cap, so pixel
+    coordinates taken off it can address a different part of the full-resolution file
+    that image_path points to. mask_path is a local path to a mask image already drawn,
+    white where the model may change the image and black where it may not; it has to be
+    exactly the same pixel size as the image, so it is the option for a mask some other
+    step produced rather than one to author from scratch.
+
+    Three things about inpainting are counterintuitive enough to be worth stating
+    outright:
+
+      - Set image_strength to 0.0. With a mask it no longer decides how much of the
+        frame survives -- the mask decides that -- only how much of the *old content
+        inside the region* survives, so the usual 0.4 leaves the very thing that was
+        meant to be replaced standing there.
+      - Give the box room for what the new content needs, shadow included. The mask edge
+        is a hard boundary and anything crossing it is cut off flat at it. Room is not
+        free, though: a box that takes in a swathe of flat background can come back a
+        visibly different shade of it, so bound the subject rather than the wall behind.
+      - It fills, it does not erase. Nothing can say "leave this region empty", so
+        masking an object and prompting for bare background yields an object-shaped
+        something instead of the background closing over it.
+
+    mask_feather (pixels, default 8) hides the 8px staircase the latent grid leaves
+    along a mask edge. It is not a way to blend two regions: a grey mask value holds
+    that pixel partway to the original at every step, so a wide feather cross-fades the
+    old content with the new into a double exposure. 8-16 is the whole useful range.
+
+    Masking is per-checkpoint in the same way guidance is, and for the same underlying
+    reason -- it needs the model's own scheduler to be the linear one -- so a mask sent
+    to a model that cannot take it is an error naming that model.
+
     Returns the image directly if it finishes quickly. Otherwise it returns a handle
     and keeps generating in the background: call check_image with that handle to
     collect the image, repeating until it comes back.
@@ -414,19 +542,64 @@ async def generate_image(
                 f"{info.get('label', 'this model')} does not run the linear schedule fractional_start "
                 "extends; omit the fractional_start argument (image_strength still works)."
             )
+        if (mask_boxes is not None or mask_path is not None) and not info.get("supports_mask", True):
+            raise ToolError(
+                f"{info.get('label', 'this model')} does not run the linear schedule masking needs; "
+                "omit mask_boxes/mask_path (image_path on its own still works, on the whole frame)."
+            )
 
     image_b64 = None
+    image_raw = None
     if image_path is not None:
         if image_strength is not None and not (0.0 <= image_strength <= 1.0):
             raise ToolError("image_strength must be between 0.0 and 1.0.")
         try:
-            image_b64 = base64.b64encode(Path(image_path).expanduser().read_bytes()).decode("ascii")
+            image_raw = Path(image_path).expanduser().read_bytes()
         except OSError as exc:
             raise ToolError(f"could not read image_path {image_path!r}: {exc}")
+        image_b64 = base64.b64encode(image_raw).decode("ascii")
     elif image_strength is not None:
         raise ToolError("image_strength requires image_path to also be set.")
     elif fractional_start:
         raise ToolError("fractional_start requires image_path to also be set.")
+
+    # Built here rather than left to the server so a mask that was never going to fit
+    # fails before a generation is started, and -- for mask_boxes -- so the rasterizing
+    # happens against the image's real oriented size, which only this side knows.
+    mask_b64 = None
+    if mask_boxes is not None and mask_path is not None:
+        raise ToolError("pass either mask_boxes or mask_path, not both: they are two ways to say one thing.")
+    if mask_boxes is not None or mask_path is not None:
+        if image_raw is None:
+            raise ToolError("a mask requires image_path to also be set -- there is nothing to mask a region of.")
+        try:
+            image_size = _oriented(image_raw).size
+        except Exception:  # noqa: BLE001 -- Pillow raises several unrelated types here
+            # Deliberately not interpolating the exception, the way server.py's own
+            # decode checks don't: Pillow's message for an undecodable file is a repr
+            # of the in-memory buffer, memory address and all, which tells the caller
+            # nothing it can act on and the path already says which file was meant.
+            raise ToolError(f"image_path {image_path!r} could not be decoded as an image.")
+
+        if mask_boxes is not None:
+            mask_raw = _mask_png_from_boxes(_checked_mask_boxes(mask_boxes), image_size)
+        else:
+            try:
+                mask_raw = Path(mask_path).expanduser().read_bytes()
+            except OSError as exc:
+                raise ToolError(f"could not read mask_path {mask_path!r}: {exc}")
+            try:
+                mask_size = _oriented(mask_raw).size
+            except Exception:  # noqa: BLE001 -- as above
+                raise ToolError(f"mask_path {mask_path!r} could not be decoded as an image.")
+            if mask_size != image_size:
+                raise ToolError(
+                    f"mask is {mask_size[0]}x{mask_size[1]} but image is {image_size[0]}x{image_size[1]}; "
+                    "they must be the same size, or the mask selects a different region than it looks like."
+                )
+        mask_b64 = base64.b64encode(mask_raw).decode("ascii")
+    elif mask_feather != DEFAULT_MASK_FEATHER:
+        raise ToolError("mask_feather requires mask_boxes or mask_path to also be set.")
 
     _prune_jobs()
     job = _Job(
@@ -454,6 +627,11 @@ async def generate_image(
                 "image": image_b64,
                 "image_strength": image_strength,
                 "fractional_start": fractional_start,
+                "mask": mask_b64,
+                # Both only describe how a mask is applied, so the server rejects a
+                # non-default either side of one. This tool's own mask_feather default
+                # is non-zero, which makes a maskless call the case that needs the care.
+                "mask_feather": mask_feather if mask_b64 is not None else 0,
             },
         )
     )
