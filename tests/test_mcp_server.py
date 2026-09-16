@@ -336,6 +336,41 @@ async def test_a_masked_call_sends_the_feather_and_a_mask_matching_the_image(
     assert mask.getbbox() == (296, 150, 741, 611)
 
 
+async def test_a_masked_call_defaults_image_strength_to_zero_rather_than_the_api_s_0_4(
+    base_image, sent, offline
+):
+    """The sharpest footgun in the whole feature, closed in code rather than in prose.
+
+    Omitting image_strength is the ordinary thing to do with an optional argument, and
+    it used to mean the server applied its own 0.4 -- which with a mask starts the
+    region 40% along the schedule and hands back the original object very nearly
+    untouched, having spent a full generation and reported success. Measured on a
+    768x768 Z-Image-Turbo run: 5.1/255 of change inside the mask at 0.4, against 41.6
+    for the identical request at 0.0.
+
+    Sending 0.0 explicitly is what makes this hold -- None would leave the server to
+    apply DEFAULT_IMAGE_STRENGTH, which is exactly the value being avoided.
+    """
+    await mcp_server.generate_image(prompt="x", image_path=str(base_image), mask_boxes=[BOX])
+    assert sent[0]["image_strength"] == 0.0
+
+
+async def test_the_zero_default_does_not_leak_onto_a_maskless_call(base_image, sent, offline):
+    # Plain image-to-image keeps deferring to the server, where 0.4 is the right default
+    # and 0.0 would mean the input image had no influence at all.
+    await mcp_server.generate_image(prompt="x", image_path=str(base_image))
+    assert sent[0]["image_strength"] is None
+
+
+async def test_an_explicit_image_strength_survives_a_masked_call(base_image, sent, offline):
+    # Restyling what is in the region rather than replacing it is a real request, so the
+    # default must be a default and not a coercion.
+    await mcp_server.generate_image(
+        prompt="x", image_path=str(base_image), mask_boxes=[BOX], image_strength=0.35
+    )
+    assert sent[0]["image_strength"] == 0.35
+
+
 async def test_an_explicit_feather_overrides_the_default(base_image, sent, offline):
     await mcp_server.generate_image(
         prompt="x", image_path=str(base_image), mask_boxes=[BOX], mask_feather=16

@@ -485,6 +485,15 @@ async def generate_image(
 
     mask_boxes and mask_path inpaint: they regenerate one region and hold the rest of
     the frame to the input. Pass one or the other, never both, and only with image_path.
+
+    prompt still describes the WHOLE FINISHED FRAME, not the masked region on its own.
+    The model denoises the entire image and can see the part it is holding, so the
+    prompt is the one control over how what it invents sits in the scene around it:
+    "a toy dinosaur on a wooden desk beside a notebook, daylight from a window", not
+    "a toy dinosaur". A bare region prompt is not fatal -- enough is inferred from the
+    held context that it often looks fine -- but it is a different image, and which one
+    you get stops being something the caller decides.
+
     mask_boxes is the one to reach for -- a list of [x0, y0, x1, y1] rectangles covering
     what should be replaced, given as fractions of the image from 0.0 to 1.0, reading
     left, top, right, bottom. Fractions rather than pixels because the copy of an image
@@ -498,10 +507,13 @@ async def generate_image(
     Three things about inpainting are counterintuitive enough to be worth stating
     outright:
 
-      - Set image_strength to 0.0. With a mask it no longer decides how much of the
-        frame survives -- the mask decides that -- only how much of the *old content
-        inside the region* survives, so the usual 0.4 leaves the very thing that was
-        meant to be replaced standing there.
+      - image_strength means something different here, and this tool defaults it to 0.0
+        when a mask is present rather than to the 0.4 above. With a mask it no longer
+        decides how much of the *frame* survives -- the mask decides that -- only how
+        much of the old content *inside the region* survives. At 0.4 the thing that was
+        meant to be replaced comes back very nearly intact, and the call still reports
+        success, so leave it alone unless the intent is to restyle what is already there
+        rather than replace it.
       - Give the box room for what the new content needs, shadow included. The mask edge
         is a hard boundary and anything crossing it is cut off flat at it. Room is not
         free, though: a box that takes in a swathe of flat background can come back a
@@ -600,6 +612,16 @@ async def generate_image(
         mask_b64 = base64.b64encode(mask_raw).decode("ascii")
     elif mask_feather != DEFAULT_MASK_FEATHER:
         raise ToolError("mask_feather requires mask_boxes or mask_path to also be set.")
+
+    # With a mask the server's own default of 0.4 is not a neutral choice. It starts the
+    # masked region 40% of the way along the schedule, which leaves the object that was
+    # meant to be replaced very nearly untouched -- and reports success, having spent a
+    # full generation. Measured on a 768x768 Z-Image-Turbo run against the same request
+    # at 0.0: 5.1/255 of change inside the mask, against 41.6. Defaulted here rather than
+    # only documented, for the reason mask_feather is: a docstring is advice, and an
+    # omitted optional argument is the common case, not the exception.
+    if mask_b64 is not None and image_strength is None:
+        image_strength = 0.0
 
     _prune_jobs()
     job = _Job(

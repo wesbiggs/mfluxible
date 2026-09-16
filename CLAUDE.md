@@ -526,13 +526,33 @@ carrying an Orientation tag, 3024x4032 as displayed -- so a mask rasterized at t
 size is rejected for a mismatch the caller has no way to see, and one drawn by hand
 against what the photo looks like is right.
 
-`mask_feather` defaults to 8 here against the API's 0, the one place this tool
-deliberately disagrees with the endpoint it proxies to: someone writing JSON has read that
-field's documentation, while the model calling this tool has read a docstring and will
-mostly not pass it at all. The asymmetry has a sharp edge -- `request_problem` rejects a
-non-default `mask_feather` *without* a mask, so a maskless call must send 0 rather than
-the default it was handed, which is why that field is conditional in the request body
+**Two defaults here disagree with the endpoint this tool proxies to, on the same
+reasoning: someone writing JSON has read the field's documentation, while the model
+calling this tool has read a docstring and will mostly not pass the field at all.** A
+docstring is advice; a default is not.
+
+`mask_feather` is 8 against the API's 0. That asymmetry has a sharp edge -- `request_problem`
+rejects a non-default `mask_feather` *without* a mask, so a maskless call must send 0 rather
+than the default it was handed, which is why that field is conditional in the request body
 rather than passed straight through.
+
+`image_strength` is 0.0 when a mask is present, against the server's `DEFAULT_IMAGE_STRENGTH`
+of 0.4, and this one is the difference between inpainting and a silent no-op rather than a
+matter of taste. Measured on a 768x768 Z-Image-Turbo run, identical seed, box and prompt:
+5.1/255 of change inside the mask at 0.4 against 41.6 at 0.0 -- the cup that was supposed to
+become a dinosaur came back as the cup, after a full generation that reported success. It has
+to be sent as a literal 0.0 rather than left as None, since None *is* the path to 0.4. An
+explicit value still wins; restyling a region rather than replacing it is a real request.
+
+**The prompt describes the whole finished frame, not the masked region -- but this is a
+preference, not a rule, and the difference is smaller than it sounds.** The model denoises
+the entire image and sees the region it is holding, so the prompt is what decides how the
+new content sits in the scene around it. Tested rather than assumed, because the instinct
+carried over from other tools is that a region-only prompt fails outright: it doesn't. The
+same run prompted "a small green toy dinosaur figurine" instead of the full scene gave a
+perfectly good image, 44.5/255 of change inside the mask against the full-scene version's
+41.6, and 38.4 apart from it. So it is a different image rather than a broken one, and what
+a bare region prompt actually costs is the caller's control over which one.
 
 `mask_path` exists beside `mask_boxes` rather than instead of it because the two serve
 different hosts. Authoring a mask PNG needs a filesystem the MCP host may not give the
