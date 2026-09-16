@@ -51,8 +51,10 @@ class GenerateRequest(BaseModel):
             "strength': 0.0 means the image has no influence (equivalent to plain text-to-image); "
             "1.0 means maximum influence, which can mean very few or even zero denoising steps "
             "actually run, so the output stays close to the input. Only meaningful, and only "
-            "accepted, alongside image; defaults to 0.4 (mflux's own CLI default) when image is "
-            "set and this is omitted."
+            "accepted, alongside image. Omitted, it defaults to 0.4 (mflux's own CLI default) "
+            "-- or to 0.0 when a mask is also set, because there the field governs only how "
+            "much of the old content inside the masked region survives, and 0.4 brings the "
+            "thing that was meant to be replaced back very nearly intact."
         ),
     )
 

@@ -319,13 +319,27 @@ output shape rather than a hardcoded /8, and the downsample is `Image.BOX`: a wi
 filter would ring past [0, 1] at a hard mask edge, and overshoot there means "more than
 the original" or "less than nothing" in the blend.
 
-**`image_strength` near 0 is what inpainting wants, and that surprises everyone.** With a
-mask the field no longer governs how much of the *frame* survives -- the mask does -- only
-how much of the original content inside the mask does. mflux's convention is already the
-inverse of other tools', so the failure mode is that 0.4 (the harness's img2img default,
-and mflux's CLI default) leaves the old object standing in the region just painted, which
-reads as the mask having been ignored. `harness.html` moves the field to 0 when the box is
-ticked; `docs/api.md` says so for direct callers. It also makes `fractional_start` worth
+**`image_strength` near 0 is what inpainting wants, and that surprises everyone -- so it
+is the default under a mask rather than advice about one.** With a mask the field no longer
+governs how much of the *frame* survives -- the mask does -- only how much of the original
+content inside the mask does. mflux's convention is already the inverse of other tools', so
+the failure mode is that 0.4 (mflux's CLI default, and what `DEFAULT_IMAGE_STRENGTH` still
+means for an unmasked request) leaves the old object standing in the region just painted,
+which reads as the mask having been ignored.
+
+The reason that is a `DEFAULT_MASKED_IMAGE_STRENGTH = 0.0` in engine.py rather than a
+sentence in `docs/api.md` is the *shape* of the failure: a 400 would be fine, but this one
+is well-formed. The stream is correct, the image arrives, the generation reports success,
+and the only evidence anything went wrong is that the picture looks like the input.
+Measured on a 768x768 Z-Image-Turbo run with identical seed, box, feather and prompt: 5.1/255
+of change inside the mask at 0.4 against 41.6 at 0.0 -- the cup that was supposed to become
+a dinosaur came back a cup. And it was the *default* path, since omitting an optional field
+is the ordinary thing to do. An explicit value still wins, because raising it to restyle
+what is inside the region rather than replace it is a real request.
+
+`harness.html` also moves its own field to 0 when the box is ticked, which is now belt and
+braces -- it always sends an explicit `image_strength`, so the server's default never fires
+for it. Keep it: the point there is that the user *sees* the value change. It also makes `fractional_start` worth
 more than it is for plain img2img, since the useful range is narrow and still quantized.
 
 **Measured, so it doesn't get re-litigated:** with the blend alone, outside-mask mean
@@ -536,13 +550,14 @@ rejects a non-default `mask_feather` *without* a mask, so a maskless call must s
 than the default it was handed, which is why that field is conditional in the request body
 rather than passed straight through.
 
-`image_strength` is 0.0 when a mask is present, against the server's `DEFAULT_IMAGE_STRENGTH`
-of 0.4, and this one is the difference between inpainting and a silent no-op rather than a
-matter of taste. Measured on a 768x768 Z-Image-Turbo run, identical seed, box and prompt:
-5.1/255 of change inside the mask at 0.4 against 41.6 at 0.0 -- the cup that was supposed to
-become a dinosaur came back as the cup, after a full generation that reported success. It has
-to be sent as a literal 0.0 rather than left as None, since None *is* the path to 0.4. An
-explicit value still wins; restyling a region rather than replacing it is a real request.
+`image_strength` is 0.0 when a mask is present. The server now defaults this too
+(`DEFAULT_MASKED_IMAGE_STRENGTH`, see the inpainting section above, which carries the
+measurements), so this is **deliberate duplication rather than the only copy**: the same rule
+that has `mcp_server.py` treat a missing `/health` field as "unknown, let the server decide"
+means it has to keep working against a server that predates the server-side default. The two
+can't disagree -- both are 0.0 -- and the client sending an explicit 0.0 means the server's
+own default never fires for an MCP call either way. It has to be a literal 0.0 rather than
+None, since None is what routes to 0.4 on an older server.
 
 **The prompt describes the whole finished frame, not the masked region -- but this is a
 preference, not a rule, and the difference is smaller than it sounds.** The model denoises

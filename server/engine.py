@@ -62,6 +62,18 @@ DEFAULT_MODEL_CACHE_DIR = Path(os.environ.get("MFLUXIBLE_MODEL_DIR", "~/.cache/m
 # same reasoning as ModelSpec.default_steps in models.py: that module is CLI-internal.
 DEFAULT_IMAGE_STRENGTH = 0.4
 
+# ...and what a *masked* request gets instead when it omits the field. The two differ
+# because with a mask the field means something else: without one it decides how much of
+# the frame survives, and 0.4 is a reasonable img2img middle ground; with one, the mask
+# decides that and image_strength governs only how much of the old content *inside the
+# region* survives. At 0.4 that region starts 40% along the schedule and the object meant
+# to be replaced comes back very nearly intact -- measured on a 768x768 Z-Image-Turbo run,
+# identical seed and mask, 5.1/255 of change inside the mask against 41.6 at 0.0. That is
+# a no-op that still costs a full generation and still reports success, which is the worst
+# shape a wrong default can have. Omitting an optional field is the ordinary case rather
+# than the exception, so this is a default and not a paragraph in docs/api.md.
+DEFAULT_MASKED_IMAGE_STRENGTH = 0.0
+
 # MLX holds on to buffers it has freed so it can reuse them instead of asking
 # Metal for new ones. That cache is reclaimable, but it still counts toward the
 # process's memory footprint, and on a machine where the model already fills most
@@ -674,7 +686,14 @@ class MfluxEngine:
             with open(tmp_image_path, "wb") as f:
                 f.write(image_bytes)
             kwargs["image_path"] = tmp_image_path
-            kwargs["image_strength"] = req.image_strength if req.image_strength is not None else DEFAULT_IMAGE_STRENGTH
+            if req.image_strength is not None:
+                kwargs["image_strength"] = req.image_strength
+            else:
+                # Which default applies is the mask's call rather than the field's --
+                # see DEFAULT_MASKED_IMAGE_STRENGTH for why they differ.
+                kwargs["image_strength"] = (
+                    DEFAULT_MASKED_IMAGE_STRENGTH if req.mask is not None else DEFAULT_IMAGE_STRENGTH
+                )
             # A dotted path mflux imports, chosen from a fixed table and never built
             # from request data -- see SCHEDULER_PATH's comment. None for an ordinary
             # img2img request, which leaves the variant whatever scheduler it picks

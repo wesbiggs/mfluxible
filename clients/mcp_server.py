@@ -613,13 +613,18 @@ async def generate_image(
     elif mask_feather != DEFAULT_MASK_FEATHER:
         raise ToolError("mask_feather requires mask_boxes or mask_path to also be set.")
 
-    # With a mask the server's own default of 0.4 is not a neutral choice. It starts the
-    # masked region 40% of the way along the schedule, which leaves the object that was
-    # meant to be replaced very nearly untouched -- and reports success, having spent a
-    # full generation. Measured on a 768x768 Z-Image-Turbo run against the same request
-    # at 0.0: 5.1/255 of change inside the mask, against 41.6. Defaulted here rather than
-    # only documented, for the reason mask_feather is: a docstring is advice, and an
-    # omitted optional argument is the common case, not the exception.
+    # With a mask, 0.4 is not a neutral choice: it starts the masked region 40% of the way
+    # along the schedule, leaving the object that was meant to be replaced very nearly
+    # untouched -- and reporting success, having spent a full generation. Measured on a
+    # 768x768 Z-Image-Turbo run against the same request at 0.0: 5.1/255 of change inside
+    # the mask, against 41.6.
+    #
+    # engine.py now defaults this as well (DEFAULT_MASKED_IMAGE_STRENGTH), so this is a
+    # second copy on purpose rather than the only one. This file has to keep working
+    # against a server that predates that -- the same reason it treats a missing /health
+    # field as "unknown, let the server decide" rather than an error. The two cannot
+    # disagree, and a literal 0.0 is what has to go on the wire: None is the value that
+    # routes to 0.4 on an older server.
     if mask_b64 is not None and image_strength is None:
         image_strength = 0.0
 

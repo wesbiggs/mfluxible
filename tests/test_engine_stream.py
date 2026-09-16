@@ -297,6 +297,26 @@ async def test_a_masked_request_runs_the_masked_scheduler_and_clears_its_job(toy
     assert schedulers.active_mask_job() is None
 
 
+async def test_a_masked_request_defaults_strength_to_zero_rather_than_0_4(toy_engine):
+    """The maskless default is wrong here, and wrong in the worst possible shape.
+
+    0.4 starts the masked region 40% along the schedule, so the object that was meant to
+    be replaced comes back very nearly intact -- while the stream is well-formed and the
+    generation reports success. Measured on a 768x768 Z-Image-Turbo run, identical seed
+    and mask: 5.1/255 of change inside the mask against 41.6 at 0.0. Since omitting an
+    optional field is the ordinary thing to do, the default has to follow the mask.
+    """
+    await _collect(toy_engine, _masked_request(image_strength=None))
+    assert toy_engine.model.last_image_strength == 0.0  # engine.DEFAULT_MASKED_IMAGE_STRENGTH
+
+
+async def test_an_explicit_strength_still_wins_over_the_masked_default(toy_engine):
+    # Raising it restyles what is inside the region instead of replacing it, which is a
+    # real request -- so this has to stay a default rather than becoming a coercion.
+    await _collect(toy_engine, _masked_request(image_strength=0.35))
+    assert toy_engine.model.last_image_strength == 0.35
+
+
 async def test_the_kept_region_comes_back_byte_identical(toy_engine):
     events = await _collect(toy_engine, _masked_request())
     out = Image.open(io.BytesIO(base64.b64decode(events[-1]["data"])))
