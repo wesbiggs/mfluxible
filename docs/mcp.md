@@ -32,6 +32,14 @@ Both tools build the mask through the same `_resolve_mask`, which is the propert
 
 The text it returns also reports coverage, and adds a line about prompt scope when the selection is under 15% of the frame — the regime where [a region-only prompt goes wrong](#masks).
 
+### What to expect from it
+
+Inpainting through this tool works decently on an image the same model generated, and passably on a real photograph. It does **not** give the control that [the browser harness](clients.md) does — where the mask is painted by hand, and every field is in front of you to adjust between attempts — let alone a node-graph tool like ComfyUI.
+
+Most of that gap is the mask rather than the model. A rectangle chosen by a model is a blunter instrument than a brush, and several of the failure modes above are properties of rectangles specifically: the tone step across a selection that is mostly background, and content cut flat at a straight edge. Measured on a real photo — adding a head to a headless statue, where ~90% of the box was wall — the wall inside the mask came back 16.9/255 brighter on one side than the wall beside it, faintly visible where the stone texture didn't hide it. A silhouette mask would have had none of that, because none of that wall would have been inside it.
+
+So: `mask_boxes` is the option that works when the caller is a model with nothing but the image, and that is worth a lot. When the region isn't box-shaped and the result has to be clean, use `mask_path` with a mask something else drew, or paint it in the harness.
+
 ```bash
 uv pip install -r clients/requirements-mcp.txt
 ```
