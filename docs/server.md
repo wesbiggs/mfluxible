@@ -74,20 +74,29 @@ each of which sets the mask to one rectangle.
 **The server does no detection.** It never loads a vision model, never holds an API key
 and never makes an outbound call — it writes a file, holds one job in memory, and copies
 a JSON array from one request to another. The work is done by
-`clients/region_worker.py`, which shells out to the Claude Code CLI and runs alongside
-(see [Object detection](clients.md#object-detection) for how to start it). With nothing
+`clients/region_worker.py`, which runs alongside (see
+[Object detection](clients.md#object-detection) for how to start it). With nothing
 running, the feature simply reports no worker attached and the harness says so.
 
-That split is deliberate rather than tidiness: the worker spawns a subprocess with
-filesystem access and spends a Claude account, and an HTTP endpoint that did either
-would be by far the most dangerous thing here. As a client it cannot be reached from the
-network at all, and starting it is what consent to that spending looks like.
+That split is deliberate rather than tidiness: the worker runs an arbitrary configured
+command with filesystem access, and an HTTP endpoint that spawned one would be by far
+the most dangerous thing here. As a client it cannot be reached from the network at all,
+and starting it is what consent to that command running looks like.
+
+**Which detector runs is the worker's business, not the server's.**
+`MFLUXIBLE_REGIONS_COMMAND` names the whole command line — [Claude Code](https://claude.com/claude-code)
+by default, but any program that prints a JSON array of labelled boxes to stdout will
+do, including a local detector or a script of your own. It is documented with the
+worker's other settings under
+[Using a different tool](clients.md#using-a-different-tool), since the server never sees
+it.
 
 One variable both enables and configures because there is no useful "on, but nowhere to
 put anything" state. Point the worker at the same directory: it is also the working
-directory `claude` is run in, which matters twice — a stashed image inside it is already
-readable without widening the CLI's allowed roots, and a directory with no `CLAUDE.md`
-keeps a one-shot detection from loading a project's instructions on every call.
+directory the detection command runs in, which matters twice on the default — a stashed
+image inside it is already readable without widening the CLI's allowed roots, and a
+directory with no `CLAUDE.md` keeps a one-shot detection from loading a project's
+instructions on every call.
 
 Stashed images are pruned after an hour, on the next detection.
 
