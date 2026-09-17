@@ -66,14 +66,15 @@ cd clients && python3 -m http.server 8000
 ### Object detection
 
 `clients/region_worker.py` is what makes the harness's **Find objects** button work. The
-harness can see an image and drive the GPU but has no vision model; a Claude Code
-session has vision and can read a file off disk but has no UI. This process joins them:
-it long-polls the server for a pending detection, runs `claude -p` against the stashed
-image, and posts the regions back for the harness's open stream to deliver.
+harness can see an image and drive the GPU but has no vision model; this process
+supplies one. It long-polls the server for a pending detection, runs a command against
+the stashed image, and posts the regions back for the harness's open stream to deliver.
 
-It needs the [Claude Code CLI](https://claude.com/claude-code) on `PATH` and already
-signed in, plus the server started with `MFLUXIBLE_REGIONS_DIR`
-(see [Object detection](server.md#object-detection)). Point both at the same directory:
+By default that command is [Claude Code](https://claude.com/claude-code) — the CLI on
+`PATH` and already signed in — but nothing here is specific to it; see
+[Using a different tool](#using-a-different-tool). Start the server with
+`MFLUXIBLE_REGIONS_DIR` (see [Object detection](server.md#object-detection)) and point
+both at the same directory:
 
 ```bash
 MFLUXIBLE_REGIONS_DIR=~/.cache/mfluxible/regions uv run clients/region_worker.py
@@ -81,15 +82,57 @@ MFLUXIBLE_REGIONS_DIR=~/.cache/mfluxible/regions uv run clients/region_worker.py
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `MFLUXIBLE_REGIONS_MODEL` | `opus` | Which model detects. See below before lowering it. |
-| `MFLUXIBLE_CLAUDE_BIN` | `claude` | Path to the CLI, if it isn't on `PATH` |
+| `MFLUXIBLE_REGIONS_COMMAND` | `claude -p {prompt} --allowedTools Read --model $MFLUXIBLE_REGIONS_MODEL` | The command to run per detection |
+| `MFLUXIBLE_REGIONS_MODEL` | `opus` | Which model the **default** command uses; ignored if you set your own command |
 | `MFLUXIBLE_BEARER_TOKEN` | unset | Sent as `Authorization: Bearer …`, if a proxy gates the API |
 
 `--url` points at the server's base URL (default `http://127.0.0.1:8420`). As with the
 terminal clients, setting `MFLUXIBLE_BEARER_TOKEN` *and* putting credentials in the URL
 is refused rather than resolved.
 
-**The model default is not a tuning knob, and the usual trade doesn't apply here.**
+#### Using a different tool
+
+What the worker actually requires is narrow: **a program that prints a JSON array of
+labelled boxes to stdout.** Anything that can do that from an image path works — another
+model's CLI, a local detector, a script of your own.
+
+```json
+[{"label": "red apple", "box": [0.305, 0.344, 0.712, 0.736]}]
+```
+
+`box` is `[x0, y0, x1, y1]` as fractions of the frame, `0,0` at the top-left. Extra prose
+around the array is fine (a fenced code block is read too); entries with a malformed or
+out-of-range box are dropped rather than repaired, and at most 8 are kept.
+
+The command is a template with two placeholders:
+
+| Placeholder | |
+| --- | --- |
+| `{image}` | The image's filename. The working directory is the stash directory, so a bare name resolves. |
+| `{prompt}` | The worker's standard detection prompt, already naming the image. Use it for a prompt-driven tool; leave it out entirely for a detector that doesn't take one. |
+
+```bash
+# a local detector that already speaks the format
+MFLUXIBLE_REGIONS_COMMAND='detect-objects --format json {image}'
+
+# a prompt-driven CLI that takes the image as an attachment
+MFLUXIBLE_REGIONS_COMMAND='llm -m some-vision-model -a {image} {prompt}'
+
+# your own wrapper, for a tool whose coordinates need converting
+MFLUXIBLE_REGIONS_COMMAND='python3 ~/bin/boxes_to_fractions.py {image}'
+```
+
+That last one is the common case, and it is deliberate that it needs a wrapper: tools
+disagree about coordinates — pixels, 0–1000, `xywh` — and a conversion setting here would
+turn a wrongly-scaled box into a plausible-looking one. Keeping a single reader keeps a
+bad box visibly bad.
+
+The template is split with `shlex` and run **without a shell**, so quoting behaves as you
+would expect while `;` and `|` are ordinary argument characters. Splitting happens before
+the placeholders are filled in, so a prompt containing quotes or newlines stays exactly
+one argument and can never reshape the command.
+
+**On the default command's model choice — and the usual trade doesn't apply here.**
 Measured on the same 768×768 photograph with the same prompt, `opus` was both more
 accurate *and* faster than `sonnet` — 11.4s against 66.6s. Sonnet placed a "red apple"
 box at `[0.28, 0.28, 0.68, 0.62]`: about the right size, in the wrong place, clipping the

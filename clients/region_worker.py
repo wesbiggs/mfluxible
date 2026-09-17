@@ -1,35 +1,40 @@
 #!/usr/bin/env python3
-"""Answers the server's object-detection jobs by shelling out to the Claude Code CLI.
+"""Answers the server's object-detection jobs by shelling out to a detection command.
 
-The harness can see an image and drive the GPU but has no vision model; Claude has
-vision and can read a file off disk but has no UI. This process is the piece that
-joins them: it long-polls mfluxible for a pending detection, runs `claude -p` against
-the stashed image, and posts the regions back for the harness's open stream to
-deliver.
+The harness can see an image and drive the GPU but has no vision model. This process
+is the piece that supplies one: it long-polls mfluxible for a pending detection, runs
+a command against the stashed image, and posts the regions back for the harness's open
+stream to deliver.
 
-**This is a client, and that placement is the design rather than filing.** It shells
-out to a binary that makes network calls and spends a Claude account, so putting it in
-`server/` would have meant an HTTP endpoint that spawns a subprocess with filesystem
-access -- comfortably the most dangerous thing in this repo, and one path away from
-`tests/test_proxy_config.py`'s worst case. Here it can't be reached from the network
-at all, it's optional (the server runs fine with nothing listening, and says so on
-/health), and starting it is what consent to spending that account looks like.
+The command is `claude -p` by default and is one env var away from being anything else
+-- another model's CLI, a local detector, a script of your own. What this worker
+actually depends on is narrow: a program that prints a JSON array of labelled boxes to
+stdout. See MFLUXIBLE_REGIONS_COMMAND below.
+
+**This is a client, and that placement is the design rather than filing.** It runs an
+arbitrary configured command with filesystem access, which on the default setting also
+makes network calls and spends a Claude account. Behind an endpoint that would be
+comfortably the most dangerous thing in this repo, and one path away from
+`tests/test_proxy_config.py`'s worst case. Here it can't be reached from the network at
+all, it's optional (the server runs fine with nothing listening, and says so on
+/health), and starting it is what consent to that command running looks like.
 
 Run it alongside the server:
 
     MFLUXIBLE_REGIONS_DIR=~/.cache/mfluxible/regions uv run clients/region_worker.py
 
-The same directory the server was given: the worker never invents a path, it reads
-the one each job names, and that directory is also the working directory `claude` runs
-in. Both halves of that matter -- an image inside the cwd needs no --add-dir to be
-readable, and a directory with no CLAUDE.md in it keeps a one-shot detection from
-loading this project's instructions on every call.
+The same directory the server was given: the worker never invents a path, it reads the
+one each job names, and that directory is also the working directory the command runs
+in. Both halves of that matter for the default -- an image inside the cwd needs no
+--add-dir to be readable, and a directory with no CLAUDE.md in it keeps a one-shot
+detection from loading this project's instructions on every call.
 """
 
 import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -43,8 +48,9 @@ import requests
 # indefinitely. See CLAUDE.md for why the name is prefixed and why it says BEARER.
 TOKEN = os.environ.get("MFLUXIBLE_BEARER_TOKEN", "")
 
-CLAUDE_BIN = os.environ.get("MFLUXIBLE_CLAUDE_BIN", "claude")
-
+# Which model the *default* command uses. Ignored once MFLUXIBLE_REGIONS_COMMAND is
+# set, since that names the whole command line.
+#
 # Opus, and the usual latency-for-quality trade turns out not to apply -- measured on
 # the same 768x768 photograph, same prompt, it was both better and *faster*: 11.4s
 # against sonnet's 66.6s.
@@ -58,18 +64,41 @@ CLAUDE_BIN = os.environ.get("MFLUXIBLE_CLAUDE_BIN", "claude")
 # two-decimal numbers that signal estimating on a grid. Sonnet had also produced a good
 # box on an earlier run of the same image, so the problem is variance rather than a
 # constant offset -- which is worse for this, since a client can't tell the two apart.
-#
-# Left configurable for a machine where opus isn't available, not as a tuning knob.
 MODEL = os.environ.get("MFLUXIBLE_REGIONS_MODEL", "opus")
+
+# What actually gets run. Claude Code is the default because it needs no extra install
+# on a machine that already has it, but nothing here is specific to it: this worker
+# spawns a command, reads stdout and parses one JSON array. Anything that can do that
+# from an image path can take its place -- another model's CLI, a local detector, a
+# script of your own.
+#
+# `{image}` is the image's filename (the working directory is the stash directory, so
+# a bare name resolves) and `{prompt}` is PROMPT below, already carrying the filename.
+# A tool driven by a prompt uses both; a dedicated detector uses only `{image}` and the
+# prompt is simply never substituted anywhere.
+#
+# Split with shlex and run without a shell: quoting works as it does in a shell, while
+# `;` and `|` are argv characters rather than syntax. That matters less than it looks
+# -- the template is set by whoever starts the worker and the filename is a uuid this
+# server generated -- but there is no reason to spawn a shell to run one program.
+#
+# What *is* fixed is the output contract, and it has to be: stdout must contain a JSON
+# array of {"label": str, "box": [x0, y0, x1, y1]}, boxes as fractions of the frame
+# with 0,0 top-left. Tools disagree about coordinates (pixels, 0-1000, xywh), so
+# anything that doesn't already speak this wants a few lines of wrapper rather than a
+# conversion setting here -- one reader, in one place, is what keeps a bad box a
+# visible bad box instead of a silently rescaled one.
+DEFAULT_COMMAND = f"claude -p {{prompt}} --allowedTools Read --model {MODEL}"
+COMMAND = os.environ.get("MFLUXIBLE_REGIONS_COMMAND", "").strip() or DEFAULT_COMMAND
 
 # Long-polls hang for ~25s server-side; this has to outlast that or every poll looks
 # like a timeout to requests.
 HTTP_TIMEOUT = 60
 
-# A detection is one Read and one reply. If it hasn't finished by now something is
-# wrong -- an interactive prompt nothing can answer, a wedged subprocess -- and the
+# A detection is one image in, one answer out. If it hasn't finished by now something
+# is wrong -- an interactive prompt nothing can answer, a wedged subprocess -- and the
 # server's own wait is 180s, so failing first leaves room to report why.
-CLAUDE_TIMEOUT = 150
+DETECT_TIMEOUT = 150
 
 PROMPT = """Read the image at {path} and list the distinct objects a person might \
 want to replace using an inpainting model.
@@ -85,6 +114,27 @@ whole objects someone might swap out over parts of them, most prominent first, a
 
 Example: [{{"label": "red apple", "box": [0.31, 0.37, 0.68, 0.72]}}]
 """
+
+
+def build_command(template: str, *, image: str, prompt: str) -> list[str]:
+    """The command template as argv, with the placeholders filled in.
+
+    Split *first*, substitute *second*, and that order is the whole point: doing it the
+    other way round would let the prompt's own punctuation reshape the command. The
+    prompt contains spaces, newlines, quotes and braces, and a quote inside it would
+    silently split one argument into two, or swallow the rest of the line.
+
+    Substituting per token rather than across the joined string is what makes
+    `--image={image}` work as well as a bare `{image}`, while keeping a filled-in
+    placeholder exactly one argument whatever it holds.
+
+    Returns [] for a template that isn't parseable, which the caller reports.
+    """
+    try:
+        tokens = shlex.split(template)
+    except ValueError:
+        return []
+    return [token.replace("{image}", image).replace("{prompt}", prompt) for token in tokens]
 
 
 def _headers() -> dict:
@@ -144,31 +194,30 @@ def detect(image_path: str) -> dict:
     if not path.is_file():
         return {"error": "the image for this job is no longer on disk."}
 
-    cmd = [
-        CLAUDE_BIN,
-        "-p",
-        PROMPT.format(path=path.name),
-        "--allowedTools",
-        "Read",
-        "--model",
-        MODEL,
-    ]
+    cmd = build_command(COMMAND, image=path.name, prompt=PROMPT.format(path=path.name))
+    if not cmd:
+        # Empty or unquotable -- both mean there is nothing runnable to report about.
+        return {"error": "the detection command is empty or has unbalanced quotes."}
+
     try:
         proc = subprocess.run(
-            cmd, cwd=workdir, capture_output=True, text=True, timeout=CLAUDE_TIMEOUT
+            cmd, cwd=workdir, capture_output=True, text=True, timeout=DETECT_TIMEOUT
         )
     except FileNotFoundError:
-        return {"error": f"{CLAUDE_BIN} is not on PATH -- set MFLUXIBLE_CLAUDE_BIN, or install Claude Code."}
+        return {"error": f"{cmd[0]} is not on PATH -- check MFLUXIBLE_REGIONS_COMMAND."}
+    except OSError as exc:
+        # A template naming something unrunnable (a directory, a file without +x).
+        return {"error": f"could not run {cmd[0]}: {exc.strerror}."}
     except subprocess.TimeoutExpired:
-        return {"error": f"the detection did not finish within {CLAUDE_TIMEOUT}s."}
+        return {"error": f"the detection did not finish within {DETECT_TIMEOUT}s."}
 
     if proc.returncode != 0:
-        # stderr is the CLI's own message to its operator, so it's safe to pass on --
+        # stderr is the tool's own message to its operator, so it's safe to pass on --
         # and it is the only thing that distinguishes "not logged in" from "no such
         # model", which the person reading the harness needs to know.
         detail = (proc.stderr or proc.stdout or "").strip().splitlines()
         tail = detail[-1][:200] if detail else f"exit code {proc.returncode}"
-        return {"error": f"claude failed: {tail}"}
+        return {"error": f"{cmd[0]} failed: {tail}"}
 
     parsed = _extract_json_array(proc.stdout or "")
     if parsed is None:

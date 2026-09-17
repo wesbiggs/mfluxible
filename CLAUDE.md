@@ -511,16 +511,37 @@ POSTs an image and waits on an SSE stream, `clients/region_worker.py` claims the
 shells out to `claude -p`, and posts regions back.
 
 **The worker is in `clients/` because of what it does, not to keep `server/` tidy.**
-It spawns a subprocess with filesystem access that makes network calls and spends a
-Claude account. Had that lived behind an endpoint, `POST /.../detect` would be
-comfortably the most dangerous route in this repo and one line away from
-`tests/test_proxy_config.py`'s worst case -- a path drifting into `@public` would stop
-being an ungated GPU and start being remote code execution against someone's Claude
-account. As a client it is unreachable from the network, it is optional (the server
+It runs an arbitrary operator-configured command with filesystem access, which on the
+default setting also makes network calls and spends a Claude account. Had that lived
+behind an endpoint, `POST /.../detect` would be comfortably the most dangerous route in
+this repo and one path away from `tests/test_proxy_config.py`'s worst case -- a path
+drifting into `@public` would stop being an ungated GPU and start being remote command
+execution. As a client it is unreachable from the network, it is optional (the server
 reports `worker_attached: false` and the harness says so), and *starting it* is what
-consent to that spending looks like. It also keeps the CLI out of the server's
+consent to that command running looks like. It also keeps the CLI out of the server's
 dependency set, which matters given how many fast-moving externals this file already
 tracks.
+
+**Which is also why the CLI is a template rather than a hardcoded call.** The worker's
+real dependency is narrow -- a program that prints a JSON array of labelled boxes to
+stdout -- so `MFLUXIBLE_REGIONS_COMMAND` names the whole command line and `claude -p`
+is only its default. That keeps this repo from pinning a fast-moving external at the one
+layer where it does not have to, and opens the local detectors (faster, and free) with
+no change here.
+
+The *output* contract stays fixed, and that asymmetry is the point. Tools disagree about
+coordinates -- pixels, 0-1000, `xywh` -- so a conversion setting would turn a
+wrongly-scaled box into a plausible-looking one, silently. A tool that does not already
+speak fractions wants a few lines of wrapper instead: one reader, in one place, keeps a
+bad box a *visibly* bad box.
+
+`build_command` splits the template with `shlex` **before** substituting the
+placeholders, and that order is load-bearing rather than incidental. The prompt is long
+English prose containing quotes, braces and newlines; formatting the string first and
+splitting after would let a quote inside it swallow the rest of the line or split one
+argument in two. Pinned by
+`test_a_prompts_own_punctuation_cannot_reshape_the_command`. No shell is spawned, so
+`;` and `|` are argument characters rather than syntax.
 
 **One slot, and no identifier.** The obvious design hashes the image so the two sides
 can agree which one they mean. That cannot work, and the reason is measured rather than
@@ -564,7 +585,7 @@ buys two things at once: a stashed image inside the cwd is readable without wide
 CLI's allowed roots, and a directory with no `CLAUDE.md` in it keeps a one-shot
 detection from loading this (very long) file on every call.
 
-**The worker defaults to opus, and the usual latency-for-quality trade does not apply.**
+**The default command uses opus, and the usual latency-for-quality trade does not apply.**
 Measured on one 768x768 photograph with an identical prompt, opus was both better and
 *faster*: 11.4s against sonnet's 66.6s. Sonnet put the apple at
 `[0.28, 0.28, 0.68, 0.62]` -- roughly the right size in the wrong place, clipping the

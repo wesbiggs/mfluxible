@@ -289,3 +289,90 @@ def test_the_worker_caps_the_number_of_regions():
 
     many = [{"label": f"o{i}", "box": [0.0, 0.0, 0.5, 0.5]} for i in range(20)]
     assert len(_clean(many)) == 8
+
+
+# --- the detection command is a template, not a hardcoded CLI ----------------------
+
+
+def test_the_default_command_drives_claude_code():
+    from region_worker import DEFAULT_COMMAND, build_command
+
+    argv = build_command(DEFAULT_COMMAND, image="a.png", prompt="find things")
+    assert argv[0] == "claude"
+    assert "find things" in argv
+    # The model belongs to the default template; a custom command names its own.
+    assert "--model" in argv
+
+
+def test_a_prompts_own_punctuation_cannot_reshape_the_command():
+    """Split first, substitute second. Formatting the string and *then* splitting would
+    let a quote inside the prompt swallow the rest of the line or split one argument
+    into two -- and the prompt is long English prose with quotes and newlines in it."""
+    from region_worker import build_command
+
+    nasty = 'say "hello" then\nstop --model evil; rm -rf /'
+    argv = build_command("tool -p {prompt} --flag", image="a.png", prompt=nasty)
+    assert argv == ["tool", "-p", nasty, "--flag"]
+    # The prompt is exactly one argument, so nothing inside it is ever a token.
+    assert "--model" not in argv
+    assert "rm" not in argv
+
+
+def test_a_detector_template_needs_only_the_image():
+    """A tool that isn't prompt-driven simply never substitutes {prompt}."""
+    from region_worker import build_command
+
+    argv = build_command("detect --format json {image}", image="a.png", prompt="ignored")
+    assert argv == ["detect", "--format", "json", "a.png"]
+    assert "ignored" not in argv
+
+
+def test_placeholders_work_inside_a_token():
+    from region_worker import build_command
+
+    argv = build_command("tool --image={image} --json", image="a.png", prompt="p")
+    assert argv == ["tool", "--image=a.png", "--json"]
+
+
+def test_an_unparseable_template_yields_no_command_rather_than_raising():
+    from region_worker import build_command
+
+    assert build_command('tool "unclosed', image="a.png", prompt="p") == []
+    assert build_command("", image="a.png", prompt="p") == []
+
+
+def test_a_command_that_cannot_be_run_is_reported_not_raised(tmp_path, monkeypatch):
+    """Every failure path returns a body for the server: the harness shows the reason,
+    and a misconfigured template is a normal outcome rather than a crashed worker."""
+    import region_worker
+
+    image = tmp_path / "x.png"
+    image.write_bytes(_png())
+
+    monkeypatch.setattr(region_worker, "COMMAND", "definitely-not-a-real-binary {image}")
+    assert "not on PATH" in region_worker.detect(str(image))["error"]
+
+    monkeypatch.setattr(region_worker, "COMMAND", 'oops "unclosed')
+    assert "unbalanced quotes" in region_worker.detect(str(image))["error"]
+
+
+def test_any_command_printing_the_agreed_json_is_enough(tmp_path, monkeypatch):
+    """The whole contract, exercised without Claude: a shell one-liner standing in for
+    a local detector. If this passes, so does anything that prints the same array."""
+    import sys
+
+    import region_worker
+
+    image = tmp_path / "x.png"
+    image.write_bytes(_png())
+
+    script = tmp_path / "fake_detector.py"
+    script.write_text(
+        'import sys\n'
+        'print("looking at", sys.argv[1], file=sys.stderr)\n'
+        'print(\'[{"label": "a duck", "box": [0.1, 0.2, 0.6, 0.7]}]\')\n'
+    )
+    monkeypatch.setattr(region_worker, "COMMAND", f"{sys.executable} {script} {{image}}")
+
+    result = region_worker.detect(str(image))
+    assert result == {"regions": [{"label": "a duck", "box": [0.1, 0.2, 0.6, 0.7]}]}
