@@ -1,0 +1,112 @@
+name: release
+
+# One tag publishes both distributions. They are versioned in lockstep (pinned by
+# tests/test_config.py), so there is one thing to tag and one answer to "which version
+# am I running" across the server and its MCP client.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v10.0.1
+
+      # The check worth having before anything is uploaded: a PyPI release cannot be
+      # replaced, only yanked, so a tag that disagrees with the version inside the
+      # package is a mistake that has to be caught here rather than afterwards.
+      - name: The tag must match the version in both packages
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          server=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' mfluxible/__init__.py)
+          mcp=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' clients/mfluxible_mcp/__init__.py)
+          echo "tag=$tag  mfluxible=$server  mfluxible-mcp=$mcp"
+          test "$tag" = "$server" || { echo "::error::tag $tag != mfluxible $server"; exit 1; }
+          test "$tag" = "$mcp" || { echo "::error::tag $tag != mfluxible-mcp $mcp"; exit 1; }
+
+      - name: Build both distributions
+        run: |
+          uv build
+          uv build clients/ -o dist-mcp
+
+      - name: The wheel must carry the harness the server serves at GET /
+        run: |
+          python -c "
+          import glob, sys, zipfile
+          names = zipfile.ZipFile(glob.glob('dist/*.whl')[0]).namelist()
+          if 'mfluxible/harness.html' not in names:
+              sys.exit('harness.html is missing from the wheel')
+          "
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-mfluxible
+          path: dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-mfluxible-mcp
+          path: dist-mcp/
+
+  # Two publish jobs rather than one, because Trusted Publishing is configured per
+  # PyPI project: each one mints its own short-lived token for its own name. They also
+  # name a GitHub environment, which is what lets the repo require a manual approval
+  # before anything reaches PyPI.
+  publish-mfluxible:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/mfluxible
+    permissions:
+      id-token: write # the OIDC token Trusted Publishing exchanges; no API token in secrets
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-mfluxible
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-mfluxible-mcp:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/mfluxible-mcp
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-mfluxible-mcp
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    # Last, and only once PyPI has accepted both: a GitHub Release is the announcement,
+    # and announcing a version nobody can install is the wrong order to fail in.
+    needs: [publish-mfluxible, publish-mfluxible-mcp]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # creating the release is the one thing here that writes
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: artifacts/
+          merge-multiple: true
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "See [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/CHANGELOG.md)." \
+            artifacts/*
