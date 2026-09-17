@@ -90,7 +90,13 @@ class VlmMailbox:
         # Fires when an unclaimed job lands, so a long-polling worker wakes at once
         # rather than on a poll interval. Re-armed by claim().
         self._arrived = asyncio.Event()
-        self._worker_seen = 0.0
+        # None, not 0.0. `time.monotonic()`'s epoch is arbitrary -- on macOS and Linux
+        # it counts from boot -- so 0.0 is not "long ago", it is a real point on that
+        # clock that a freshly booted machine is still within seconds of. Initialising
+        # to it made a mailbox that had never seen a worker report one as attached for
+        # the first WORKER_FRESH_S after boot, which is invisible on any machine with
+        # real uptime and is exactly how CI caught it.
+        self._worker_seen: float | None = None
 
     # -- lifecycle -------------------------------------------------------------
 
@@ -98,6 +104,8 @@ class VlmMailbox:
         self.dir.mkdir(parents=True, exist_ok=True)
 
     def worker_attached(self) -> bool:
+        if self._worker_seen is None:
+            return False
         return (time.monotonic() - self._worker_seen) < WORKER_FRESH_S
 
     # -- harness side ----------------------------------------------------------

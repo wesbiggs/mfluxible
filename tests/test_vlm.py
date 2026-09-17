@@ -8,6 +8,7 @@ handover: an image goes in one side, a worker claims it, regions come out the ot
 import base64
 import io
 import json
+import pathlib
 
 import pytest
 from fastapi.testclient import TestClient
@@ -444,3 +445,22 @@ def test_the_result_event_carries_the_prompt(vlm_client, mailbox):
     )
     assert resp.json()["delivered"] is True
     assert job.result["prompt"] == "a teal square"
+
+
+def test_a_fresh_mailbox_is_never_attached_however_young_the_clock_is(monkeypatch):
+    """`time.monotonic()`'s epoch is arbitrary and counts from boot, so a sentinel of
+    0.0 is not "long ago" -- on a machine that booted a minute ago it is a moment ago.
+    The original code read that as a worker having just polled.
+
+    Pinned with the clock forced small rather than by waiting for a freshly booted
+    machine: on any developer box uptime hides this, which is why it reached main.
+    """
+    import vlm
+
+    monkeypatch.setattr(vlm.time, "monotonic", lambda: 5.0)
+    box = vlm.VlmMailbox(pathlib.Path("/tmp/does-not-need-to-exist"))
+    assert box.worker_attached() is False
+
+    # And it still flips to True once something really has polled.
+    box._worker_seen = 4.0
+    assert box.worker_attached() is True
