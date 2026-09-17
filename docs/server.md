@@ -25,6 +25,8 @@ Environment variables for `server.py`, all optional.
 | `MFLUXIBLE_BASIC_AUTH_PASSWORD` | unset | HTTP Basic password; required alongside the username |
 | `MFLUXIBLE_CORS_ORIGIN_REGEX` | `https?://(localhost\|127\.0\.0\.1)(:\d+)?` | Origins to reflect back in CORS (see [CORS](#cors)) |
 | `MFLUXIBLE_CORS_ORIGINS` | unset | Comma-separated exact-match origins, in addition to the regex |
+| `MFLUXIBLE_REGIONS_DIR` | unset | Enables object detection and says where images are stashed (see [Object detection](#object-detection)) |
+| `MFLUXIBLE_REGIONS_TIMEOUT` | `180` | Seconds a detection waits for a worker's answer before giving up |
 | `HF_TOKEN` | unset | Not an mfluxible variable — `huggingface_hub` reads it, and gated models need it (see [Gated weights](#gated-weights-and-hf_token)) |
 
 ### Memory
@@ -61,6 +63,33 @@ LoRA weights are applied and permanently merged ("baked") into the model at load
 ### CORS
 
 On by default, reflecting back any `http(s)://localhost:<any port>` or `127.0.0.1:<any port>` origin — so a local static server on either hostname, any port (e.g. for `harness.html`) can call the API with no extra configuration. `MFLUXIBLE_CORS_ORIGIN_REGEX` overrides the pattern entirely; `MFLUXIBLE_CORS_ORIGINS` adds specific exact-match origins on top of it (e.g. for a deployed frontend on a real domain).
+
+### Object detection
+
+Off unless `MFLUXIBLE_REGIONS_DIR` names a directory. Switched on, the server gains the
+three `/mfluxible/v1/regions/` endpoints ([API](api.md#post-mfluxiblev1regionsdetect))
+and the harness grows a **Find objects** button that fills a row of clickable regions,
+each of which sets the mask to one rectangle.
+
+**The server does no detection.** It never loads a vision model, never holds an API key
+and never makes an outbound call — it writes a file, holds one job in memory, and copies
+a JSON array from one request to another. The work is done by
+`clients/region_worker.py`, which shells out to the Claude Code CLI and runs alongside
+(see [Object detection](clients.md#object-detection) for how to start it). With nothing
+running, the feature simply reports no worker attached and the harness says so.
+
+That split is deliberate rather than tidiness: the worker spawns a subprocess with
+filesystem access and spends a Claude account, and an HTTP endpoint that did either
+would be by far the most dangerous thing here. As a client it cannot be reached from the
+network at all, and starting it is what consent to that spending looks like.
+
+One variable both enables and configures because there is no useful "on, but nowhere to
+put anything" state. Point the worker at the same directory: it is also the working
+directory `claude` is run in, which matters twice — a stashed image inside it is already
+readable without widening the CLI's allowed roots, and a directory with no `CLAUDE.md`
+keeps a one-shot detection from loading a project's instructions on every call.
+
+Stashed images are pruned after an hour, on the next detection.
 
 ## Models
 

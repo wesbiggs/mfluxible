@@ -63,6 +63,50 @@ cd clients && python3 -m http.server 8000
 
 (CORS is on by default and reflects back any `http(s)://localhost:<any port>` or `127.0.0.1:<any port>` origin, so this works with no server-side configuration — see [CORS](server.md#cors) if you need something different.)
 
+### Object detection
+
+`clients/region_worker.py` is what makes the harness's **Find objects** button work. The
+harness can see an image and drive the GPU but has no vision model; a Claude Code
+session has vision and can read a file off disk but has no UI. This process joins them:
+it long-polls the server for a pending detection, runs `claude -p` against the stashed
+image, and posts the regions back for the harness's open stream to deliver.
+
+It needs the [Claude Code CLI](https://claude.com/claude-code) on `PATH` and already
+signed in, plus the server started with `MFLUXIBLE_REGIONS_DIR`
+(see [Object detection](server.md#object-detection)). Point both at the same directory:
+
+```bash
+MFLUXIBLE_REGIONS_DIR=~/.cache/mfluxible/regions uv run clients/region_worker.py
+```
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `MFLUXIBLE_REGIONS_MODEL` | `opus` | Which model detects. See below before lowering it. |
+| `MFLUXIBLE_CLAUDE_BIN` | `claude` | Path to the CLI, if it isn't on `PATH` |
+| `MFLUXIBLE_BEARER_TOKEN` | unset | Sent as `Authorization: Bearer …`, if a proxy gates the API |
+
+`--url` points at the server's base URL (default `http://127.0.0.1:8420`). As with the
+terminal clients, setting `MFLUXIBLE_BEARER_TOKEN` *and* putting credentials in the URL
+is refused rather than resolved.
+
+**The model default is not a tuning knob, and the usual trade doesn't apply here.**
+Measured on the same 768×768 photograph with the same prompt, `opus` was both more
+accurate *and* faster than `sonnet` — 11.4s against 66.6s. Sonnet placed a "red apple"
+box at `[0.28, 0.28, 0.68, 0.62]`: about the right size, in the wrong place, clipping the
+fruit's bottom third while taking in a band of forearm. Opus gave
+`[0.305, 0.344, 0.712, 0.736]` against `[0.310, 0.344, 0.694, 0.729]` measured by hand —
+within two percent on every edge, and quoted to three decimals rather than the round
+two-decimal numbers that signal estimating on a grid rather than measuring. Sonnet had
+produced a good box on an earlier run of the same image, so this is variance rather than
+a fixed offset, which is worse: nothing downstream can tell a good box from a bad one.
+
+Which is why a region is a starting point rather than a result. Clicking a chip sets the
+mask to that one rectangle and opens the editor, so the box can be nudged before it
+costs a generation — the same reason the MCP tool has `preview_mask`.
+
+Detections are one at a time: starting a second supersedes the first, and the harness
+says so rather than leaving the old one to time out.
+
 ## Third party clients
 
 ### OpenAI compatible frontends

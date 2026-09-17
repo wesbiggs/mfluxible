@@ -21,11 +21,14 @@ import chat_stub
 from auth import BasicAuthMiddleware, credentials_from_env, resolve_bind_host, startup_warning
 from engine import MfluxEngine
 from models import CFG_GUIDANCE_FLOOR, MODELS
+from regions import mailbox_from_env
 from schemas import (
     A1111Txt2ImgRequest,
     ChatCompletionRequest,
     GenerateRequest,
     OpenAIImageGenerationRequest,
+    RegionDetectRequest,
+    RegionsResult,
 )
 
 # Nothing configures logging here, so this lands on stderr via logging.lastResort --
@@ -55,6 +58,21 @@ else:
 # the middleware reads it back through a callable so the tests can swap it.
 BASIC_AUTH = credentials_from_env()
 
+# None unless MFLUXIBLE_REGIONS_DIR names a directory -- see regions.py for why one
+# variable both enables and configures. Off by default because a detection spends the
+# Claude account of whoever runs the worker.
+MAILBOX = mailbox_from_env()
+
+# How long the harness's stream waits for a worker's answer. Generous: a cold
+# `claude -p` start plus the model's own thinking measured ~11s against a 768x768
+# image, but the worker is a subprocess on a machine that may also be mid-generation.
+REGIONS_TIMEOUT_S = float(os.environ.get("MFLUXIBLE_REGIONS_TIMEOUT", "180"))
+
+# How long a worker's long-poll hangs before returning empty. Short enough that
+# stopping the worker doesn't leave a request pinned for minutes, long enough that
+# the loop isn't really polling.
+REGIONS_POLL_S = 25.0
+
 # An unknown MFLUXIBLE_MODEL raises here, at import, listing the valid names -- before
 # lifespan starts a multi-gigabyte download for something that was never going to run.
 engine = MfluxEngine(model=MODEL, quantize=QUANTIZE, lora_paths=LORA_PATHS, lora_scales=LORA_SCALES)
@@ -75,6 +93,10 @@ async def lifespan(app: FastAPI):
     warning = startup_warning(resolve_bind_host(), BASIC_AUTH is not None)
     if warning is not None:
         log.warning(warning)
+    # Before the weights too: a bad MFLUXIBLE_REGIONS_DIR should fail now rather than
+    # after a multi-gigabyte download, for the same reason the warning above is here.
+    if MAILBOX is not None:
+        MAILBOX.prepare()
     await engine.load()
     MODEL_LOADED_AT = int(time.time())
     yield
@@ -159,6 +181,16 @@ async def health():
             # means replacing the variant's scheduler (see ModelSpec.supports_mask).
             "supports_mask": spec.supports_mask,
         },
+        # Whether the object-detection mailbox is configured, and whether anything is
+        # currently listening on it. The harness draws its "Find objects" button off
+        # `enabled` and warns off `worker_attached`, so an unconfigured server shows no
+        # control that could only fail -- the same "ask before you offer it" rule the
+        # model block above exists for. No path here: the directory is the server's
+        # business, and /health is the one endpoint the bundled Caddyfile leaves open.
+        "regions": {
+            "enabled": MAILBOX is not None,
+            "worker_attached": MAILBOX is not None and MAILBOX.worker_attached(),
+        },
         "memory": {
             "active_bytes": mx.get_active_memory(),
             "cache_bytes": mx.get_cache_memory(),
@@ -208,6 +240,118 @@ async def generate(req: GenerateRequest):
     if final["type"] == "error":
         return JSONResponse(status_code=500, content={"type": "error", "message": final["message"]})
     return final
+
+
+# ---------------------------------------------------------------------------
+# Object detection mailbox
+# ---------------------------------------------------------------------------
+#
+# Three endpoints, two clients: the harness submits an image and holds a stream,
+# clients/region_worker.py claims the job and posts regions back. The server does no
+# detection -- see regions.py's docstring for why that stays out of here.
+
+_REGIONS_OFF = {"type": "error", "message": "object detection is not enabled on this server."}
+
+
+def _regions_disabled() -> JSONResponse:
+    # 404 rather than 501: with MFLUXIBLE_REGIONS_DIR unset these routes are not a
+    # feature this server has, and /health already says so before anything calls them.
+    return JSONResponse(status_code=404, content=_REGIONS_OFF)
+
+
+def _decoded_image(b64_data: str) -> bytes | None:
+    """The bytes, or None if that string wasn't base64. Returned, not raised: the
+    caller turns None into its own curated message, so binascii's never reaches a
+    response body (see the invariant in CLAUDE.md)."""
+    try:
+        return base64.b64decode(b64_data, validate=True)
+    except (ValueError, TypeError):
+        return None
+
+
+async def _regions_sse(job):
+    # Sent before anything blocks, so the harness can render "waiting" with the real
+    # dimensions and say up front whether a worker is even listening.
+    yield "data: " + json.dumps({
+        "type": "pending",
+        "job_id": job.id,
+        "width": job.width,
+        "height": job.height,
+        "worker_attached": MAILBOX.worker_attached(),
+    }) + "\n\n"
+
+    result = await MAILBOX.wait(job, REGIONS_TIMEOUT_S)
+    if result.get("error"):
+        yield "data: " + json.dumps({"type": "error", "message": result["error"]}) + "\n\n"
+        return
+    yield "data: " + json.dumps({
+        "type": "regions",
+        "regions": result.get("regions") or [],
+        # What the worker measured, for the harness to compare against its own oriented
+        # size -- the guard against regions arriving for a different image.
+        "width": result.get("width"),
+        "height": result.get("height"),
+    }) + "\n\n"
+
+
+@app.post("/mfluxible/v1/regions/detect")
+async def regions_detect(req: RegionDetectRequest):
+    if MAILBOX is None:
+        return _regions_disabled()
+
+    raw = _decoded_image(req.image)
+    if raw is None:
+        return JSONResponse(
+            status_code=400, content={"type": "error", "message": "image is not valid base64."}
+        )
+    problem = MAILBOX.submit_problem(raw)
+    if problem is not None:
+        return JSONResponse(status_code=400, content={"type": "error", "message": problem})
+
+    # Same shape as a generation: validate fully, *then* start the stream, so a bad
+    # request is a 400 rather than a 200 with an error torn into the body.
+    job = MAILBOX.submit(raw)
+    return StreamingResponse(_regions_sse(job), media_type="text/event-stream")
+
+
+@app.get("/mfluxible/v1/regions/next")
+async def regions_next():
+    """A worker's long-poll. Returns the pending job, or 204 when none arrives.
+
+    This is the one endpoint here that deliberately returns a filesystem path, which
+    is the opposite of what the rest of this server does with them. It isn't a leak of
+    the kind CLAUDE.md's invariant guards against -- that one is about text from inside
+    an imaging library reaching an arbitrary caller through an exception. Here the path
+    is the entire payload: the worker's job is to read that file. It stays safe because
+    the path only ever names a file this server wrote inside its own regions directory,
+    and because this route is gated -- it is not in Caddyfile.example's `@public`
+    matcher, which tests/test_proxy_config.py exists to keep true.
+    """
+    if MAILBOX is None:
+        return _regions_disabled()
+
+    job = await MAILBOX.claim(REGIONS_POLL_S)
+    if job is None:
+        return Response(status_code=204)
+    return {
+        "job_id": job.id,
+        "image_path": str(job.path),
+        "width": job.width,
+        "height": job.height,
+    }
+
+
+@app.post("/mfluxible/v1/regions/{job_id}")
+async def regions_complete(job_id: str, result: RegionsResult):
+    if MAILBOX is None:
+        return _regions_disabled()
+
+    delivered = MAILBOX.complete(job_id, result.model_dump())
+    if not delivered:
+        # Not an error worth a 4xx on the worker's side: the usual cause is the user
+        # clicking the button again, which supersedes the job this worker was running.
+        return {"delivered": False, "reason": "that job is no longer the pending one."}
+    return {"delivered": True}
 
 
 def _openai_error(

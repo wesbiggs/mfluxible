@@ -513,6 +513,30 @@
   .paneAction[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
   .tag.mask { background: var(--danger-soft); color: var(--danger); }
 
+  /* ---------- detected regions ---------- */
+
+  .regionChips { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.5rem; }
+  .regionChip {
+    font: inherit;
+    font-size: 0.76rem;
+    padding: 0.2rem 0.5rem;
+    color: var(--text);
+    background: var(--panel-sunken);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--r-sm);
+    cursor: pointer;
+  }
+  .regionChip:hover { border-color: var(--accent); color: var(--accent); }
+  .regionChip[aria-pressed="true"] {
+    background: var(--accent-soft);
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+  .regionChip span { color: var(--faint); font-variant-numeric: tabular-nums; }
+  .regionChip[aria-pressed="true"] span { color: inherit; }
+  .regionNote { font-size: 0.76rem; color: var(--muted); margin: 0.45rem 0 0; }
+  .regionNote.warn { color: var(--danger); }
+
   /* ---------- stage ---------- */
 
   .stage {
@@ -797,9 +821,18 @@
               <span class="maskCoverage" id="maskCoverage">nothing painted yet</span>
               <div class="maskActions">
                 <button type="button" class="paneAction" id="editMaskBtn">Edit mask</button>
+                <button type="button" class="paneAction" id="findObjectsBtn" hidden>Find objects</button>
                 <button type="button" class="paneAction" id="clearMaskBtn">Clear</button>
               </div>
             </div>
+          </div>
+
+          <!-- Drawn only where /health says the server has the mailbox configured, so a
+               button that could only fail never appears. Populated by a round trip
+               through a Claude Code worker -- see docs/clients.md. -->
+          <div class="maskOnly" id="regionPanel" hidden>
+            <div class="regionChips" id="regionChips"></div>
+            <p class="regionNote" id="regionNote"></p>
           </div>
 
           <div class="grid2 maskOnly">
@@ -968,6 +1001,18 @@ function log(line) {
 // the generations endpoint, so it is derived from whatever URL is in the box.
 let modelInfo = null;
 
+// Bumped every time the base image changes. A detection captures it on the way out and
+// checks it on the way back: regions describe one particular image, and the stream is
+// open long enough to outlive the image that started it. An id carried *in* the image
+// would be answering a different question -- the server already pairs a job with the
+// exact bytes it stashed, and nothing downstream re-encodes them -- so what needs
+// identifying is which image this *page* is showing, which never leaves the page.
+let baseImageEpoch = 0;
+
+// {enabled, worker_attached} from the same /health read, or null when the server
+// didn't say -- which is every server built before the object-detection mailbox.
+let regionsInfo = null;
+
 // Bare base64 (no data: prefix) of the current image-to-image input, or null for
 // plain text-to-image -- what the API's `image` field wants. lastResultB64 is
 // updated on every successful generation so "Use last result" can chain edits
@@ -1041,6 +1086,10 @@ function previewMimeType(type) {
 
 function setBaseImage(b64, mimeType) {
   baseImageB64 = b64;
+  // Regions describe the image that was detected on, so a new one invalidates them
+  // outright -- both the chips already on screen and any detection still in flight.
+  baseImageEpoch++;
+  clearRegions();
   imagePreview.src = `data:${previewMimeType(mimeType)};base64,${b64}`;
   imagePreview.classList.remove("hidden");
   dropZoneText.classList.add("hidden");
@@ -1075,6 +1124,8 @@ function setBaseImage(b64, mimeType) {
 
 function clearBaseImage() {
   baseImageB64 = null;
+  baseImageEpoch++;
+  clearRegions();
   imagePreview.src = "";
   imagePreview.classList.add("hidden");
   dropZoneText.classList.remove("hidden");
@@ -1296,15 +1347,28 @@ async function refreshModel() {
   try {
     const resp = await fetch(healthUrl(urlEl.value), { headers: authHeaders() });
     if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
-    modelInfo = (await resp.json()).model || null;
+    const health = await resp.json();
+    modelInfo = health.model || null;
+    // Same "missing means unknown" rule as the model fields, resolved the other way:
+    // an absent block means a server without the mailbox, and the safe reading there
+    // is off. Offering a button whose only possible outcome is a 404 would be worse
+    // than not offering it.
+    regionsInfo = health.regions || null;
     // A 200 with no model block means a server predating this field, which is a
     // different thing to report than an unreachable one -- and either way the
     // placeholder must not be left sitting there as if the check never finished.
     unknown = modelInfo ? null : "the server didn't say which model it runs (an older build?)";
   } catch (err) {
     modelInfo = null;
+    regionsInfo = null;
     unknown = `couldn't reach the server (${err.message})`;
   }
+
+  // Deliberately not gated on supports_mask as well: a region is a rectangle over the
+  // image, and seeing what is in a picture is worth something even on a model that
+  // can't inpaint. The panel lives inside .maskOnly, so the mask controls' own
+  // visibility rules already keep it out of the way when inpainting is off.
+  document.getElementById("findObjectsBtn").hidden = !(regionsInfo && regionsInfo.enabled);
 
   if (modelInfo) {
     const guidance = modelInfo.supports_guidance ? `guidance ${modelInfo.default_guidance}` : "no guidance";
@@ -1715,6 +1779,184 @@ inpaintEl.addEventListener("change", () => {
   imageStrengthEl.value = inpaintEl.checked ? "0" : "0.4";
   showMaskEditor(inpaintEl.checked);
 });
+
+// ---------------------------------------------------------------------------
+// Detected regions
+// ---------------------------------------------------------------------------
+//
+// A chip sets the mask to one rectangle; it doesn't add to what's painted. Replacing
+// is the behaviour that matches what the list means -- "mask this object" -- and it
+// keeps the brush the only way to build a compound region, so there is never a
+// question of which of the two a given stroke came from.
+//
+// Boxes arrive as fractions of the frame and are turned into pixels against the base
+// image's *natural* size, which is the frame the mask canvas already works in
+// (sizeMaskToBaseImage sizes from the same two numbers). That is also the frame the
+// server measures in: it applies EXIF orientation before reporting dimensions,
+// exactly as mflux does before encoding, and the browser applies the same orientation
+// to an <img>. So a phone photo lines up without either side converting.
+
+const findObjectsBtn = document.getElementById("findObjectsBtn");
+const regionPanel = document.getElementById("regionPanel");
+const regionChips = document.getElementById("regionChips");
+const regionNote = document.getElementById("regionNote");
+
+// A function declaration, not a const: setBaseImage and clearBaseImage are defined
+// earlier in this script and call it, and only a hoisted binding is safe from there.
+function clearRegions() {
+  const chips = document.getElementById("regionChips");
+  if (chips) chips.textContent = "";
+  const panel = document.getElementById("regionPanel");
+  if (panel) panel.hidden = true;
+}
+
+function setRegionNote(text, warn = false) {
+  regionNote.textContent = text;
+  regionNote.classList.toggle("warn", warn);
+  regionPanel.hidden = false;
+}
+
+function regionsUrl() {
+  const u = new URL(urlEl.value, window.location.href);
+  u.pathname = "/mfluxible/v1/regions/detect";
+  u.search = "";
+  return u.toString();
+}
+
+function applyRegion(box) {
+  const w = imagePreview.naturalWidth;
+  const h = imagePreview.naturalHeight;
+  if (!w || !h) return;
+  sizeMaskToBaseImage();
+  maskCtx.clearRect(0, 0, maskAlpha.width, maskAlpha.height);
+  maskCtx.fillStyle = "#fff";
+  maskCtx.fillRect(
+    Math.round(box[0] * w),
+    Math.round(box[1] * h),
+    Math.max(1, Math.round((box[2] - box[0]) * w)),
+    Math.max(1, Math.round((box[3] - box[1]) * h)),
+  );
+  renderMask();
+  updateMaskCoverage();
+}
+
+function showRegions(regions) {
+  regionChips.textContent = "";
+  if (!regions.length) {
+    setRegionNote("nothing was found in this image.");
+    return;
+  }
+  for (const region of regions) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "regionChip";
+    chip.setAttribute("aria-pressed", "false");
+    const share = Math.round((region.box[2] - region.box[0]) * (region.box[3] - region.box[1]) * 100);
+    chip.textContent = region.label;
+    const pct = document.createElement("span");
+    pct.textContent = ` ${share}%`;
+    chip.appendChild(pct);
+    chip.addEventListener("click", () => {
+      for (const other of regionChips.children) other.setAttribute("aria-pressed", "false");
+      chip.setAttribute("aria-pressed", "true");
+      // Ticking inpaint here rather than requiring it first: clicking a region is an
+      // unambiguous statement that you want to mask something, and the checkbox's own
+      // handler is what moves image strength to 0 for it.
+      if (!inpaintEl.checked && !inpaintWrap.classList.contains("hidden")) {
+        inpaintEl.checked = true;
+        inpaintEl.dispatchEvent(new Event("change"));
+      }
+      applyRegion(region.box);
+      showMaskEditor(true);
+    });
+    regionChips.appendChild(chip);
+  }
+  setRegionNote("Click a region to mask it, then nudge it in the editor — a detected box is a starting point, not a measurement.");
+}
+
+async function findObjects() {
+  if (!baseImageB64) {
+    setRegionNote("load a base image first.", true);
+    return;
+  }
+  findObjectsBtn.disabled = true;
+  regionChips.textContent = "";
+  setRegionNote("looking…");
+  const epoch = baseImageEpoch;
+
+  try {
+    const resp = await fetch(regionsUrl(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({ image: baseImageB64 }),
+    });
+    if (!resp.ok) {
+      let detail = resp.statusText;
+      try {
+        detail = (await resp.json()).message || detail;
+      } catch (err) { /* non-JSON body: keep the status text */ }
+      throw new Error(`${resp.status} ${detail}`);
+    }
+
+    // Same framing as a generation's stream, read the same way.
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buffer.indexOf("\n\n")) !== -1) {
+        const rawEvent = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        for (const line of rawEvent.split("\n")) {
+          if (!line.startsWith("data: ")) continue;
+          const event = JSON.parse(line.slice("data: ".length));
+          if (event.type === "pending") {
+            setRegionNote(
+              event.worker_attached
+                ? "looking…"
+                : "waiting — no detection worker is attached. Start clients/region_worker.py.",
+              !event.worker_attached,
+            );
+          } else if (event.type === "error") {
+            setRegionNote(event.message, true);
+          } else if (event.type === "regions") {
+            // The base image was swapped while this was in flight, so these regions
+            // describe something that is no longer on screen. Exact, and it catches a
+            // replacement of identical size -- which the dimension check below cannot.
+            if (epoch !== baseImageEpoch) {
+              setRegionNote("the base image changed while looking — run it again.", true);
+              continue;
+            }
+            // A different failure, kept for it: the server and this page disagreeing
+            // about the same image's oriented size, which would mean one of them is
+            // applying EXIF orientation differently to the other.
+            if (
+              event.width && event.height &&
+              (event.width !== imagePreview.naturalWidth || event.height !== imagePreview.naturalHeight)
+            ) {
+              setRegionNote(
+                `those regions were measured on a ${event.width}×${event.height} image, but this one is ` +
+                `${imagePreview.naturalWidth}×${imagePreview.naturalHeight} — the base image changed. Try again.`,
+                true,
+              );
+              continue;
+            }
+            showRegions(event.regions || []);
+          }
+        }
+      }
+    }
+  } catch (err) {
+    setRegionNote(`couldn't detect objects: ${err.message}`, true);
+  } finally {
+    findObjectsBtn.disabled = false;
+  }
+}
+
+findObjectsBtn.addEventListener("click", findObjects);
 
 form.addEventListener("submit", async (e) => {
   e.preventDefault();

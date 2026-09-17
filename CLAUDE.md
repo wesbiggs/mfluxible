@@ -503,6 +503,84 @@ All of the above is one version's behavior and will move; the endpoint is writte
 against what 1.18.0 actually sends, and re-reading those two files is the way to check
 it rather than inferring from a failing generation.
 
+## Object detection is a mailbox, and the thing that spends money is a client
+
+`server/regions.py` holds one pending job and copies a JSON array between two HTTP
+requests. It loads no model, holds no key and makes no outbound call -- the harness
+POSTs an image and waits on an SSE stream, `clients/region_worker.py` claims the job,
+shells out to `claude -p`, and posts regions back.
+
+**The worker is in `clients/` because of what it does, not to keep `server/` tidy.**
+It spawns a subprocess with filesystem access that makes network calls and spends a
+Claude account. Had that lived behind an endpoint, `POST /.../detect` would be
+comfortably the most dangerous route in this repo and one line away from
+`tests/test_proxy_config.py`'s worst case -- a path drifting into `@public` would stop
+being an ungated GPU and start being remote code execution against someone's Claude
+account. As a client it is unreachable from the network, it is optional (the server
+reports `worker_attached: false` and the harness says so), and *starting it* is what
+consent to that spending looks like. It also keeps the CLI out of the server's
+dependency set, which matters given how many fast-moving externals this file already
+tracks.
+
+**One slot, and no identifier.** The obvious design hashes the image so the two sides
+can agree which one they mean. That cannot work, and the reason is measured rather than
+assumed: an image that reaches a Claude Code session is **re-encoded** on the way into
+the session transcript. A 622,650-byte PNG read with the Read tool was stored as a
+70,548-byte **JPEG** -- 11% of the size, a different format, so no hash of the original
+can ever match. Dimensions survived (768x768), which is the half that matters, because
+boxes are fractions and fractions are scale-invariant for the same reason `mask_boxes`
+are in the MCP tool.
+
+So the mailbox pairs a waiting stream with an arriving answer and needs no key at all.
+That is only coherent because `MfluxEngine` already serializes generations behind one
+lock in one process: a second detection has nowhere useful to queue, so it supersedes
+the first and closes that stream with a reason instead of leaving it to time out. If
+the engine ever runs more than one generation at a time, this needs a real key -- and
+the re-encode above is why that key cannot be the image's bytes.
+
+Two guards replace it, for two different failures. Dimensions catch the server and the
+browser disagreeing about one image's *oriented* size -- both sides apply EXIF
+orientation (`regions.py` imports engine.py's `_oriented` rather than copying it, since
+mflux rotates before encoding and a box chosen in one frame applied in another is
+transposed), so a phone photo lines up without either side converting. And
+`baseImageEpoch` in harness.html catches the likelier case: the displayed image being
+swapped while a detection is still open, which a replacement of identical size would
+otherwise slip past.
+
+**Putting an id inside the image -- EXIF or otherwise -- answers a question nobody is
+asking, and does not survive to a reader.** The round trip is already identified: the
+server issues a `job_id`, stashes the exact bytes, and hands the worker that same file,
+so nothing between the two re-encodes anything. The only consumer past that point is a
+vision model looking at pixels, which cannot read a tag. And the field it would want is
+taken -- mflux embeds its generation metadata in EXIF `UserComment`, which is precisely
+what harness.html parses to recover a prompt and seed, so writing there would collide
+with the feature one section up. The identity that actually needs tracking never leaves
+the page, which is why the counter lives there.
+
+**`MFLUXIBLE_REGIONS_DIR` is one variable doing two jobs on purpose.** It enables the
+feature and it is where images are stashed -- there is no useful "on but nowhere to put
+anything" state. It is *also* the working directory the worker runs `claude` in, which
+buys two things at once: a stashed image inside the cwd is readable without widening the
+CLI's allowed roots, and a directory with no `CLAUDE.md` in it keeps a one-shot
+detection from loading this (very long) file on every call.
+
+**The worker defaults to opus, and the usual latency-for-quality trade does not apply.**
+Measured on one 768x768 photograph with an identical prompt, opus was both better and
+*faster*: 11.4s against sonnet's 66.6s. Sonnet put the apple at
+`[0.28, 0.28, 0.68, 0.62]` -- roughly the right size in the wrong place, clipping the
+fruit's bottom third and taking in a band of forearm, which is exactly the failure the
+MCP mask-box section already records. Opus gave `[0.305, 0.344, 0.712, 0.736]` against
+`[0.310, 0.344, 0.694, 0.729]` measured by hand, to three decimals rather than the round
+two-decimal numbers that signal estimating on a grid. Sonnet had produced a good box on
+an earlier run of the same image, so it is variance rather than a constant offset --
+which is the worse failure, since nothing downstream can tell the two apart. Hence a
+chip sets the mask and opens the editor rather than being treated as final.
+
+**The harness draws the button off `/health`, and reads a missing block as off.** That
+inverts the rule the `supports_*` keys follow, deliberately: those default to "unknown,
+let the server decide" because offering a field costs nothing if the server accepts it,
+while a Find objects button on a server without the mailbox can only ever 404.
+
 ## mcp SDK also moved fast: FastMCP -> MCPServer
 
 `clients/mcp_server.py` targets `mcp` 2.x, where `mcp.server.fastmcp.FastMCP` (the commonly-documented v1 API) was renamed to `mcp.server.mcpserver.MCPServer`. Importing the old path raises a `ModuleNotFoundError` with a migration pointer, it doesn't just silently break — if that happens, you're looking at v1-flavored example code (`FastMCP(...)`) against a v2 install. `Context`, `Image`, and the `@server.tool()` decorator are all still there, just re-exported from `mcp.server.mcpserver` instead.

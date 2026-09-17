@@ -212,3 +212,46 @@ class A1111Txt2ImgRequest(BaseModel):
     # switch to. See the endpoint's comment for why this one is ignored rather than
     # validated the way OpenAIImageGenerationRequest.model is.
     model: str | None = None
+
+
+class RegionDetectRequest(BaseModel):
+    """Request body for `POST /mfluxible/v1/regions/detect` -- the harness handing over
+    the image it already has loaded, so a worker can be told where to find it.
+
+    Just the image: the server measures its own dimensions (with EXIF orientation
+    applied, since that is the frame a mask is built in) rather than trusting a
+    caller's idea of them, and there is nothing else to configure per detection."""
+
+    image: str = Field(description="Base64-encoded image, no data: URI prefix.")
+
+
+class Region(BaseModel):
+    """One named thing a detection found, with its extent as fractions of the frame.
+
+    Fractions rather than pixels, for the reason the MCP tool's mask_boxes are: the
+    worker may be looking at a different-sized copy than the one a mask ends up being
+    built against, and a fraction means the same thing in both frames. Order is
+    (x0, y0, x1, y1) with 0,0 at the top-left, matching mask_boxes exactly, so a
+    region can be handed straight to a generation without conversion."""
+
+    label: str
+    box: tuple[float, float, float, float]
+
+
+class RegionsResult(BaseModel):
+    """What `clients/region_worker.py` posts back for a claimed job.
+
+    Exactly one of `regions` or `error` is meaningful. An error is carried rather
+    than signalled with a status code because the worker failing (no `claude` on
+    PATH, a reply that held no JSON) is a normal outcome the harness should show,
+    not a transport failure -- and the message is written by the worker for a person
+    to read, the same way request_problem's are."""
+
+    regions: list[Region] | None = None
+    error: str | None = None
+    # What the worker measured. The harness compares this to its own oriented size
+    # and warns on a mismatch: cheap insurance against regions arriving for a
+    # different image than the one on screen, which byte-equality can't catch since
+    # nothing guarantees the worker read the same encoding.
+    width: int | None = None
+    height: int | None = None
