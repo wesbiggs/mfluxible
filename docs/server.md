@@ -108,12 +108,18 @@ the stashed image, and posts the regions back for the harness's open stream to d
 
 By default that command is [Claude Code](https://claude.com/claude-code) — the CLI on
 `PATH` and already signed in — but nothing here is specific to it; see
-[Using a different tool](#using-a-different-tool). Start the server with
-`MFLUXIBLE_REGIONS_DIR` (see [the section above](#object-detection)) and point
-both at the same directory:
+[Using a different tool](#using-a-different-tool).
+
+The worker is a **separate process you start yourself** — `MFLUXIBLE_REGIONS_DIR` on the
+server opens the mailbox, it does not launch anything. Until the worker is running,
+`/health` reports `regions.worker_attached: false` and the harness's **Find objects**
+button says nothing is listening.
+
+It takes no configuration of its own — every job names the file to read, so there is no
+directory to keep in step:
 
 ```bash
-MFLUXIBLE_REGIONS_DIR=~/.cache/mfluxible/regions uv run server/region_worker.py
+uv run server/region_worker.py
 ```
 
 | Variable | Default | Meaning |

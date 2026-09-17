@@ -33,15 +33,16 @@ which is an accident of layout, not an interface. It is a script with a `main()`
 spawned by a person; an import from `server.py` would put an arbitrary subprocess back
 inside the request path, which is the whole thing this placement avoids.
 
-Run it alongside the server:
+Run it alongside the server, with no configuration of its own:
 
-    MFLUXIBLE_REGIONS_DIR=~/.cache/mfluxible/regions uv run server/region_worker.py
+    uv run server/region_worker.py
 
-The same directory the server was given: the worker never invents a path, it reads the
-one each job names, and that directory is also the working directory the command runs
-in. Both halves of that matter for the default -- an image inside the cwd needs no
---add-dir to be readable, and a directory with no CLAUDE.md in it keeps a one-shot
-detection from loading this project's instructions on every call.
+**It takes no MFLUXIBLE_REGIONS_DIR.** The server's copy of that setting is the only
+one: every job names the file it wants read, so the worker never invents a path and has
+nothing to keep in step. It runs the detection command in that file's own directory,
+which matters twice for the default -- an image inside the cwd needs no --add-dir to be
+readable, and a directory with no CLAUDE.md in it keeps a one-shot detection from
+loading this project's instructions on every call.
 """
 
 import argparse
@@ -256,8 +257,8 @@ def run(base: str) -> None:
 
         if resp.status_code == 404:
             sys.exit(
-                "the server has object detection switched off -- start it with "
-                "MFLUXIBLE_REGIONS_DIR set to the same directory as this worker."
+                "the server has object detection switched off -- restart it with "
+                "MFLUXIBLE_REGIONS_DIR set to a directory it can write to."
             )
         if resp.status_code == 401:
             sys.exit("the server rejected the credentials (set MFLUXIBLE_BEARER_TOKEN).")
