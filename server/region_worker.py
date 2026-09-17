@@ -11,17 +11,31 @@ The command is `claude -p` by default and is one env var away from being anythin
 actually depends on is narrow: a program that prints a JSON array of labelled boxes to
 stdout. See MFLUXIBLE_REGIONS_COMMAND below.
 
-**This is a client, and that placement is the design rather than filing.** It runs an
-arbitrary configured command with filesystem access, which on the default setting also
-makes network calls and spends a Claude account. Behind an endpoint that would be
-comfortably the most dangerous thing in this repo, and one path away from
-`tests/test_proxy_config.py`'s worst case. Here it can't be reached from the network at
-all, it's optional (the server runs fine with nothing listening, and says so on
-/health), and starting it is what consent to that command running looks like.
+**A sidecar, not a client, and not part of the server process either.** It doesn't
+consume the API the way everything in `clients/` does -- it supplies a capability the
+server advertises, has to sit on the same machine (it reads the stash directory off
+disk), takes its directory from the server's own configuration, and is the thing
+`/health`'s `worker_attached` reports on. Run it alone and nothing happens.
+
+That it is a separate *process* is the part carrying the safety argument, and it
+survives the reclassification unchanged: this runs an arbitrary configured command with
+filesystem access, which on the default setting also makes network calls and spends a
+Claude account. Behind an endpoint, that would be comfortably the most dangerous thing
+in this repo and one path away from `tests/test_proxy_config.py`'s worst case. Out here
+it can't be reached from the network at all, it's optional (the server runs fine with
+nothing listening, and says so on /health), and starting it is what consent to that
+command running looks like.
+
+**Nothing in `server/` imports this, and nothing should.** The modules here resolve each
+other as flat siblings on `sys.path` (see CLAUDE.md's Layout note), so this file is
+importable from inside the server process purely by living in the same directory --
+which is an accident of layout, not an interface. It is a script with a `main()`,
+spawned by a person; an import from `server.py` would put an arbitrary subprocess back
+inside the request path, which is the whole thing this placement avoids.
 
 Run it alongside the server:
 
-    MFLUXIBLE_REGIONS_DIR=~/.cache/mfluxible/regions uv run clients/region_worker.py
+    MFLUXIBLE_REGIONS_DIR=~/.cache/mfluxible/regions uv run server/region_worker.py
 
 The same directory the server was given: the worker never invents a path, it reads the
 one each job names, and that directory is also the working directory the command runs
@@ -284,7 +298,7 @@ def run(base: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Answer mfluxible's object-detection jobs using the Claude Code CLI."
+        description="Answer mfluxible's object-detection jobs by running MFLUXIBLE_REGIONS_COMMAND."
     )
     parser.add_argument("--url", default="http://127.0.0.1:8420", help="mfluxible's base URL")
     args = parser.parse_args()

@@ -247,7 +247,7 @@ async def generate(req: GenerateRequest):
 # ---------------------------------------------------------------------------
 #
 # Three endpoints, two clients: the harness submits an image and holds a stream,
-# clients/region_worker.py claims the job and posts regions back. The server does no
+# server/region_worker.py claims the job and posts regions back. The server does no
 # detection -- see regions.py's docstring for why that stays out of here.
 
 _REGIONS_OFF = {"type": "error", "message": "object detection is not enabled on this server."}

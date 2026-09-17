@@ -9,7 +9,7 @@ posts back come out of the harness's open stream.
 The server does no detection of its own. It never loads a model, never holds an
 API key and never makes an outbound call: it writes a file, holds one slot in
 memory and copies a JSON array from one HTTP request to another. Everything that
-spends a Claude account lives in `clients/region_worker.py`, deliberately -- see
+spends a Claude account lives in `server/region_worker.py`, deliberately -- see
 the note in CLAUDE.md for why that is a client rather than a server feature.
 
 **One slot, not a queue.** MfluxEngine already serializes generations behind a

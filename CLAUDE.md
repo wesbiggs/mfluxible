@@ -2,7 +2,7 @@
 
 ## Layout
 
-`server/` (server.py, engine.py, models.py, schemas.py, chat_stub.py, schedulers.py, auth.py, requirements.txt) is the model + HTTP API. `clients/` (stream_client.py, stream_client.js, harness.html, mcp_server.py, requirements.txt, requirements-mcp.txt) is everything that talks to it over HTTP. They're independent dependency-wise -- installing one's requirements.txt doesn't pull in the other's. server.py/engine.py/models.py/schemas.py/chat_stub.py/auth.py import each other as flat sibling modules (`from engine import ...`), not a package, so `server/` must stay on `sys.path` when running (e.g. `uv run uvicorn server:app --app-dir server`) -- don't add an `__init__.py` or turn this into a `server.*` package without updating those imports and the run command together.
+`server/` (server.py, engine.py, models.py, schemas.py, chat_stub.py, schedulers.py, auth.py, regions.py, region_worker.py, requirements.txt) is the model + HTTP API. `clients/` (stream_client.py, stream_client.js, harness.html, mcp_server.py, requirements.txt, requirements-mcp.txt) is everything that *consumes* it over HTTP -- note that word, because `region_worker.py` also talks to the API over HTTP and is deliberately not there. It is a **sidecar**: it supplies a capability the server advertises rather than consuming one, must sit on the same machine (it reads the stash directory off disk), takes its directory from the server's own configuration, and is what `/health`'s `worker_attached` reports on. Its settings are documented in `docs/server.md` with the server's for the same reason. **Nothing in `server/` imports it and nothing should** -- these modules resolve each other as flat siblings, so it is importable from inside the server process purely by living in this directory, which is an accident of layout rather than an interface; an import would put an arbitrary subprocess back inside the request path. They're independent dependency-wise -- installing one's requirements.txt doesn't pull in the other's. server.py/engine.py/models.py/schemas.py/chat_stub.py/auth.py import each other as flat sibling modules (`from engine import ...`), not a package, so `server/` must stay on `sys.path` when running (e.g. `uv run uvicorn server:app --app-dir server`) -- don't add an `__init__.py` or turn this into a `server.*` package without updating those imports and the run command together.
 
 ## uv, but with requirements.txt files -- deliberately not a uv project
 
@@ -507,20 +507,27 @@ it rather than inferring from a failing generation.
 
 `server/regions.py` holds one pending job and copies a JSON array between two HTTP
 requests. It loads no model, holds no key and makes no outbound call -- the harness
-POSTs an image and waits on an SSE stream, `clients/region_worker.py` claims the job,
+POSTs an image and waits on an SSE stream, `server/region_worker.py` claims the job,
 shells out to `claude -p`, and posts regions back.
 
-**The worker is in `clients/` because of what it does, not to keep `server/` tidy.**
-It runs an arbitrary operator-configured command with filesystem access, which on the
-default setting also makes network calls and spends a Claude account. Had that lived
-behind an endpoint, `POST /.../detect` would be comfortably the most dangerous route in
-this repo and one path away from `tests/test_proxy_config.py`'s worst case -- a path
-drifting into `@public` would stop being an ungated GPU and start being remote command
-execution. As a client it is unreachable from the network, it is optional (the server
-reports `worker_attached: false` and the harness says so), and *starting it* is what
-consent to that command running looks like. It also keeps the CLI out of the server's
-dependency set, which matters given how many fast-moving externals this file already
-tracks.
+**The worker is a separate process because of what it does, not to keep `server/`
+tidy -- and that is a different claim from where its file sits.** It runs an arbitrary
+operator-configured command with filesystem access, which on the default setting also
+makes network calls and spends a Claude account. Had that lived behind an endpoint,
+`POST /.../detect` would be comfortably the most dangerous route in this repo and one
+path away from `tests/test_proxy_config.py`'s worst case -- a path drifting into
+`@public` would stop being an ungated GPU and start being remote command execution. As
+a sidecar it is unreachable from the network, it is optional (the server reports
+`worker_attached: false` and the harness says so), and *starting it* is what consent to
+that command running looks like.
+
+It lived in `clients/` first, on the reasoning that `clients/` is "everything that talks
+to it over HTTP" and this does. That was the wrong read: everything else there
+*consumes* the API to get an image out, while this supplies a capability the server
+advertises, has to be co-located, and is co-configured. The safety argument above never
+depended on the word -- a sidecar is just as much a separate process -- but the label
+did have a consequence, which was keeping its settings out of `docs/server.md` under the
+client/server documentation split. They belong there, which is where they now are.
 
 **Which is also why the CLI is a template rather than a hardcoded call.** The worker's
 real dependency is narrow -- a program that prints a JSON array of labelled boxes to

@@ -1917,7 +1917,7 @@ async function findObjects() {
             setRegionNote(
               event.worker_attached
                 ? "looking…"
-                : "waiting — no detection worker is attached. Start clients/region_worker.py.",
+                : "waiting — no detection worker is attached. Start server/region_worker.py.",
               !event.worker_attached,
             );
           } else if (event.type === "error") {

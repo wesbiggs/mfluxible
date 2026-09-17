@@ -181,8 +181,8 @@ rectangle. **404 unless `MFLUXIBLE_REGIONS_DIR` is set** — check `regions.enab
 [`/health`](#get-health) first.
 
 The server does no detection of its own: it stashes the image, holds the request open,
-and waits for `clients/region_worker.py` to claim the job and post regions back (see
-[Object detection](clients.md#object-detection)). Nothing here loads a model, holds an
+and waits for `server/region_worker.py` to claim the job and post regions back (see
+[Object detection](server.md#object-detection)). Nothing here loads a model, holds an
 API key or makes an outbound call.
 
 ```json

@@ -239,7 +239,7 @@ class Region(BaseModel):
 
 
 class RegionsResult(BaseModel):
-    """What `clients/region_worker.py` posts back for a claimed job.
+    """What `server/region_worker.py` posts back for a claimed job.
 
     Exactly one of `regions` or `error` is meaningful. An error is carried rather
     than signalled with a status code because the worker failing (no `claude` on

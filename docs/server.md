@@ -27,6 +27,8 @@ Environment variables for `server.py`, all optional.
 | `MFLUXIBLE_CORS_ORIGINS` | unset | Comma-separated exact-match origins, in addition to the regex |
 | `MFLUXIBLE_REGIONS_DIR` | unset | Enables object detection and says where images are stashed (see [Object detection](#object-detection)) |
 | `MFLUXIBLE_REGIONS_TIMEOUT` | `180` | Seconds a detection waits for a worker's answer before giving up |
+| `MFLUXIBLE_REGIONS_COMMAND` | `claude -p …` | What `region_worker.py` runs per detection (see [Using a different tool](#using-a-different-tool)) |
+| `MFLUXIBLE_REGIONS_MODEL` | `opus` | Which model the **default** command uses; ignored if you set your own command |
 | `HF_TOKEN` | unset | Not an mfluxible variable — `huggingface_hub` reads it, and gated models need it (see [Gated weights](#gated-weights-and-hf_token)) |
 
 ### Memory
@@ -74,9 +76,8 @@ each of which sets the mask to one rectangle.
 **The server does no detection.** It never loads a vision model, never holds an API key
 and never makes an outbound call — it writes a file, holds one job in memory, and copies
 a JSON array from one request to another. The work is done by
-`clients/region_worker.py`, which runs alongside (see
-[Object detection](clients.md#object-detection) for how to start it). With nothing
-running, the feature simply reports no worker attached and the harness says so.
+`server/region_worker.py`, which runs alongside (see
+[Running the worker](#running-the-worker) below). With nothing running, the feature simply reports no worker attached and the harness says so.
 
 That split is deliberate rather than tidiness: the worker runs an arbitrary configured
 command with filesystem access, and an HTTP endpoint that spawned one would be by far
@@ -86,10 +87,8 @@ and starting it is what consent to that command running looks like.
 **Which detector runs is the worker's business, not the server's.**
 `MFLUXIBLE_REGIONS_COMMAND` names the whole command line — [Claude Code](https://claude.com/claude-code)
 by default, but any program that prints a JSON array of labelled boxes to stdout will
-do, including a local detector or a script of your own. It is documented with the
-worker's other settings under
-[Using a different tool](clients.md#using-a-different-tool), since the server never sees
-it.
+do, including a local detector or a script of your own. It is set on the worker rather
+than read by the server; see [Using a different tool](#using-a-different-tool).
 
 One variable both enables and configures because there is no useful "on, but nowhere to
 put anything" state. Point the worker at the same directory: it is also the working
@@ -99,6 +98,94 @@ directory with no `CLAUDE.md` keeps a one-shot detection from loading a project'
 instructions on every call.
 
 Stashed images are pruned after an hour, on the next detection.
+
+#### Running the worker
+
+`server/region_worker.py` is what makes the harness's **Find objects** button work. The
+harness can see an image and drive the GPU but has no vision model; this process
+supplies one. It long-polls the server for a pending detection, runs a command against
+the stashed image, and posts the regions back for the harness's open stream to deliver.
+
+By default that command is [Claude Code](https://claude.com/claude-code) — the CLI on
+`PATH` and already signed in — but nothing here is specific to it; see
+[Using a different tool](#using-a-different-tool). Start the server with
+`MFLUXIBLE_REGIONS_DIR` (see [the section above](#object-detection)) and point
+both at the same directory:
+
+```bash
+MFLUXIBLE_REGIONS_DIR=~/.cache/mfluxible/regions uv run server/region_worker.py
+```
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `MFLUXIBLE_REGIONS_COMMAND` | `claude -p {prompt} --allowedTools Read --model $MFLUXIBLE_REGIONS_MODEL` | The command to run per detection |
+| `MFLUXIBLE_REGIONS_MODEL` | `opus` | Which model the **default** command uses; ignored if you set your own command |
+| `MFLUXIBLE_BEARER_TOKEN` | unset | Sent as `Authorization: Bearer …`, if a proxy gates the API |
+
+`--url` points at the server's base URL (default `http://127.0.0.1:8420`). As with the
+terminal clients, setting `MFLUXIBLE_BEARER_TOKEN` *and* putting credentials in the URL
+is refused rather than resolved.
+
+#### Using a different tool
+
+What the worker actually requires is narrow: **a program that prints a JSON array of
+labelled boxes to stdout.** Anything that can do that from an image path works — another
+model's CLI, a local detector, a script of your own.
+
+```json
+[{"label": "red apple", "box": [0.305, 0.344, 0.712, 0.736]}]
+```
+
+`box` is `[x0, y0, x1, y1]` as fractions of the frame, `0,0` at the top-left. Extra prose
+around the array is fine (a fenced code block is read too); entries with a malformed or
+out-of-range box are dropped rather than repaired, and at most 8 are kept.
+
+The command is a template with two placeholders:
+
+| Placeholder | |
+| --- | --- |
+| `{image}` | The image's filename. The working directory is the stash directory, so a bare name resolves. |
+| `{prompt}` | The worker's standard detection prompt, already naming the image. Use it for a prompt-driven tool; leave it out entirely for a detector that doesn't take one. |
+
+```bash
+# a local detector that already speaks the format
+MFLUXIBLE_REGIONS_COMMAND='detect-objects --format json {image}'
+
+# a prompt-driven CLI that takes the image as an attachment
+MFLUXIBLE_REGIONS_COMMAND='llm -m some-vision-model -a {image} {prompt}'
+
+# your own wrapper, for a tool whose coordinates need converting
+MFLUXIBLE_REGIONS_COMMAND='python3 ~/bin/boxes_to_fractions.py {image}'
+```
+
+That last one is the common case, and it is deliberate that it needs a wrapper: tools
+disagree about coordinates — pixels, 0–1000, `xywh` — and a conversion setting here would
+turn a wrongly-scaled box into a plausible-looking one. Keeping a single reader keeps a
+bad box visibly bad.
+
+The template is split with `shlex` and run **without a shell**, so quoting behaves as you
+would expect while `;` and `|` are ordinary argument characters. Splitting happens before
+the placeholders are filled in, so a prompt containing quotes or newlines stays exactly
+one argument and can never reshape the command.
+
+**On the default command's model choice — and the usual trade doesn't apply here.**
+Measured on the same 768×768 photograph with the same prompt, `opus` was both more
+accurate *and* faster than `sonnet` — 11.4s against 66.6s. Sonnet placed a "red apple"
+box at `[0.28, 0.28, 0.68, 0.62]`: about the right size, in the wrong place, clipping the
+fruit's bottom third while taking in a band of forearm. Opus gave
+`[0.305, 0.344, 0.712, 0.736]` against `[0.310, 0.344, 0.694, 0.729]` measured by hand —
+within two percent on every edge, and quoted to three decimals rather than the round
+two-decimal numbers that signal estimating on a grid rather than measuring. Sonnet had
+produced a good box on an earlier run of the same image, so this is variance rather than
+a fixed offset, which is worse: nothing downstream can tell a good box from a bad one.
+
+Which is why a region is a starting point rather than a result. Clicking a chip sets the
+mask to that one rectangle and opens the editor, so the box can be nudged before it
+costs a generation — the same reason the MCP tool has `preview_mask`.
+
+Detections are one at a time: starting a second supersedes the first, and the harness
+says so rather than leaving the old one to time out.
+
 
 ## Models
 
