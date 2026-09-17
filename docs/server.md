@@ -70,8 +70,9 @@ On by default, reflecting back any `http(s)://localhost:<any port>` or `127.0.0.
 
 Off unless `MFLUXIBLE_REGIONS_DIR` names a directory. Switched on, the server gains the
 three `/mfluxible/v1/regions/` endpoints ([API](api.md#post-mfluxiblev1regionsdetect))
-and the harness grows a **Find objects** button that fills a row of clickable regions,
-each of which sets the mask to one rectangle.
+and the harness grows a **Find objects** button that fills a row of togglable regions.
+Each one is an independent toggle and the mask is the union of whatever is selected, so
+a subject and the thing it is holding can be masked together.
 
 **The server does no detection.** It never loads a vision model, never holds an API key
 and never makes an outbound call — it writes a file, holds one job in memory, and copies
@@ -185,9 +186,15 @@ two-decimal numbers that signal estimating on a grid rather than measuring. Sonn
 produced a good box on an earlier run of the same image, so this is variance rather than
 a fixed offset, which is worse: nothing downstream can tell a good box from a bad one.
 
-Which is why a region is a starting point rather than a result. Clicking a chip sets the
-mask to that one rectangle and opens the editor, so the box can be nudged before it
-costs a generation — the same reason the MCP tool has `preview_mask`.
+Which is why a region is a starting point rather than a result. Selecting chips sets the
+mask to their union and opens the editor, so the boxes can be nudged before they cost a
+generation — the same reason the MCP tool has `preview_mask`.
+
+While any chip is selected it *is* the mask: each toggle repaints from the whole
+selection rather than adding to the canvas, because erasing one region's rectangle on
+deselect would also cut into overlapping neighbours. The moment you pick up a brush the
+chips let go, so a selected chip never describes something the canvas no longer shows —
+and a hand edit is never silently discarded by a later toggle.
 
 Detections are one at a time: starting a second supersedes the first, and the harness
 says so rather than leaving the old one to time out.

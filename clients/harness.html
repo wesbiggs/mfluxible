@@ -1648,12 +1648,15 @@ function maskIsActive() {
 }
 
 function clearMask() {
+  dropChipSelection();
   maskCtx.clearRect(0, 0, maskAlpha.width, maskAlpha.height);
   renderMask();
   updateMaskCoverage();
 }
 
 function invertMask() {
+  // What is on the canvas is no longer the set of regions that produced it.
+  dropChipSelection();
   // "xor" with a full-canvas fill is exactly inversion: painted areas overlap and
   // cancel, unpainted ones take the fill.
   maskCtx.globalCompositeOperation = "xor";
@@ -1708,6 +1711,11 @@ function moveBrushRing(e) {
 }
 
 maskSurface.addEventListener("pointerdown", (e) => {
+  // The one hook that covers every manual edit -- brush, erase and rect all start here.
+  // From this stroke on the canvas is yours, not the chip selection's, so the chips let
+  // go rather than staying pressed over something they no longer describe. Without this,
+  // toggling a chip later would silently discard the stroke you are about to make.
+  dropChipSelection();
   maskSurface.setPointerCapture(e.pointerId);
   painting = true;
   const p = surfacePoint(e);
@@ -1818,6 +1826,9 @@ const regionNote = document.getElementById("regionNote");
 function clearRegions() {
   const chips = document.getElementById("regionChips");
   if (chips) chips.textContent = "";
+  // The chips are gone, so nothing may still claim to be selected -- and the Set holds
+  // region objects belonging to a detection that no longer has any UI.
+  selectedRegions.clear();
   const panel = document.getElementById("regionPanel");
   if (panel) panel.hidden = true;
 }
@@ -1835,21 +1846,45 @@ function regionsUrl() {
   return u.toString();
 }
 
-function applyRegion(box) {
+// While any chip is pressed, the selection *is* the mask: every toggle repaints it
+// from the union of what's selected rather than adding to whatever is on the canvas.
+// Painting additively would make deselecting ambiguous -- erasing a region's rectangle
+// would also erase overlapping neighbours and any brush work inside it, which is a
+// worse surprise than the redraw.
+//
+// The cost is that a hand edit does not survive the next toggle, and dropChipSelection
+// below is what keeps that from being a silent loss: the moment you pick up a brush the
+// chips let go, so a pressed chip never describes something the canvas no longer shows.
+const selectedRegions = new Set();
+
+function paintSelectedRegions() {
   const w = imagePreview.naturalWidth;
   const h = imagePreview.naturalHeight;
   if (!w || !h) return;
   sizeMaskToBaseImage();
   maskCtx.clearRect(0, 0, maskAlpha.width, maskAlpha.height);
   maskCtx.fillStyle = "#fff";
-  maskCtx.fillRect(
-    Math.round(box[0] * w),
-    Math.round(box[1] * h),
-    Math.max(1, Math.round((box[2] - box[0]) * w)),
-    Math.max(1, Math.round((box[3] - box[1]) * h)),
-  );
+  for (const region of selectedRegions) {
+    const box = region.box;
+    maskCtx.fillRect(
+      Math.round(box[0] * w),
+      Math.round(box[1] * h),
+      Math.max(1, Math.round((box[2] - box[0]) * w)),
+      Math.max(1, Math.round((box[3] - box[1]) * h)),
+    );
+  }
   renderMask();
   updateMaskCoverage();
+}
+
+// A function declaration, and deliberately: the mask module is defined *above* this one
+// and calls it from clearMask, invertMask and the first pointerdown of a stroke, so only
+// a hoisted binding reaches it. Never repaints -- the caller is either clearing the
+// canvas itself or about to draw on it, and repainting here would undo them.
+function dropChipSelection() {
+  if (!selectedRegions.size) return;
+  selectedRegions.clear();
+  for (const chip of regionChips.children) chip.setAttribute("aria-pressed", "false");
 }
 
 function showRegions(regions) {
@@ -1869,21 +1904,24 @@ function showRegions(regions) {
     pct.textContent = ` ${share}%`;
     chip.appendChild(pct);
     chip.addEventListener("click", () => {
-      for (const other of regionChips.children) other.setAttribute("aria-pressed", "false");
-      chip.setAttribute("aria-pressed", "true");
-      // Ticking inpaint here rather than requiring it first: clicking a region is an
+      const pressed = !selectedRegions.has(region);
+      if (pressed) selectedRegions.add(region);
+      else selectedRegions.delete(region);
+      chip.setAttribute("aria-pressed", String(pressed));
+      // Ticking inpaint here rather than requiring it first: selecting a region is an
       // unambiguous statement that you want to mask something, and the checkbox's own
-      // handler is what moves image strength to 0 for it.
-      if (!inpaintEl.checked && !inpaintWrap.classList.contains("hidden")) {
+      // handler is what moves image strength to 0 for it. Only on the way in -- clearing
+      // the last chip leaves inpainting on, since the next thing you do is usually paint.
+      if (pressed && !inpaintEl.checked && !inpaintWrap.classList.contains("hidden")) {
         inpaintEl.checked = true;
         inpaintEl.dispatchEvent(new Event("change"));
       }
-      applyRegion(region.box);
-      showMaskEditor(true);
+      paintSelectedRegions();
+      if (selectedRegions.size) showMaskEditor(true);
     });
     regionChips.appendChild(chip);
   }
-  setRegionNote("Click a region to mask it, then nudge it in the editor — a detected box is a starting point, not a measurement.");
+  setRegionNote("Toggle any number of regions to mask them together, then nudge the result in the editor — a detected box is a starting point, not a measurement.");
 }
 
 async function findObjects() {

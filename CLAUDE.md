@@ -602,7 +602,17 @@ MCP mask-box section already records. Opus gave `[0.305, 0.344, 0.712, 0.736]` a
 two-decimal numbers that signal estimating on a grid. Sonnet had produced a good box on
 an earlier run of the same image, so it is variance rather than a constant offset --
 which is the worse failure, since nothing downstream can tell the two apart. Hence a
-chip sets the mask and opens the editor rather than being treated as final.
+chip selection sets the mask and opens the editor rather than being treated as final.
+
+**The chips are independent toggles and the mask is their union, which makes the
+selection the mask's definition rather than a one-shot action.** Each toggle repaints
+from the whole selection instead of adding to the canvas: painting additively would make
+deselect ambiguous, since erasing one region's rectangle also cuts into overlapping
+neighbours and any brush work inside it. The cost is that a hand edit does not survive
+the next toggle, and `dropChipSelection` is what stops that being a silent loss -- the
+first `pointerdown` on the mask surface drops the selection, as do Clear and Invert, so a
+pressed chip never describes something the canvas no longer shows. That one hook covers
+brush, erase and rect, which all begin there.
 
 **The harness draws the button off `/health`, and reads a missing block as off.** That
 inverts the rule the `supports_*` keys follow, deliberately: those default to "unknown,
