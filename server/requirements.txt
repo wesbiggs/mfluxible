@@ -4,7 +4,7 @@ uvicorn[standard]>=0.52.4
 Pillow>=12.3.0
 python-multipart>=0.0.32
 
-# For region_worker.py, the detection sidecar in this directory. It is a separate
+# For vlm_worker.py, the detection sidecar in this directory. It is a separate
 # process the server never imports, but it ships and installs with the server, so its
 # one dependency is declared here rather than relied on transitively -- huggingface_hub
 # pulls requests in via mflux today, and that is not a contract to build on (the same

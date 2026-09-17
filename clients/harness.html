@@ -516,6 +516,21 @@
   /* ---------- detected regions ---------- */
 
   #regionFinder { margin-top: 0.1rem; }
+  .vlmPromptBox {
+    margin-top: 0.5rem;
+    padding: 0.5rem 0.6rem;
+    background: var(--panel-sunken);
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+  }
+  .vlmPrompt {
+    margin: 0 0 0.4rem;
+    font-size: 0.78rem;
+    line-height: 1.5;
+    color: var(--muted);
+    max-height: 7.5rem;
+    overflow-y: auto;
+  }
   .regionChips { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.5rem; }
   .regionChip {
     font: inherit;
@@ -814,6 +829,10 @@
           <div class="baseOnly" id="regionFinder" hidden>
             <button type="button" class="paneAction" id="findObjectsBtn">Find objects</button>
             <div id="regionPanel" hidden>
+              <div class="vlmPromptBox" id="vlmPromptWrap" hidden>
+                <p class="vlmPrompt" id="vlmPrompt"></p>
+                <button type="button" class="paneAction" id="usePromptBtn">Use as prompt</button>
+              </div>
               <div class="regionChips" id="regionChips"></div>
               <p class="regionNote" id="regionNote"></p>
             </div>
@@ -954,6 +973,11 @@ const form = document.getElementById("form");
 const urlEl = document.getElementById("url");
 const tokenEl = document.getElementById("token");
 const promptEl = document.getElementById("prompt");
+// The prompt box ships with example text, so "is it empty?" is the wrong question to
+// ask before overwriting it -- taken literally, a returned prompt would never fill it.
+// Read once, before anything can edit it, so the two stay in step without a second
+// copy of the literal living in the script.
+const SHIPPED_PROMPT = promptEl.value.trim();
 const modelInfoEl = document.getElementById("modelInfo");
 const stepsEl = document.getElementById("steps");
 const guidanceEl = document.getElementById("guidance");
@@ -1017,7 +1041,7 @@ let baseImageEpoch = 0;
 
 // {enabled, worker_attached} from the same /health read, or null when the server
 // didn't say -- which is every server built before the object-detection mailbox.
-let regionsInfo = null;
+let vlmInfo = null;
 
 // Bare base64 (no data: prefix) of the current image-to-image input, or null for
 // plain text-to-image -- what the API's `image` field wants. lastResultB64 is
@@ -1359,14 +1383,14 @@ async function refreshModel() {
     // an absent block means a server without the mailbox, and the safe reading there
     // is off. Offering a button whose only possible outcome is a 404 would be worse
     // than not offering it.
-    regionsInfo = health.regions || null;
+    vlmInfo = health.vlm || null;
     // A 200 with no model block means a server predating this field, which is a
     // different thing to report than an unreachable one -- and either way the
     // placeholder must not be left sitting there as if the check never finished.
     unknown = modelInfo ? null : "the server didn't say which model it runs (an older build?)";
   } catch (err) {
     modelInfo = null;
-    regionsInfo = null;
+    vlmInfo = null;
     unknown = `couldn't reach the server (${err.message})`;
   }
 
@@ -1411,7 +1435,7 @@ async function refreshModel() {
   // and on such a model that silently does nothing. A control that lists things and
   // then ignores you is worse than one that was never offered.
   document.getElementById("regionFinder").hidden =
-    !(regionsInfo && regionsInfo.enabled) || noMask;
+    !(vlmInfo && vlmInfo.enabled) || noMask;
   stepsEl.placeholder = modelInfo ? `model default (${modelInfo.default_steps})` : "model default";
   guidanceEl.placeholder = modelInfo && modelInfo.default_guidance !== null
     ? `model default (${modelInfo.default_guidance})`
@@ -1820,6 +1844,8 @@ const findObjectsBtn = document.getElementById("findObjectsBtn");
 const regionPanel = document.getElementById("regionPanel");
 const regionChips = document.getElementById("regionChips");
 const regionNote = document.getElementById("regionNote");
+const vlmPromptWrap = document.getElementById("vlmPromptWrap");
+const vlmPromptEl = document.getElementById("vlmPrompt");
 
 // A function declaration, not a const: setBaseImage and clearBaseImage are defined
 // earlier in this script and call it, and only a hoisted binding is safe from there.
@@ -1831,6 +1857,8 @@ function clearRegions() {
   selectedRegions.clear();
   const panel = document.getElementById("regionPanel");
   if (panel) panel.hidden = true;
+  const promptWrap = document.getElementById("vlmPromptWrap");
+  if (promptWrap) promptWrap.hidden = true;
 }
 
 function setRegionNote(text, warn = false) {
@@ -1839,9 +1867,9 @@ function setRegionNote(text, warn = false) {
   regionPanel.hidden = false;
 }
 
-function regionsUrl() {
+function vlmUrl() {
   const u = new URL(urlEl.value, window.location.href);
-  u.pathname = "/mfluxible/v1/regions/detect";
+  u.pathname = "/mfluxible/v1/vlm/describe";
   u.search = "";
   return u.toString();
 }
@@ -1887,10 +1915,31 @@ function dropChipSelection() {
   for (const chip of regionChips.children) chip.setAttribute("aria-pressed", "false");
 }
 
+// Filled only when the box still holds the text it shipped with, or nothing at all.
+// Anything else is something you wrote, and a returned prompt is a suggestion rather
+// than an answer -- "Use as prompt" is always there for the case where it isn't empty.
+function promptFieldIsUntouched() {
+  const value = promptEl.value.trim();
+  return value === "" || value === SHIPPED_PROMPT;
+}
+
+function showPrompt(prompt) {
+  vlmPromptEl.textContent = prompt || "";
+  vlmPromptWrap.hidden = !prompt;
+  if (prompt && promptFieldIsUntouched()) {
+    promptEl.value = prompt;
+    log("prompt filled in from the image");
+  }
+}
+
 function showRegions(regions) {
   regionChips.textContent = "";
   if (!regions.length) {
-    setRegionNote("nothing was found in this image.");
+    setRegionNote(
+      vlmPromptEl.textContent
+        ? "a prompt came back, but no regions were found to mask."
+        : "nothing was found in this image.",
+    );
     return;
   }
   for (const region of regions) {
@@ -1931,11 +1980,13 @@ async function findObjects() {
   }
   findObjectsBtn.disabled = true;
   regionChips.textContent = "";
+  vlmPromptWrap.hidden = true;
+  vlmPromptEl.textContent = "";
   setRegionNote("looking…");
   const epoch = baseImageEpoch;
 
   try {
-    const resp = await fetch(regionsUrl(), {
+    const resp = await fetch(vlmUrl(), {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify({ image: baseImageB64 }),
@@ -1967,12 +2018,12 @@ async function findObjects() {
             setRegionNote(
               event.worker_attached
                 ? "looking…"
-                : "waiting — no detection worker is attached. Start server/region_worker.py.",
+                : "waiting — no detection worker is attached. Start server/vlm_worker.py.",
               !event.worker_attached,
             );
           } else if (event.type === "error") {
             setRegionNote(event.message, true);
-          } else if (event.type === "regions") {
+          } else if (event.type === "result") {
             // The base image was swapped while this was in flight, so these regions
             // describe something that is no longer on screen. Exact, and it catches a
             // replacement of identical size -- which the dimension check below cannot.
@@ -1994,6 +2045,8 @@ async function findObjects() {
               );
               continue;
             }
+            // Prompt first: showRegions reads it to word the no-regions case.
+            showPrompt(event.prompt || "");
             showRegions(event.regions || []);
           }
         }
@@ -2007,6 +2060,12 @@ async function findObjects() {
 }
 
 findObjectsBtn.addEventListener("click", findObjects);
+document.getElementById("usePromptBtn").addEventListener("click", () => {
+  if (vlmPromptEl.textContent) {
+    promptEl.value = vlmPromptEl.textContent;
+    log("prompt replaced with the one from the image");
+  }
+});
 
 form.addEventListener("submit", async (e) => {
   e.preventDefault();

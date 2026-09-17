@@ -214,8 +214,8 @@ class A1111Txt2ImgRequest(BaseModel):
     model: str | None = None
 
 
-class RegionDetectRequest(BaseModel):
-    """Request body for `POST /mfluxible/v1/regions/detect` -- the harness handing over
+class VlmRequest(BaseModel):
+    """Request body for `POST /mfluxible/v1/vlm/detect` -- the harness handing over
     the image it already has loaded, so a worker can be told where to find it.
 
     Just the image: the server measures its own dimensions (with EXIF orientation
@@ -238,15 +238,19 @@ class Region(BaseModel):
     box: tuple[float, float, float, float]
 
 
-class RegionsResult(BaseModel):
-    """What `server/region_worker.py` posts back for a claimed job.
+class VlmResult(BaseModel):
+    """What `server/vlm_worker.py` posts back for a claimed job.
 
-    Exactly one of `regions` or `error` is meaningful. An error is carried rather
+    Either a result (`prompt` and/or `regions`) or an `error`. An error is carried rather
     than signalled with a status code because the worker failing (no `claude` on
     PATH, a reply that held no JSON) is a normal outcome the harness should show,
     not a transport failure -- and the message is written by the worker for a person
     to read, the same way request_problem's are."""
 
+    # A text-to-image prompt that would plausibly regenerate the image. None when the
+    # tool offered none -- a detector that only draws boxes is still a valid tool, and
+    # the harness needs to tell "no prompt" apart from an empty one.
+    prompt: str | None = None
     regions: list[Region] | None = None
     error: str | None = None
     # What the worker measured. The harness compares this to its own oriented size

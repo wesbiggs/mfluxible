@@ -9,7 +9,7 @@ posts back come out of the harness's open stream.
 The server does no detection of its own. It never loads a model, never holds an
 API key and never makes an outbound call: it writes a file, holds one slot in
 memory and copies a JSON array from one HTTP request to another. Everything that
-spends a Claude account lives in `server/region_worker.py`, deliberately -- see
+spends a Claude account lives in `server/vlm_worker.py`, deliberately -- see
 the note in CLAUDE.md for why that is a client rather than a server feature.
 
 **One slot, not a queue.** MfluxEngine already serializes generations behind a
@@ -19,7 +19,7 @@ than queueing behind it, and the superseded stream is closed with a reason
 instead of being left to time out -- which is what makes double-clicking the
 button harmless.
 
-**The directory is the feature switch.** MFLUXIBLE_REGIONS_DIR unset means the
+**The directory is the feature switch.** MFLUXIBLE_VLM_DIR unset means the
 endpoints 404 and /health reports the feature off, so the harness never draws a
 button that cannot work. It is also the working directory the worker runs
 `claude` in, and that is not a coincidence: a stashed image inside it needs no
@@ -81,7 +81,7 @@ def _suffix_for(fmt: str | None) -> str:
     return {"PNG": ".png", "JPEG": ".jpg", "WEBP": ".webp", "GIF": ".gif"}.get(fmt or "", ".png")
 
 
-class RegionMailbox:
+class VlmMailbox:
     """One pending detection, plus the directory its images are stashed in."""
 
     def __init__(self, directory: Path) -> None:
@@ -206,14 +206,14 @@ class RegionMailbox:
                 log.warning("could not prune a stashed detection image: %s", exc.strerror)
 
 
-def mailbox_from_env() -> RegionMailbox | None:
-    """The mailbox MFLUXIBLE_REGIONS_DIR asks for, or None when it is unset.
+def mailbox_from_env() -> VlmMailbox | None:
+    """The mailbox MFLUXIBLE_VLM_DIR asks for, or None when it is unset.
 
     One variable both enables and configures, rather than a boolean beside a path:
     there is no useful "on but nowhere to put anything" state, and the feature
     spends a Claude account, so it stays off until someone names a directory.
     """
-    raw = os.environ.get("MFLUXIBLE_REGIONS_DIR", "").strip()
+    raw = os.environ.get("MFLUXIBLE_VLM_DIR", "").strip()
     if not raw:
         return None
-    return RegionMailbox(Path(raw).expanduser())
+    return VlmMailbox(Path(raw).expanduser())

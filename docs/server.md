@@ -25,10 +25,10 @@ Environment variables for `server.py`, all optional.
 | `MFLUXIBLE_BASIC_AUTH_PASSWORD` | unset | HTTP Basic password; required alongside the username |
 | `MFLUXIBLE_CORS_ORIGIN_REGEX` | `https?://(localhost\|127\.0\.0\.1)(:\d+)?` | Origins to reflect back in CORS (see [CORS](#cors)) |
 | `MFLUXIBLE_CORS_ORIGINS` | unset | Comma-separated exact-match origins, in addition to the regex |
-| `MFLUXIBLE_REGIONS_DIR` | unset | Enables object detection and says where images are stashed (see [Object detection](#object-detection)) |
-| `MFLUXIBLE_REGIONS_TIMEOUT` | `180` | Seconds a detection waits for a worker's answer before giving up |
-| `MFLUXIBLE_REGIONS_COMMAND` | `claude -p …` | What `region_worker.py` runs per detection (see [Using a different tool](#using-a-different-tool)) |
-| `MFLUXIBLE_REGIONS_MODEL` | `opus` | Which model the **default** command uses; ignored if you set your own command |
+| `MFLUXIBLE_VLM_DIR` | unset | Enables object detection and says where images are stashed (see [Object detection](#object-detection)) |
+| `MFLUXIBLE_VLM_TIMEOUT` | `180` | Seconds a detection waits for a worker's answer before giving up |
+| `MFLUXIBLE_VLM_COMMAND` | `claude -p …` | What `vlm_worker.py` runs per detection (see [Using a different tool](#using-a-different-tool)) |
+| `MFLUXIBLE_VLM_MODEL` | `opus` | Which model the **default** command uses; ignored if you set your own command |
 | `HF_TOKEN` | unset | Not an mfluxible variable — `huggingface_hub` reads it, and gated models need it (see [Gated weights](#gated-weights-and-hf_token)) |
 
 ### Memory
@@ -68,8 +68,8 @@ On by default, reflecting back any `http(s)://localhost:<any port>` or `127.0.0.
 
 ### Object detection
 
-Off unless `MFLUXIBLE_REGIONS_DIR` names a directory. Switched on, the server gains the
-three `/mfluxible/v1/regions/` endpoints ([API](api.md#post-mfluxiblev1regionsdetect))
+Off unless `MFLUXIBLE_VLM_DIR` names a directory. Switched on, the server gains the
+three `/mfluxible/v1/vlm/` endpoints ([API](api.md#post-mfluxiblev1vlmdescribe))
 and the harness grows a **Find objects** button that fills a row of togglable regions.
 Each one is an independent toggle and the mask is the union of whatever is selected, so
 a subject and the thing it is holding can be masked together.
@@ -77,7 +77,7 @@ a subject and the thing it is holding can be masked together.
 **The server does no detection.** It never loads a vision model, never holds an API key
 and never makes an outbound call — it writes a file, holds one job in memory, and copies
 a JSON array from one request to another. The work is done by
-`server/region_worker.py`, which runs alongside (see
+`server/vlm_worker.py`, which runs alongside (see
 [Running the worker](#running-the-worker) below). With nothing running, the feature simply reports no worker attached and the harness says so.
 
 That split is deliberate rather than tidiness: the worker runs an arbitrary configured
@@ -86,9 +86,8 @@ the most dangerous thing here. As a client it cannot be reached from the network
 and starting it is what consent to that command running looks like.
 
 **Which detector runs is the worker's business, not the server's.**
-`MFLUXIBLE_REGIONS_COMMAND` names the whole command line — [Claude Code](https://claude.com/claude-code)
-by default, but any program that prints a JSON array of labelled boxes to stdout will
-do, including a local detector or a script of your own. It is set on the worker rather
+`MFLUXIBLE_VLM_COMMAND` names the whole command line — [Claude Code](https://claude.com/claude-code)
+by default, but any program that prints the agreed JSON object to stdout will do, including a local detector or a script of your own. It is set on the worker rather
 than read by the server; see [Using a different tool](#using-a-different-tool).
 
 One variable both enables and configures because there is no useful "on, but nowhere to
@@ -102,7 +101,7 @@ Stashed images are pruned after an hour, on the next detection.
 
 #### Running the worker
 
-`server/region_worker.py` is what makes the harness's **Find objects** button work. The
+`server/vlm_worker.py` is what makes the harness's **Find objects** button work. The
 harness can see an image and drive the GPU but has no vision model; this process
 supplies one. It long-polls the server for a pending detection, runs a command against
 the stashed image, and posts the regions back for the harness's open stream to deliver.
@@ -111,7 +110,7 @@ By default that command is [Claude Code](https://claude.com/claude-code) — the
 `PATH` and already signed in — but nothing here is specific to it; see
 [Using a different tool](#using-a-different-tool).
 
-The worker is a **separate process you start yourself** — `MFLUXIBLE_REGIONS_DIR` on the
+The worker is a **separate process you start yourself** — `MFLUXIBLE_VLM_DIR` on the
 server opens the mailbox, it does not launch anything. Until the worker is running,
 `/health` reports `regions.worker_attached: false` and the harness's **Find objects**
 button says nothing is listening.
@@ -120,13 +119,13 @@ It takes no configuration of its own — every job names the file to read, so th
 directory to keep in step:
 
 ```bash
-uv run server/region_worker.py
+uv run server/vlm_worker.py
 ```
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `MFLUXIBLE_REGIONS_COMMAND` | `claude -p {prompt} --allowedTools Read --model $MFLUXIBLE_REGIONS_MODEL` | The command to run per detection |
-| `MFLUXIBLE_REGIONS_MODEL` | `opus` | Which model the **default** command uses; ignored if you set your own command |
+| `MFLUXIBLE_VLM_COMMAND` | `claude -p {prompt} --allowedTools Read --model $MFLUXIBLE_VLM_MODEL` | The command to run per detection |
+| `MFLUXIBLE_VLM_MODEL` | `opus` | Which model the **default** command uses; ignored if you set your own command |
 | `MFLUXIBLE_BEARER_TOKEN` | unset | Sent as `Authorization: Bearer …`, if a proxy gates the API |
 
 `--url` points at the server's base URL (default `http://127.0.0.1:8420`). As with the
@@ -135,17 +134,30 @@ is refused rather than resolved.
 
 #### Using a different tool
 
-What the worker actually requires is narrow: **a program that prints a JSON array of
-labelled boxes to stdout.** Anything that can do that from an image path works — another
-model's CLI, a local detector, a script of your own.
+What the worker actually requires is narrow: **a program that prints one JSON object to
+stdout.** Anything that can do that from an image path works — another model's CLI, a
+local detector, a script of your own.
 
 ```json
-[{"label": "red apple", "box": [0.305, 0.344, 0.712, 0.736]}]
+{
+  "prompt": "a single red apple on a weathered oak table, soft window light, shallow depth of field",
+  "regions": [{"label": "red apple", "box": [0.305, 0.344, 0.712, 0.736]}]
+}
 ```
 
-`box` is `[x0, y0, x1, y1]` as fractions of the frame, `0,0` at the top-left. Extra prose
-around the array is fine (a fenced code block is read too); entries with a malformed or
-out-of-range box are dropped rather than repaired, and at most 8 are kept.
+`prompt` is a text-to-image prompt that would plausibly regenerate the image — the whole
+frame, written as a prompt rather than as a caption about a picture. `regions` lists what
+could be masked, with `box` as `[x0, y0, x1, y1]` in fractions of the frame, `0,0` at the
+top-left.
+
+Both halves are optional and independent: a captioner that localizes nothing still fills
+the prompt box, and a detector that only draws boxes still fills the chips. A **bare
+array** is also accepted and read as regions with no prompt, so a tool written against
+the earlier array-only contract keeps working.
+
+Extra prose around the JSON is fine and a fenced code block is read too. Regions with a
+malformed or out-of-range box are dropped rather than repaired, at most 8 are kept, and
+the prompt is capped at 2000 characters.
 
 The command is a template with two placeholders:
 
@@ -156,13 +168,13 @@ The command is a template with two placeholders:
 
 ```bash
 # a local detector that already speaks the format
-MFLUXIBLE_REGIONS_COMMAND='detect-objects --format json {image}'
+MFLUXIBLE_VLM_COMMAND='detect-objects --format json {image}'
 
 # a prompt-driven CLI that takes the image as an attachment
-MFLUXIBLE_REGIONS_COMMAND='llm -m some-vision-model -a {image} {prompt}'
+MFLUXIBLE_VLM_COMMAND='llm -m some-vision-model -a {image} {prompt}'
 
 # your own wrapper, for a tool whose coordinates need converting
-MFLUXIBLE_REGIONS_COMMAND='python3 ~/bin/boxes_to_fractions.py {image}'
+MFLUXIBLE_VLM_COMMAND='python3 ~/bin/boxes_to_fractions.py {image}'
 ```
 
 That last one is the common case, and it is deliberate that it needs a wrapper: tools

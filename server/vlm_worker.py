@@ -8,8 +8,8 @@ stream to deliver.
 
 The command is `claude -p` by default and is one env var away from being anything else
 -- another model's CLI, a local detector, a script of your own. What this worker
-actually depends on is narrow: a program that prints a JSON array of labelled boxes to
-stdout. See MFLUXIBLE_REGIONS_COMMAND below.
+actually depends on is narrow: a program that prints a JSON object carrying a prompt and
+labelled boxes to stdout. See MFLUXIBLE_VLM_COMMAND below.
 
 **A sidecar, not a client, and not part of the server process either.** It doesn't
 consume the API the way everything in `clients/` does -- it supplies a capability the
@@ -35,9 +35,9 @@ inside the request path, which is the whole thing this placement avoids.
 
 Run it alongside the server, with no configuration of its own:
 
-    uv run server/region_worker.py
+    uv run server/vlm_worker.py
 
-**It takes no MFLUXIBLE_REGIONS_DIR.** The server's copy of that setting is the only
+**It takes no MFLUXIBLE_VLM_DIR.** The server's copy of that setting is the only
 one: every job names the file it wants read, so the worker never invents a path and has
 nothing to keep in step. It runs the detection command in that file's own directory,
 which matters twice for the default -- an image inside the cwd needs no --add-dir to be
@@ -63,7 +63,7 @@ import requests
 # indefinitely. See CLAUDE.md for why the name is prefixed and why it says BEARER.
 TOKEN = os.environ.get("MFLUXIBLE_BEARER_TOKEN", "")
 
-# Which model the *default* command uses. Ignored once MFLUXIBLE_REGIONS_COMMAND is
+# Which model the *default* command uses. Ignored once MFLUXIBLE_VLM_COMMAND is
 # set, since that names the whole command line.
 #
 # Opus, and the usual latency-for-quality trade turns out not to apply -- measured on
@@ -79,7 +79,7 @@ TOKEN = os.environ.get("MFLUXIBLE_BEARER_TOKEN", "")
 # two-decimal numbers that signal estimating on a grid. Sonnet had also produced a good
 # box on an earlier run of the same image, so the problem is variance rather than a
 # constant offset -- which is worse for this, since a client can't tell the two apart.
-MODEL = os.environ.get("MFLUXIBLE_REGIONS_MODEL", "opus")
+MODEL = os.environ.get("MFLUXIBLE_VLM_MODEL", "opus")
 
 # What actually gets run. Claude Code is the default because it needs no extra install
 # on a machine that already has it, but nothing here is specific to it: this worker
@@ -104,7 +104,7 @@ MODEL = os.environ.get("MFLUXIBLE_REGIONS_MODEL", "opus")
 # conversion setting here -- one reader, in one place, is what keeps a bad box a
 # visible bad box instead of a silently rescaled one.
 DEFAULT_COMMAND = f"claude -p {{prompt}} --allowedTools Read --model {MODEL}"
-COMMAND = os.environ.get("MFLUXIBLE_REGIONS_COMMAND", "").strip() or DEFAULT_COMMAND
+COMMAND = os.environ.get("MFLUXIBLE_VLM_COMMAND", "").strip() or DEFAULT_COMMAND
 
 # Long-polls hang for ~25s server-side; this has to outlast that or every poll looks
 # like a timeout to requests.
@@ -115,19 +115,17 @@ HTTP_TIMEOUT = 60
 # server's own wait is 180s, so failing first leaves room to report why.
 DETECT_TIMEOUT = 150
 
-PROMPT = """Read the image at {path} and list the distinct objects a person might \
-want to replace using an inpainting model.
+PROMPT = """Read the image at {path} and reply with ONLY a JSON object of this shape:
 
-Reply with ONLY a JSON array of objects, each {{"label": string, "box": [x0, y0, x1, y1]}}.
-Coordinates are fractions of the frame from 0 to 1, with 0,0 at the TOP-LEFT: x0/x1 are \
-the left and right edges, y0/y1 the top and bottom.
+{{"prompt": string, "regions": [{{"label": string, "box": [x0, y0, x1, y1]}}]}}
 
-Measure each box against the object's actual extent. Do not round to a coarse grid, and \
-do not box the semantic region an object sits in -- box the object itself, tightly. A box \
-centred on the wrong thing, or half again too large, is the failure to avoid. Prefer \
-whole objects someone might swap out over parts of them, most prominent first, at most 8.
+"prompt" is a text-to-image prompt that would plausibly regenerate this picture. Describe the whole frame the way a prompt is written -- subject, pose, composition, setting, lighting, colour, style and medium -- not the way a caption describes a photograph. Do not open with "an image of" or "a picture showing". One paragraph, no line breaks.
 
-Example: [{{"label": "red apple", "box": [0.31, 0.37, 0.68, 0.72]}}]
+"regions" lists the distinct objects a person might want to replace using an inpainting model. Coordinates are fractions of the frame from 0 to 1, with 0,0 at the TOP-LEFT: x0/x1 are the left and right edges, y0/y1 the top and bottom.
+
+Measure each box against the object's actual extent. Do not round to a coarse grid, and do not box the semantic region an object sits in -- box the object itself, tightly. A box centred on the wrong thing, or half again too large, is the failure to avoid. Prefer whole objects someone might swap out over parts of them, most prominent first, at most 8.
+
+Example: {{"prompt": "a single red apple resting on a weathered oak table, soft window light from the left, shallow depth of field, photographic", "regions": [{{"label": "red apple", "box": [0.31, 0.37, 0.68, 0.72]}}]}}
 """
 
 
@@ -156,22 +154,54 @@ def _headers() -> dict:
     return {"Authorization": f"Bearer {TOKEN}"} if TOKEN else {}
 
 
-def _extract_json_array(text: str) -> list | None:
-    """The array out of a reply, read the way an eye would. Returns None if there
+def _extract_json(text: str) -> dict | list | None:
+    """The JSON value out of a reply, read the way an eye would. Returns None if there
     isn't one -- the caller turns that into a message for the harness rather than a
-    traceback, since a model answering in prose is an ordinary outcome, not a crash."""
+    traceback, since a model answering in prose is an ordinary outcome, not a crash.
+
+    An object `{prompt, regions}` is the shape asked for; a bare array is accepted as
+    regions with no prompt, because that was this contract's earlier shape and a wrapper
+    written against it should keep working rather than start returning nothing.
+    """
     fence = re.search(r"```(?:json)?\s*(.+?)```", text, re.S)
     for candidate in ([fence.group(1)] if fence else []) + [text]:
-        start, end = candidate.find("["), candidate.rfind("]")
-        if start == -1 or end <= start:
-            continue
-        try:
-            parsed = json.loads(candidate[start : end + 1])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, list):
-            return parsed
+        # Whichever bracket opens *first* is the outer container, and only its matching
+        # closer can end it. Trying "{...}" before "[...]" unconditionally would read an
+        # array of objects as its own first element -- the last "}" sits inside the array,
+        # so the slice parses cleanly and silently returns one region instead of all of
+        # them. Picking by position is what makes the two shapes unambiguous.
+        openers = [(candidate.find(o), o, c) for o, c in (("{", "}"), ("[", "]"))]
+        openers = sorted((pos, o, c) for pos, o, c in openers if pos != -1)
+        for start, _opener, closer in openers:
+            end = candidate.rfind(closer)
+            if end <= start:
+                continue
+            try:
+                parsed = json.loads(candidate[start : end + 1])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, (dict, list)):
+                return parsed
     return None
+
+
+def _clean_payload(parsed: dict | list) -> dict:
+    """The reply reduced to what the server accepts: a prompt and a list of regions.
+
+    A bare array means regions only. A missing or blank prompt stays None rather than
+    becoming "": the harness distinguishes "no prompt offered" from "an empty one".
+    """
+    if isinstance(parsed, list):
+        return {"prompt": None, "regions": _clean(parsed)}
+    raw_prompt = parsed.get("prompt")
+    prompt = raw_prompt.strip() if isinstance(raw_prompt, str) else ""
+    regions = parsed.get("regions")
+    return {
+        # Capped for the same reason a label is: this lands in a textarea and in a
+        # JSON body, and nothing useful is lost past a couple of thousand characters.
+        "prompt": prompt[:2000] or None,
+        "regions": _clean(regions if isinstance(regions, list) else []),
+    }
 
 
 def _clean(parsed: list) -> list[dict]:
@@ -219,7 +249,7 @@ def detect(image_path: str) -> dict:
             cmd, cwd=workdir, capture_output=True, text=True, timeout=DETECT_TIMEOUT
         )
     except FileNotFoundError:
-        return {"error": f"{cmd[0]} is not on PATH -- check MFLUXIBLE_REGIONS_COMMAND."}
+        return {"error": f"{cmd[0]} is not on PATH -- check MFLUXIBLE_VLM_COMMAND."}
     except OSError as exc:
         # A template naming something unrunnable (a directory, a file without +x).
         return {"error": f"could not run {cmd[0]}: {exc.strerror}."}
@@ -234,14 +264,14 @@ def detect(image_path: str) -> dict:
         tail = detail[-1][:200] if detail else f"exit code {proc.returncode}"
         return {"error": f"{cmd[0]} failed: {tail}"}
 
-    parsed = _extract_json_array(proc.stdout or "")
+    parsed = _extract_json(proc.stdout or "")
     if parsed is None:
-        return {"error": "the reply held no JSON array of regions."}
-    return {"regions": _clean(parsed)}
+        return {"error": "the reply held no JSON object."}
+    return _clean_payload(parsed)
 
 
 def run(base: str) -> None:
-    next_url = f"{base}/mfluxible/v1/regions/next"
+    next_url = f"{base}/mfluxible/v1/vlm/next"
     session = requests.Session()
     idle_note = True
 
@@ -258,7 +288,7 @@ def run(base: str) -> None:
         if resp.status_code == 404:
             sys.exit(
                 "the server has object detection switched off -- restart it with "
-                "MFLUXIBLE_REGIONS_DIR set to a directory it can write to."
+                "MFLUXIBLE_VLM_DIR set to a directory it can write to."
             )
         if resp.status_code == 401:
             sys.exit("the server rejected the credentials (set MFLUXIBLE_BEARER_TOKEN).")
@@ -281,14 +311,15 @@ def run(base: str) -> None:
 
         found = len(body.get("regions") or [])
         took = time.monotonic() - started
-        print(
-            f"  {body['error'] if body.get('error') else f'{found} regions'} in {took:.1f}s",
-            file=sys.stderr,
-        )
+        if body.get("error"):
+            summary = body["error"]
+        else:
+            summary = f"{found} regions" + (", prompt" if body.get("prompt") else ", no prompt")
+        print(f"  {summary} in {took:.1f}s", file=sys.stderr)
 
         try:
             session.post(
-                f"{base}/mfluxible/v1/regions/{job['job_id']}",
+                f"{base}/mfluxible/v1/vlm/{job['job_id']}",
                 json=body,
                 headers=_headers(),
                 timeout=HTTP_TIMEOUT,
@@ -299,7 +330,7 @@ def run(base: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Answer mfluxible's object-detection jobs by running MFLUXIBLE_REGIONS_COMMAND."
+        description="Answer mfluxible's object-detection jobs by running MFLUXIBLE_VLM_COMMAND."
     )
     parser.add_argument("--url", default="http://127.0.0.1:8420", help="mfluxible's base URL")
     args = parser.parse_args()

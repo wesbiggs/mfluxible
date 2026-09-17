@@ -2,7 +2,7 @@
 
 ## Layout
 
-`server/` (server.py, engine.py, models.py, schemas.py, chat_stub.py, schedulers.py, auth.py, regions.py, region_worker.py, requirements.txt) is the model + HTTP API. `clients/` (stream_client.py, stream_client.js, harness.html, mcp_server.py, requirements.txt, requirements-mcp.txt) is everything that *consumes* it over HTTP -- note that word, because `region_worker.py` also talks to the API over HTTP and is deliberately not there. It is a **sidecar**: it supplies a capability the server advertises rather than consuming one, must sit on the same machine (it reads the stash directory off disk), takes its directory from the server's own configuration, and is what `/health`'s `worker_attached` reports on. Its settings are documented in `docs/server.md` with the server's for the same reason. **Nothing in `server/` imports it and nothing should** -- these modules resolve each other as flat siblings, so it is importable from inside the server process purely by living in this directory, which is an accident of layout rather than an interface; an import would put an arbitrary subprocess back inside the request path. They're independent dependency-wise -- installing one's requirements.txt doesn't pull in the other's. server.py/engine.py/models.py/schemas.py/chat_stub.py/auth.py import each other as flat sibling modules (`from engine import ...`), not a package, so `server/` must stay on `sys.path` when running (e.g. `uv run uvicorn server:app --app-dir server`) -- don't add an `__init__.py` or turn this into a `server.*` package without updating those imports and the run command together.
+`server/` (server.py, engine.py, models.py, schemas.py, chat_stub.py, schedulers.py, auth.py, vlm.py, vlm_worker.py, requirements.txt) is the model + HTTP API. `clients/` (stream_client.py, stream_client.js, harness.html, mcp_server.py, requirements.txt, requirements-mcp.txt) is everything that *consumes* it over HTTP -- note that word, because `vlm_worker.py` also talks to the API over HTTP and is deliberately not there. It is a **sidecar**: it supplies a capability the server advertises rather than consuming one, must sit on the same machine (it reads the stash directory off disk), takes its directory from the server's own configuration, and is what `/health`'s `worker_attached` reports on. Its settings are documented in `docs/server.md` with the server's for the same reason. **Nothing in `server/` imports it and nothing should** -- these modules resolve each other as flat siblings, so it is importable from inside the server process purely by living in this directory, which is an accident of layout rather than an interface; an import would put an arbitrary subprocess back inside the request path. They're independent dependency-wise -- installing one's requirements.txt doesn't pull in the other's. server.py/engine.py/models.py/schemas.py/chat_stub.py/auth.py import each other as flat sibling modules (`from engine import ...`), not a package, so `server/` must stay on `sys.path` when running (e.g. `uv run uvicorn server:app --app-dir server`) -- don't add an `__init__.py` or turn this into a `server.*` package without updating those imports and the run command together.
 
 ## uv, but with requirements.txt files -- deliberately not a uv project
 
@@ -503,11 +503,11 @@ All of the above is one version's behavior and will move; the endpoint is writte
 against what 1.18.0 actually sends, and re-reading those two files is the way to check
 it rather than inferring from a failing generation.
 
-## Object detection is a mailbox, and the thing that spends money is a client
+## The VLM mailbox, and why the thing that spends money is a sidecar
 
-`server/regions.py` holds one pending job and copies a JSON array between two HTTP
+`server/vlm.py` holds one pending job and copies a JSON array between two HTTP
 requests. It loads no model, holds no key and makes no outbound call -- the harness
-POSTs an image and waits on an SSE stream, `server/region_worker.py` claims the job,
+POSTs an image and waits on an SSE stream, `server/vlm_worker.py` claims the job,
 shells out to `claude -p`, and posts regions back.
 
 **The worker is a separate process because of what it does, not to keep `server/`
@@ -530,9 +530,9 @@ did have a consequence, which was keeping its settings out of `docs/server.md` u
 client/server documentation split. They belong there, which is where they now are.
 
 **Which is also why the CLI is a template rather than a hardcoded call.** The worker's
-real dependency is narrow -- a program that prints a JSON array of labelled boxes to
-stdout -- so `MFLUXIBLE_REGIONS_COMMAND` names the whole command line and `claude -p`
-is only its default. That keeps this repo from pinning a fast-moving external at the one
+real dependency is narrow -- a program that prints a JSON object of a prompt and
+labelled boxes to stdout -- so `MFLUXIBLE_VLM_COMMAND` names the whole command line and
+`claude -p` is only its default. That keeps this repo from pinning a fast-moving external at the one
 layer where it does not have to, and opens the local detectors (faster, and free) with
 no change here.
 
@@ -568,7 +568,7 @@ the re-encode above is why that key cannot be the image's bytes.
 
 Two guards replace it, for two different failures. Dimensions catch the server and the
 browser disagreeing about one image's *oriented* size -- both sides apply EXIF
-orientation (`regions.py` imports engine.py's `_oriented` rather than copying it, since
+orientation (`vlm.py` imports engine.py's `_oriented` rather than copying it, since
 mflux rotates before encoding and a box chosen in one frame applied in another is
 transposed), so a phone photo lines up without either side converting. And
 `baseImageEpoch` in harness.html catches the likelier case: the displayed image being
@@ -585,7 +585,7 @@ what harness.html parses to recover a prompt and seed, so writing there would co
 with the feature one section up. The identity that actually needs tracking never leaves
 the page, which is why the counter lives there.
 
-**`MFLUXIBLE_REGIONS_DIR` is one variable doing two jobs on purpose.** It enables the
+**`MFLUXIBLE_VLM_DIR` is one variable doing two jobs on purpose.** It enables the
 feature and it is where images are stashed -- there is no useful "on but nowhere to put
 anything" state. It is *also* the working directory the worker runs `claude` in, which
 buys two things at once: a stashed image inside the cwd is readable without widening the
@@ -603,6 +603,29 @@ two-decimal numbers that signal estimating on a grid. Sonnet had produced a good
 an earlier run of the same image, so it is variance rather than a constant offset --
 which is the worse failure, since nothing downstream can tell the two apart. Hence a
 chip selection sets the mask and opens the editor rather than being treated as final.
+
+**The reply carries a prompt as well as regions, which is why the names say `VLM`
+rather than `REGIONS`.** A tool that can write a prompt able to regenerate the frame is
+language-capable by definition, so the earlier name had stopped describing the feature.
+`prompt` and `regions` are independently optional: a captioner that localizes nothing
+still fills the prompt box, and a detector that only draws boxes still fills the chips.
+
+Two things fall out of accepting two shapes. A **bare array** is still read as
+regions-with-no-prompt, because that was this contract's earlier shape and a wrapper
+written against it should keep working rather than start returning nothing. And
+`_extract_json` picks its container by **which bracket opens first**, not by trying
+`{...}` before `[...]`: an array of objects ends with a `}` inside the array, so the
+naive order slices from the first element to that brace, parses cleanly, and silently
+returns one region where the reply listed several. Caught by a test rather than in the
+wild, and pinned by `test_an_array_of_objects_is_not_mistaken_for_one_object`.
+
+**The harness fills its prompt box only when it is untouched, and "untouched" cannot
+mean "empty".** The box ships with example text, so an empty-only rule would never fire
+and the feature would look broken. `SHIPPED_PROMPT` is read out of the textarea once at
+load -- before anything can edit it, and without a second copy of the literal in the
+script -- and the box is filled when the field is blank *or* still holds that value.
+Anything else is authored text and is left alone; "Use as prompt" is always there for
+the case where it should be replaced anyway.
 
 **The chips are independent toggles and the mask is their union, which makes the
 selection the mask's definition rather than a one-shot action.** Each toggle repaints

@@ -31,7 +31,7 @@ Returns:
     "supports_fractional_start": true,
     "supports_mask": true
   },
-  "regions": {"enabled": false, "worker_attached": false},
+  "vlm": {"enabled": false, "worker_attached": false},
   "memory": {"active_bytes": 10307921920, "cache_bytes": 1073741824, "peak_bytes": 12884901888}
 }
 ```
@@ -42,7 +42,7 @@ Returns:
 
 Treat any of those `supports_*` keys being **absent** as "unknown, let the server decide" rather than as `false` — that is what a server predating the key means, and it is how the bundled harness and MCP tool read them. Note also that `supports_negative_prompt` is necessary but not sufficient: a negative prompt also needs classifier-free guidance switched on, so on a model whose `default_guidance` is `1.0` (Krea-2) sending one without raising `guidance` is still a 400. See [Models](server.md#models).
 
-`regions` describes the object-detection mailbox (see [`POST /mfluxible/v1/regions/detect`](#post-mfluxiblev1regionsdetect)). `enabled` is whether `MFLUXIBLE_REGIONS_DIR` was set; `worker_attached` is whether a detection worker has long-polled recently. The harness draws its **Find objects** button off `enabled` and warns off `worker_attached`, so a server without the feature shows no control that could only fail. Absent means the same as `enabled: false` here — unlike the `supports_*` keys above, the safe reading for a missing block is off, since offering the button to a server that would 404 is worse than not offering it.
+`vlm` describes the VLM mailbox (see [`POST /mfluxible/v1/vlm/describe`](#post-mfluxiblev1vlmdescribe)). `enabled` is whether `MFLUXIBLE_VLM_DIR` was set; `worker_attached` is whether a detection worker has long-polled recently. The harness draws its **Find objects** button off `enabled` and warns off `worker_attached`, so a server without the feature shows no control that could only fail. Absent means the same as `enabled: false` here — unlike the `supports_*` keys above, the safe reading for a missing block is off, since offering the button to a server that would 404 is worse than not offering it.
 
 `memory` reports MLX's own byte counters for the server process. `active_bytes` is memory backing live arrays — near zero until the first generation, since weights are quantized lazily and only materialize when something first forces evaluation. `cache_bytes` is buffers MLX has freed but retains for reuse: reclaimable, but it counts toward the process's memory footprint just the same, so on a memory-tight machine it is worth watching between generations. `peak_bytes` is the high-water mark of active memory. All three are plain counters, so polling `/health` mid-generation is cheap and does not disturb the run.
 
@@ -174,14 +174,14 @@ Which models accept a mask is the same question as [`fractional_start`](#fractio
 
 The mask is read as **luminance**, and any alpha channel is ignored. This is worth knowing because OpenAI's `/v1/images/edits` uses the opposite convention — transparency marks the editable region — so a mask drawn for that API would inpaint the complement of what you meant here. That endpoint therefore still rejects `mask` outright rather than reading it with the wrong convention; see [`POST /v1/images/edits`](#post-v1imagesedits).
 
-## `POST /mfluxible/v1/regions/detect`
+## `POST /mfluxible/v1/vlm/describe`
 
 Hands the server an image and streams back a list of the objects in it, each with a
-rectangle. **404 unless `MFLUXIBLE_REGIONS_DIR` is set** — check `regions.enabled` on
+rectangle. **404 unless `MFLUXIBLE_VLM_DIR` is set** — check `regions.enabled` on
 [`/health`](#get-health) first.
 
 The server does no detection of its own: it stashes the image, holds the request open,
-and waits for `server/region_worker.py` to claim the job and post regions back (see
+and waits for `server/vlm_worker.py` to claim the job and post regions back (see
 [Object detection](server.md#object-detection)). Nothing here loads a model, holds an
 API key or makes an outbound call.
 
@@ -195,7 +195,7 @@ A bad body is a 400 before the stream starts, the same as a generation. The resp
 ```
 data: {"type": "pending", "job_id": "75d3…", "width": 768, "height": 768, "worker_attached": true}
 
-data: {"type": "regions", "regions": [{"label": "red apple", "box": [0.305, 0.344, 0.712, 0.736]}], "width": 768, "height": 768}
+data: {"type": "result", "prompt": "a single red apple on oak, soft window light", "regions": [{"label": "red apple", "box": [0.305, 0.344, 0.712, 0.736]}], "width": 768, "height": 768}
 ```
 
 `pending` arrives immediately, so a client can render a waiting state with the real
@@ -203,7 +203,7 @@ dimensions and say up front whether anything is listening. Then exactly one of:
 
 | Event | Meaning |
 | --- | --- |
-| `regions` | The detection finished. `regions` may be empty. |
+| `result` | The tool answered. `prompt` is a text-to-image prompt for the whole frame, `regions` is what could be masked; **either may be absent or empty**, so check both. |
 | `error` | `message` says why — no worker claimed the job, the worker failed, or a newer detection superseded this one. |
 
 `box` is `[x0, y0, x1, y1]` as **fractions of the frame**, `0,0` at the top-left — the
@@ -231,7 +231,7 @@ behind it, and the superseded stream is closed with an `error` naming the reason
 is what makes double-clicking harmless. This mirrors the single in-flight generation the
 engine already enforces.
 
-## `GET /mfluxible/v1/regions/next`
+## `GET /mfluxible/v1/vlm/next`
 
 The worker's long-poll. Returns the pending job, or **204** if none arrives within about
 25 seconds. 404 when the feature is off.
@@ -242,12 +242,12 @@ The worker's long-poll. Returns the pending job, or **204** if none arrives with
 
 This is the one endpoint that deliberately returns a filesystem path, because reading
 that file is the worker's entire job. It names only a file the server itself wrote
-inside `MFLUXIBLE_REGIONS_DIR`, and the route is gated — it is not in
+inside `MFLUXIBLE_VLM_DIR`, and the route is gated — it is not in
 `Caddyfile.example`'s `@public` matcher, which `tests/test_proxy_config.py` keeps true.
 
 Calling this is also what marks a worker as attached for `/health`.
 
-## `POST /mfluxible/v1/regions/{job_id}`
+## `POST /mfluxible/v1/vlm/{job_id}`
 
 The worker's answer. 404 when the feature is off.
 

@@ -21,15 +21,15 @@ import chat_stub
 from auth import BasicAuthMiddleware, credentials_from_env, resolve_bind_host, startup_warning
 from engine import MfluxEngine
 from models import CFG_GUIDANCE_FLOOR, MODELS
-from regions import mailbox_from_env
 from schemas import (
     A1111Txt2ImgRequest,
     ChatCompletionRequest,
     GenerateRequest,
     OpenAIImageGenerationRequest,
-    RegionDetectRequest,
-    RegionsResult,
+    VlmRequest,
+    VlmResult,
 )
+from vlm import mailbox_from_env
 
 # Nothing configures logging here, so this lands on stderr via logging.lastResort --
 # the terminal running uvicorn -- the same way engine.py's does.
@@ -58,7 +58,7 @@ else:
 # the middleware reads it back through a callable so the tests can swap it.
 BASIC_AUTH = credentials_from_env()
 
-# None unless MFLUXIBLE_REGIONS_DIR names a directory -- see regions.py for why one
+# None unless MFLUXIBLE_VLM_DIR names a directory -- see vlm.py for why one
 # variable both enables and configures. Off by default because a detection spends the
 # Claude account of whoever runs the worker.
 MAILBOX = mailbox_from_env()
@@ -66,12 +66,12 @@ MAILBOX = mailbox_from_env()
 # How long the harness's stream waits for a worker's answer. Generous: a cold
 # `claude -p` start plus the model's own thinking measured ~11s against a 768x768
 # image, but the worker is a subprocess on a machine that may also be mid-generation.
-REGIONS_TIMEOUT_S = float(os.environ.get("MFLUXIBLE_REGIONS_TIMEOUT", "180"))
+VLM_TIMEOUT_S = float(os.environ.get("MFLUXIBLE_VLM_TIMEOUT", "180"))
 
 # How long a worker's long-poll hangs before returning empty. Short enough that
 # stopping the worker doesn't leave a request pinned for minutes, long enough that
 # the loop isn't really polling.
-REGIONS_POLL_S = 25.0
+VLM_POLL_S = 25.0
 
 # An unknown MFLUXIBLE_MODEL raises here, at import, listing the valid names -- before
 # lifespan starts a multi-gigabyte download for something that was never going to run.
@@ -93,7 +93,7 @@ async def lifespan(app: FastAPI):
     warning = startup_warning(resolve_bind_host(), BASIC_AUTH is not None)
     if warning is not None:
         log.warning(warning)
-    # Before the weights too: a bad MFLUXIBLE_REGIONS_DIR should fail now rather than
+    # Before the weights too: a bad MFLUXIBLE_VLM_DIR should fail now rather than
     # after a multi-gigabyte download, for the same reason the warning above is here.
     if MAILBOX is not None:
         MAILBOX.prepare()
@@ -181,13 +181,13 @@ async def health():
             # means replacing the variant's scheduler (see ModelSpec.supports_mask).
             "supports_mask": spec.supports_mask,
         },
-        # Whether the object-detection mailbox is configured, and whether anything is
-        # currently listening on it. The harness draws its "Find objects" button off
-        # `enabled` and warns off `worker_attached`, so an unconfigured server shows no
-        # control that could only fail -- the same "ask before you offer it" rule the
-        # model block above exists for. No path here: the directory is the server's
-        # business, and /health is the one endpoint the bundled Caddyfile leaves open.
-        "regions": {
+        # Whether the VLM mailbox is configured, and whether anything is currently
+        # listening on it. The harness draws its "Find objects" button off `enabled` and
+        # warns off `worker_attached`, so an unconfigured server shows no control that
+        # could only fail -- the same "ask before you offer it" rule the model block
+        # above exists for. No path here: the directory is the server's business, and
+        # /health is the one endpoint the bundled Caddyfile leaves open.
+        "vlm": {
             "enabled": MAILBOX is not None,
             "worker_attached": MAILBOX is not None and MAILBOX.worker_attached(),
         },
@@ -247,16 +247,16 @@ async def generate(req: GenerateRequest):
 # ---------------------------------------------------------------------------
 #
 # Three endpoints, two clients: the harness submits an image and holds a stream,
-# server/region_worker.py claims the job and posts regions back. The server does no
-# detection -- see regions.py's docstring for why that stays out of here.
+# server/vlm_worker.py claims the job and posts regions back. The server does no
+# detection -- see vlm.py's docstring for why that stays out of here.
 
-_REGIONS_OFF = {"type": "error", "message": "object detection is not enabled on this server."}
+_VLM_OFF = {"type": "error", "message": "object detection is not enabled on this server."}
 
 
-def _regions_disabled() -> JSONResponse:
-    # 404 rather than 501: with MFLUXIBLE_REGIONS_DIR unset these routes are not a
+def _vlm_disabled() -> JSONResponse:
+    # 404 rather than 501: with MFLUXIBLE_VLM_DIR unset these routes are not a
     # feature this server has, and /health already says so before anything calls them.
-    return JSONResponse(status_code=404, content=_REGIONS_OFF)
+    return JSONResponse(status_code=404, content=_VLM_OFF)
 
 
 def _decoded_image(b64_data: str) -> bytes | None:
@@ -269,7 +269,7 @@ def _decoded_image(b64_data: str) -> bytes | None:
         return None
 
 
-async def _regions_sse(job):
+async def _vlm_sse(job):
     # Sent before anything blocks, so the harness can render "waiting" with the real
     # dimensions and say up front whether a worker is even listening.
     yield "data: " + json.dumps({
@@ -280,12 +280,16 @@ async def _regions_sse(job):
         "worker_attached": MAILBOX.worker_attached(),
     }) + "\n\n"
 
-    result = await MAILBOX.wait(job, REGIONS_TIMEOUT_S)
+    result = await MAILBOX.wait(job, VLM_TIMEOUT_S)
     if result.get("error"):
         yield "data: " + json.dumps({"type": "error", "message": result["error"]}) + "\n\n"
         return
+    # One event carrying everything the tool said. Named `result` rather than `regions`
+    # because it no longer only carries those: `prompt` is a text-to-image prompt for
+    # the whole frame, and a tool may return either half on its own.
     yield "data: " + json.dumps({
-        "type": "regions",
+        "type": "result",
+        "prompt": result.get("prompt"),
         "regions": result.get("regions") or [],
         # What the worker measured, for the harness to compare against its own oriented
         # size -- the guard against regions arriving for a different image.
@@ -294,10 +298,10 @@ async def _regions_sse(job):
     }) + "\n\n"
 
 
-@app.post("/mfluxible/v1/regions/detect")
-async def regions_detect(req: RegionDetectRequest):
+@app.post("/mfluxible/v1/vlm/describe")
+async def vlm_describe(req: VlmRequest):
     if MAILBOX is None:
-        return _regions_disabled()
+        return _vlm_disabled()
 
     raw = _decoded_image(req.image)
     if raw is None:
@@ -311,11 +315,11 @@ async def regions_detect(req: RegionDetectRequest):
     # Same shape as a generation: validate fully, *then* start the stream, so a bad
     # request is a 400 rather than a 200 with an error torn into the body.
     job = MAILBOX.submit(raw)
-    return StreamingResponse(_regions_sse(job), media_type="text/event-stream")
+    return StreamingResponse(_vlm_sse(job), media_type="text/event-stream")
 
 
-@app.get("/mfluxible/v1/regions/next")
-async def regions_next():
+@app.get("/mfluxible/v1/vlm/next")
+async def vlm_next():
     """A worker's long-poll. Returns the pending job, or 204 when none arrives.
 
     This is the one endpoint here that deliberately returns a filesystem path, which
@@ -328,9 +332,9 @@ async def regions_next():
     matcher, which tests/test_proxy_config.py exists to keep true.
     """
     if MAILBOX is None:
-        return _regions_disabled()
+        return _vlm_disabled()
 
-    job = await MAILBOX.claim(REGIONS_POLL_S)
+    job = await MAILBOX.claim(VLM_POLL_S)
     if job is None:
         return Response(status_code=204)
     return {
@@ -341,10 +345,10 @@ async def regions_next():
     }
 
 
-@app.post("/mfluxible/v1/regions/{job_id}")
-async def regions_complete(job_id: str, result: RegionsResult):
+@app.post("/mfluxible/v1/vlm/{job_id}")
+async def vlm_complete(job_id: str, result: VlmResult):
     if MAILBOX is None:
-        return _regions_disabled()
+        return _vlm_disabled()
 
     delivered = MAILBOX.complete(job_id, result.model_dump())
     if not delivered:
