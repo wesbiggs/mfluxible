@@ -515,6 +515,7 @@
 
   /* ---------- detected regions ---------- */
 
+  #regionFinder { margin-top: 0.1rem; }
   .regionChips { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.5rem; }
   .regionChip {
     font: inherit;
@@ -804,6 +805,20 @@
             </label>
           </div>
 
+          <!-- Above the inpaint checkbox on purpose. Finding objects is how you decide
+               what to mask, so gating it on inpainting already being ticked put the two
+               steps in the wrong order -- clicking a chip ticks that box for you.
+               .baseOnly, not .maskOnly: this needs a base image, not a committed mask.
+               #regionFinder also carries `hidden`, which refreshModel drives off
+               /health, so a server without the mailbox shows no control at all. -->
+          <div class="baseOnly" id="regionFinder" hidden>
+            <button type="button" class="paneAction" id="findObjectsBtn">Find objects</button>
+            <div id="regionPanel" hidden>
+              <div class="regionChips" id="regionChips"></div>
+              <p class="regionNote" id="regionNote"></p>
+            </div>
+          </div>
+
           <label class="check baseOnly" id="inpaintWrap">
             <input type="checkbox" id="inpaint"> Inpaint a region
             <span class="info">
@@ -821,18 +836,9 @@
               <span class="maskCoverage" id="maskCoverage">nothing painted yet</span>
               <div class="maskActions">
                 <button type="button" class="paneAction" id="editMaskBtn">Edit mask</button>
-                <button type="button" class="paneAction" id="findObjectsBtn" hidden>Find objects</button>
                 <button type="button" class="paneAction" id="clearMaskBtn">Clear</button>
               </div>
             </div>
-          </div>
-
-          <!-- Drawn only where /health says the server has the mailbox configured, so a
-               button that could only fail never appears. Populated by a round trip
-               through a Claude Code worker -- see docs/clients.md. -->
-          <div class="maskOnly" id="regionPanel" hidden>
-            <div class="regionChips" id="regionChips"></div>
-            <p class="regionNote" id="regionNote"></p>
           </div>
 
           <div class="grid2 maskOnly">
@@ -1364,12 +1370,6 @@ async function refreshModel() {
     unknown = `couldn't reach the server (${err.message})`;
   }
 
-  // Deliberately not gated on supports_mask as well: a region is a rectangle over the
-  // image, and seeing what is in a picture is worth something even on a model that
-  // can't inpaint. The panel lives inside .maskOnly, so the mask controls' own
-  // visibility rules already keep it out of the way when inpainting is off.
-  document.getElementById("findObjectsBtn").hidden = !(regionsInfo && regionsInfo.enabled);
-
   if (modelInfo) {
     const guidance = modelInfo.supports_guidance ? `guidance ${modelInfo.default_guidance}` : "no guidance";
     modelInfoEl.textContent =
@@ -1400,6 +1400,18 @@ async function refreshModel() {
     maskWrap.classList.add("hidden");
   }
   inpaintWrap.classList.toggle("hidden", noMask);
+  // Must follow noMask's declaration, not just read it: both live in this function's
+  // scope, so hoisting this above the `const` is a temporal-dead-zone ReferenceError
+  // that takes the whole of refreshModel with it -- and every model-dependent control
+  // on the page with that.
+  //
+  // Gated on supports_mask as well as on the mailbox, reversing an earlier call here.
+  // The argument for showing it regardless was that seeing what is in a picture has
+  // value even on a model that can't inpaint -- true, but a chip's *click* sets a mask,
+  // and on such a model that silently does nothing. A control that lists things and
+  // then ignores you is worse than one that was never offered.
+  document.getElementById("regionFinder").hidden =
+    !(regionsInfo && regionsInfo.enabled) || noMask;
   stepsEl.placeholder = modelInfo ? `model default (${modelInfo.default_steps})` : "model default";
   guidanceEl.placeholder = modelInfo && modelInfo.default_guidance !== null
     ? `model default (${modelInfo.default_guidance})`
