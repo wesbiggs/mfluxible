@@ -1,7 +1,8 @@
 # mfluxible configuration -- an alternative to setting environment variables.
 #
 # Copy this to `mfluxible.toml` in the directory you start the server from, or to
-# ~/.config/mfluxible/mfluxible.toml, or name it with `--config PATH`. Everything is
+# ~/.config/mfluxible/config.toml (note the different name -- it is already in a
+# directory called mfluxible), or name it with `--config PATH`. Everything is
 # commented out, and a commented-out line means "use the default".
 #
 # A key here IS an environment variable with MFLUXIBLE_ dropped and the case lowered:
@@ -24,6 +25,7 @@
 # quantize = 8
 
 # Where the quantized weights are cached, so startup only pays for them once.
+# Defaults under $XDG_CACHE_HOME, so it lands beside huggingface_hub's own cache.
 # model_dir = "~/.cache/mfluxible"
 
 # LoRAs are baked in at load time, so they are a startup choice rather than a

@@ -13,7 +13,18 @@ import tomllib
 import pytest
 
 from mfluxible import __version__
-from mfluxible.config import KNOWN, ConfigError, apply, config_flag, discover, load, to_env
+from mfluxible.config import (
+    KNOWN,
+    USER_NAME,
+    ConfigError,
+    apply,
+    cache_home,
+    config_flag,
+    discover,
+    load,
+    to_env,
+    user_config_path,
+)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "mfluxible"
@@ -114,11 +125,12 @@ def test_discovery_finds_a_file_in_the_working_directory(tmp_path):
     assert discover({}, tmp_path, []) == tmp_path / "mfluxible.toml"
 
 
-def test_discovery_returns_nothing_when_there_is_nothing(tmp_path, monkeypatch):
-    # USER_CONFIG is an absolute path in the real home directory, and a developer who
-    # happens to have one would otherwise see this fail.
-    monkeypatch.setattr("mfluxible.config.USER_CONFIG", tmp_path / "absent" / "mfluxible.toml")
-    assert discover({}, tmp_path, []) is None
+def test_discovery_returns_nothing_when_there_is_nothing(tmp_path):
+    # XDG_CONFIG_HOME points the user-level lookup at an empty directory, so a developer
+    # who happens to have a real ~/.config/mfluxible/config.toml doesn't see this fail.
+    # Steering it through the variable rather than patching the module also means this
+    # exercises the same code path a real machine would.
+    assert discover({"XDG_CONFIG_HOME": str(tmp_path / "empty")}, tmp_path, []) is None
 
 
 def test_an_explicit_variable_beats_the_working_directory(tmp_path):
@@ -157,6 +169,68 @@ def test_the_flag_is_read_in_both_spellings():
     assert config_flag(["prog", "--host", "0.0.0.0"]) is None
 
 
+# -- XDG base directories -------------------------------------------------------------
+
+
+def test_the_user_level_file_follows_xdg_config_home(tmp_path):
+    cfg = tmp_path / "elsewhere" / "mfluxible"
+    cfg.mkdir(parents=True)
+    (cfg / USER_NAME).write_text('model = "flux-dev"\n')
+
+    # cwd is empty, so this can only be found via the variable.
+    found = discover({"XDG_CONFIG_HOME": str(tmp_path / "elsewhere")}, tmp_path, [])
+    assert found == cfg / USER_NAME
+
+
+def test_without_the_variable_the_user_level_file_is_under_dot_config():
+    assert user_config_path({}) == pathlib.Path("~/.config").expanduser() / "mfluxible" / USER_NAME
+
+
+def test_the_user_level_file_is_config_toml_not_mfluxible_toml():
+    """The two locations are named differently, and it is not an oversight.
+
+    In a working directory a file has to say whose it is; inside a directory already
+    called `mfluxible` the prefix is noise. Pinned because "make them consistent" is an
+    obvious-looking tidy-up that would silently stop finding everyone's existing file.
+    """
+    assert user_config_path({}).name == "config.toml"
+    assert user_config_path({}).parent.name == "mfluxible"
+
+
+def test_a_relative_xdg_path_is_ignored_as_the_spec_requires(tmp_path):
+    """The spec says a relative value is invalid and must be ignored.
+
+    Worth honouring rather than treating as pedantry: `XDG_CACHE_HOME=cache` would
+    otherwise put gigabytes of weights in a different place for every directory the
+    server was started from, and each one would look like a fresh download.
+    """
+    assert cache_home({"XDG_CACHE_HOME": "cache"}) == pathlib.Path("~/.cache").expanduser()
+    assert cache_home({"XDG_CACHE_HOME": ""}) == pathlib.Path("~/.cache").expanduser()
+    assert cache_home({"XDG_CACHE_HOME": "/somewhere/else"}) == pathlib.Path("/somewhere/else")
+
+
+def test_the_model_cache_follows_xdg_cache_home():
+    """The point of the whole exercise: it has to land beside huggingface_hub's cache.
+
+    HF reads XDG_CACHE_HOME itself, and the two directories hold the raw and the
+    quantized copy of one model. Relocating one without the other moves half of what
+    the person was trying to move, and they are doing it because they are out of disk.
+    """
+    from mfluxible.engine import _default_model_cache_dir
+
+    moved = _default_model_cache_dir({"XDG_CACHE_HOME": "/Volumes/big/cache"})
+    assert moved == pathlib.Path("/Volumes/big/cache/mfluxible")
+    assert _default_model_cache_dir({}) == pathlib.Path("~/.cache/mfluxible").expanduser()
+
+
+def test_an_explicit_model_dir_still_beats_xdg():
+    """Nothing moves for anyone who had already said where they wanted this."""
+    from mfluxible.engine import _default_model_cache_dir
+
+    environ = {"MFLUXIBLE_MODEL_DIR": "~/weights", "XDG_CACHE_HOME": "/Volumes/big/cache"}
+    assert _default_model_cache_dir(environ) == pathlib.Path("~/weights").expanduser()
+
+
 # -- applying ------------------------------------------------------------------------
 
 
@@ -172,11 +246,10 @@ def test_the_real_environment_wins_over_the_file(tmp_path):
     assert environ["MFLUXIBLE_QUANTIZE"] == "4"
 
 
-def test_applying_nothing_reports_nothing(tmp_path, monkeypatch):
-    monkeypatch.setattr("mfluxible.config.USER_CONFIG", tmp_path / "absent" / "mfluxible.toml")
-    environ = {}
+def test_applying_nothing_reports_nothing(tmp_path):
+    environ = {"XDG_CONFIG_HOME": str(tmp_path / "empty")}
     assert apply(environ, tmp_path, []) is None
-    assert environ == {}
+    assert environ == {"XDG_CONFIG_HOME": str(tmp_path / "empty")}
 
 
 # -- the list of settings, against what the code actually reads ----------------------

@@ -42,6 +42,7 @@ from mflux.models.common.latent_creator.latent_creator import LatentCreator
 from mflux.models.common.vae.vae_util import VAEUtil
 from mflux.utils.image_util import ImageUtil
 
+from mfluxible.config import cache_home
 from mfluxible.models import CFG_GUIDANCE_FLOOR, ModelSpec, resolve
 from mfluxible.schedulers import MaskJob, clear_mask_job, scheduler_path, set_mask_job, start_fraction
 from mfluxible.schemas import GenerateRequest
@@ -55,7 +56,26 @@ log = logging.getLogger("mfluxible.engine")
 
 _DONE = object()
 
-DEFAULT_MODEL_CACHE_DIR = Path(os.environ.get("MFLUXIBLE_MODEL_DIR", "~/.cache/mfluxible")).expanduser()
+def _default_model_cache_dir(environ: dict | None = None) -> Path:
+    """Where quantized weights are cached: MFLUXIBLE_MODEL_DIR, else under the XDG cache.
+
+    The fallback goes through config.cache_home() rather than hardcoding `~/.cache` so
+    that it lands beside huggingface_hub's cache wherever that is -- HF reads
+    XDG_CACHE_HOME itself, and these two directories hold the raw and the quantized copy
+    of the same model. Relocating one without the other is the failure this avoids, and
+    the person doing the relocating is by definition short of disk.
+
+    An explicit MFLUXIBLE_MODEL_DIR still wins over both, so nothing moves for anyone
+    who had already said where they wanted this.
+    """
+    environ = os.environ if environ is None else environ
+    raw = environ.get("MFLUXIBLE_MODEL_DIR", "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return cache_home(environ) / "mfluxible"
+
+
+DEFAULT_MODEL_CACHE_DIR = _default_model_cache_dir()
 
 # mflux's own CLI default (mflux.cli.defaults.defaults.IMAGE_STRENGTH), applied here when
 # a client sends `image` without `image_strength` -- not copied from mflux.cli itself,

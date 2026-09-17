@@ -32,7 +32,7 @@ machine — see [Object detection](#object-detection).
 |---|---|---|---|
 | `MFLUXIBLE_MODEL` | `model` | `z-image-turbo` | Which model to run — any of the fifteen in [Models](#models) |
 | `MFLUXIBLE_QUANTIZE` | `quantize` | `8` | Quantization bits; try `4` for less memory, `none` for full precision |
-| `MFLUXIBLE_MODEL_DIR` | `model_dir` | `~/.cache/mfluxible` | Where quantized weights are cached (see [Model cache](#model-cache)) |
+| `MFLUXIBLE_MODEL_DIR` | `model_dir` | `$XDG_CACHE_HOME/mfluxible` | Where quantized weights are cached (see [Model cache](#model-cache)) |
 | `MFLUXIBLE_MLX_CACHE_LIMIT_MB` | `mlx_cache_limit_mb` | `1024` | Cap on MLX's reusable buffer cache; `none` for MLX's own default (see [Memory](#memory)) |
 | `MFLUXIBLE_MLX_WIRED_LIMIT_MB` | `mlx_wired_limit_mb` | unset | Wire this much memory so the OS cannot page the weights out (see [Memory](#memory)) |
 | `MFLUXIBLE_LORA_PATHS` | `lora_paths` | unset | Local LoRA `.safetensors` files to bake in (see [LoRAs](#loras)) |
@@ -75,7 +75,11 @@ value that could have come from either of two files is a value you have to go hu
 1. `--config PATH`, on `mfluxible-server` or `mfluxible-vlm-worker`
 2. `MFLUXIBLE_CONFIG`
 3. `./mfluxible.toml`, in the directory you started the process from
-4. `~/.config/mfluxible/mfluxible.toml`
+4. `~/.config/mfluxible/config.toml` — or `$XDG_CONFIG_HOME/mfluxible/config.toml`, if you set that
+
+Note the two filenames differ. In a working directory the file has to say whose it is,
+so it is `mfluxible.toml`; inside a directory already called `mfluxible` that prefix is
+noise, and `config.toml` is the shape the XDG convention uses everywhere.
 
 Naming a file that isn't there is an error; finding nothing at 3 or 4 is not. To turn
 discovery off completely — for a deployment that configures everything through the
@@ -126,6 +130,8 @@ The first generation is fast either way — a fresh process has not yet grown in
 `MFLUXIBLE_MLX_WIRED_LIMIT_MB` goes further and asks the OS to keep that much memory unpageable, protecting the weights from pressure created by *other* processes. On an otherwise-quiet machine it measured no different from the cache cap alone (4.8–5.2s), so it is off by default; reach for it only if generations still degrade under load from elsewhere on the system. Keep any value above the model's resident size and well under `mx.device_info()["max_recommended_working_set_size"]` — wiring too much starves everything else.
 
 ### Model cache
+
+`MFLUXIBLE_MODEL_DIR` defaults to `~/.cache/mfluxible`, or `$XDG_CACHE_HOME/mfluxible` when that variable is set — which matters because `huggingface_hub` reads `XDG_CACHE_HOME` too. The two directories hold the raw download and the quantized copy of the same model, so pointing that variable at a bigger disk moves both rather than half. An explicit `MFLUXIBLE_MODEL_DIR` overrides it either way.
 
 Startup quantizes the raw downloaded weights and caches the result to `MFLUXIBLE_MODEL_DIR/<model>-q<bits>/` (e.g. `z-image-turbo-q8`, `qwen-image-q4`) — a real, separate step from the Hugging Face download: HF already caches the raw weights locally, but quantizing them into MLX's packed format is nontrivial per-layer compute that would otherwise happen on every startup (mflux's `mflux-save` mechanism does the same thing via its own CLI; this just does it automatically here). Every startup after the first loads the pre-quantized weights directly and skips that step.
 

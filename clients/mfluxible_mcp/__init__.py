@@ -10,4 +10,4 @@ Released in lockstep with the server from the same repository -- one tag builds 
 and tests/test_mcp_server.py fails if the two versions drift apart.
 """
 
-__version__ = "0.9.0"
+__version__ = "0.9.1"

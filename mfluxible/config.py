@@ -81,8 +81,47 @@ KNOWN = frozenset(
 # Where a file is looked for when MFLUXIBLE_CONFIG doesn't name one. First hit wins;
 # they are not merged, because a value that could come from either of two files is a
 # value you have to go looking for.
-DEFAULT_NAME = "mfluxible.toml"
-USER_CONFIG = Path("~/.config/mfluxible") / DEFAULT_NAME
+#
+# The two names differ on purpose. In a working directory the file has to say whose it
+# is, so it is `mfluxible.toml`; inside a directory already called `mfluxible` that
+# prefix is noise, and `config.toml` is the shape the XDG convention uses everywhere.
+LOCAL_NAME = "mfluxible.toml"
+USER_NAME = "config.toml"
+
+
+def _xdg_home(variable: str, default: str, environ: dict | None = None) -> Path:
+    """An XDG base directory: what `variable` names, or the spec's default.
+
+    The absolute-path check is the spec's, not defensiveness: it says a relative path in
+    one of these variables is invalid and must be ignored. Honouring that matters most
+    for the one people set by hand -- an `XDG_CACHE_HOME=cache` typed once would
+    otherwise scatter a directory of multi-gigabyte weights into whatever directory the
+    server happened to be started from, a different one each time.
+    """
+    environ = os.environ if environ is None else environ
+    raw = environ.get(variable, "").strip()
+    if raw and Path(raw).is_absolute():
+        return Path(raw)
+    return Path(default).expanduser()
+
+
+def cache_home(environ: dict | None = None) -> Path:
+    """The XDG cache directory -- what `~/.cache` means on this machine.
+
+    Exists because mfluxible is not the only thing caching weights for a generation:
+    huggingface_hub holds the raw download and reads XDG_CACHE_HOME itself
+    (`huggingface_hub.constants`, checked rather than assumed). Both caches hold
+    multi-gigabyte copies of the same model, so a machine that relocates one and not the
+    other has moved half of what the person was trying to move -- and they were trying
+    because they were out of disk, which is when a surprise is least welcome.
+    """
+    return _xdg_home("XDG_CACHE_HOME", "~/.cache", environ)
+
+
+def user_config_path(environ: dict | None = None) -> Path:
+    """The machine-wide config file's path, wherever XDG says it lives."""
+    return _xdg_home("XDG_CONFIG_HOME", "~/.config", environ) / "mfluxible" / USER_NAME
+
 
 # What MFLUXIBLE_CONFIG is set to in order to turn discovery off entirely -- for a
 # deployment that configures everything through the environment and does not want a
@@ -127,7 +166,8 @@ def discover(environ: dict | None = None, cwd: Path | None = None, argv: list[st
     """The config file to load, or None if there is nothing to load.
 
     Order: `--config`, then MFLUXIBLE_CONFIG, then ./mfluxible.toml, then
-    ~/.config/mfluxible/mfluxible.toml. First hit wins and they are never merged.
+    $XDG_CONFIG_HOME/mfluxible/config.toml (i.e. ~/.config/mfluxible/config.toml unless
+    that variable says otherwise). First hit wins and they are never merged.
 
     A path named explicitly -- by either the flag or the variable -- that does not exist
     is an error, while a missing file at either default location is not. Naming a file
@@ -148,11 +188,11 @@ def discover(environ: dict | None = None, cwd: Path | None = None, argv: list[st
             raise ConfigError(f"{source} names {path}, which is not a file")
         return path
 
-    local = cwd / DEFAULT_NAME
+    local = cwd / LOCAL_NAME
     if local.is_file():
         return local
 
-    user = USER_CONFIG.expanduser()
+    user = user_config_path(environ)
     if user.is_file():
         return user
 

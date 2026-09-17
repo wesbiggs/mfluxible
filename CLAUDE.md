@@ -119,6 +119,20 @@ Three rules, each chosen against a specific silent failure:
   that is readable from the environment and rejected from the config file is precisely
   the half-wired state that list exists to prevent.
 
+**Both directories this package writes to follow XDG's *variables*, not just its default
+paths** (`config.cache_home()`, `config.user_config_path()`). That is one fix rather than
+two conventions: `huggingface_hub` reads `XDG_CACHE_HOME` itself -- checked in
+`huggingface_hub.constants`, not assumed -- and its cache sits beside
+`MFLUXIBLE_MODEL_DIR`'s holding the raw download of the same weights the quantized copy
+came from. Honouring the variable in one and not the other means someone moving a cache
+off a full disk moves half of it. A relative value is ignored, as the spec requires,
+because `XDG_CACHE_HOME=cache` would otherwise put gigabytes wherever the server happened
+to be started from. The user-level file is `config.toml` while the working-directory one
+is `mfluxible.toml`: in a directory already named `mfluxible` the prefix is noise, and in
+a working directory a bare `config.toml` says nothing about whose it is. Making those two
+names "consistent" is the tidy-up that would silently stop finding everyone's file, which
+is why a test pins both.
+
 The path *is not* on `/health`, deliberately: `Caddyfile.example` leaves that endpoint
 open specifically because it discloses no filesystem paths (see "Two auth schemes"), so
 it goes to stderr at startup instead. And note the sharp edge documented rather than
