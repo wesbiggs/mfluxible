@@ -1,6 +1,6 @@
 # MCP tool (generate images from an MCP client)
 
-`clients/mcp_server.py` exposes three tools over MCP's stdio transport: `generate_image(prompt, width, height, steps, seed, guidance, negative_prompt, image_path, image_strength, fractional_start, mask_boxes, mask_path, mask_feather)`, which forwards each `thinking` step as an MCP progress update and returns the image as inline content, `check_image(handle)`, which collects an image from a `generate_image` call that outlived its tool-call timeout (see below), and `preview_mask(image_path, mask_boxes, mask_path)`, which renders a mask over the image so the caller can check it before paying for a generation.
+`mfluxible-mcp` exposes three tools over MCP's stdio transport: `generate_image(prompt, width, height, steps, seed, guidance, negative_prompt, image_path, image_strength, fractional_start, mask_boxes, mask_path, mask_feather)`, which forwards each `thinking` step as an MCP progress update and returns the image as inline content, `check_image(handle)`, which collects an image from a `generate_image` call that outlived its tool-call timeout (see below), and `preview_mask(image_path, mask_boxes, mask_path)`, which renders a mask over the image so the caller can check it before paying for a generation.
 
 `image_path` is a local file path (read from disk by the tool, not a URL) for image-to-image; `image_strength` (0.0–1.0, only meaningful alongside `image_path`, server default 0.4 if omitted) follows mflux's own convention — see [Image-to-image](api.md#image-to-image) — which is the *inverse* of "denoising strength" in some other tools, so the tool's own docstring spells this out for the model calling it. `fractional_start` is the same [flag](api.md#fractional-start) the API takes, described there as the thing to reach for when a user is tuning strength finely or asking why a small change to it did nothing.
 
@@ -41,10 +41,12 @@ Most of that gap is the mask rather than the model. A rectangle chosen by a mode
 So: `mask_boxes` is the option that works when the caller is a model with nothing but the image, and that is worth a lot. When the region isn't box-shaped and the result has to be clean, use `mask_path` with a mask something else drew, or paint it in the harness.
 
 ```bash
-uv pip install -r clients/requirements-mcp.txt
+uvx mfluxible-mcp
 ```
 
-You still need the server from the [Quickstart](../README.md#quickstart) running separately with the model loaded — this only proxies to it.
+`mfluxible-mcp` is its own package, separate from the server's, and deliberately so: it talks HTTP and needs no mflux, no MLX and no PyTorch, so it installs in seconds and can sit on a machine that has no GPU at all. `uvx` runs it without installing anything permanently, which is also the form to put in a host's config; `pip install mfluxible-mcp` works the same way if you would rather have the command on `PATH`.
+
+You still need the server from the [Quickstart](../README.md#quickstart) running separately with the model loaded — this only proxies to it, and it can be running on another machine (see [`MFLUXIBLE_URL`](#configuration)).
 
 ## What the host imposes
 
@@ -76,10 +78,12 @@ Each client keeps its own MCP registry, and none of them share one — registeri
 ### Claude Code
 
 ```bash
-claude mcp add mfluxible --scope user -- /path/to/mfluxible/.venv/bin/python /path/to/mfluxible/clients/mcp_server.py
+claude mcp add mfluxible --scope user -- uvx mfluxible-mcp
 ```
 
-(`--scope user` makes it available in every project; drop it to register for just the current project.) This writes to `~/.claude.json`; `claude mcp list` shows what got registered and whether it connects. Claude Code starts `mcp_server.py` itself when needed.
+(`--scope user` makes it available in every project; drop it to register for just the current project.) This writes to `~/.claude.json`; `claude mcp list` shows what got registered and whether it connects. Claude Code starts the tool itself when needed.
+
+If `uvx` isn't on the minimal `PATH` your host gives a subprocess, give its absolute path (`which uvx`), or install the package into a virtualenv and point at that environment's `mfluxible-mcp` — see [Other clients](#other-clients).
 
 The image comes back as inline tool content and renders in the transcript — a 512×512 run took 62s here, so it went out as a handle and `check_image` collected it on the first poll, which is the path worth exercising once before you trust a long generation to it.
 
@@ -93,8 +97,8 @@ The ~60s the default `MFLUXIBLE_MCP_WAIT_SECONDS` is sized against was measured 
 {
   "mcpServers": {
     "mfluxible": {
-      "command": "/path/to/mfluxible/.venv/bin/python",
-      "args": ["/path/to/mfluxible/clients/mcp_server.py"]
+      "command": "uvx",
+      "args": ["mfluxible-mcp"]
     }
   }
 }
@@ -106,9 +110,9 @@ The tool appears under Developer/Extensions and in the composer's tool menu — 
 
 Desktop honors the display hints above: the image has been observed rendering in the main transcript rather than inside the collapsed tool result.
 
-Desktop also reports `mfluxible` as connected as soon as `mcp_server.py` starts, which says nothing about whether the HTTP server it proxies to is up. If that server isn't running, you'll only find out when a `generate_image` call fails.
+Desktop also reports `mfluxible` as connected as soon as the tool starts, which says nothing about whether the HTTP server it proxies to is up. If that server isn't running, you'll only find out when a `generate_image` call fails.
 
-**An image you paste or upload into the chat is not a file, and the tool cannot reach it.** `image_path` and `mask_path` are read from disk by `mcp_server.py`, which the host launches as a local subprocess; an attachment lives in the conversation, and in Desktop in its own container. Save it to disk first — drag it out of the chat, or use Save As — and pass that path.
+**An image you paste or upload into the chat is not a file, and the tool cannot reach it.** `image_path` and `mask_path` are read from disk by the tool, which the host launches as a local subprocess; an attachment lives in the conversation, and in Desktop in its own container. Save it to disk first — drag it out of the chat, or use Save As — and pass that path.
 
 Sending the bytes instead is the obvious alternative and it does not work, for a structural reason rather than a missing feature. `CallToolRequestParams.arguments` is a plain JSON object with no attachment or content-block channel, so anything the tool receives has to be written into that JSON *by the model* — and a model shown an image holds visual tokens, not the file's bytes, so it cannot reproduce them (a 768×768 PNG would be ~800K characters of base64 if it could). The three requests a server may send back to a host — `ListRootsRequest`, `ElicitRequest`, `CreateMessageRequest` — don't fetch a file either. An `image_b64` argument would be unremarkable on the wire if a host ever gained the ability to substitute an attachment's bytes into a named argument, but nothing in MCP offers that today, so adding one would only move the failure later.
 
@@ -127,8 +131,8 @@ It searches `./mcp.json`, `~/.config/omlx/mcp.json`, `$OMLX_MCP_CONFIG` and `--m
   "default_timeout": 300.0,
   "mcpServers": {
     "mfluxible": {
-      "command": "/path/to/mfluxible/.venv/bin/python",
-      "args": ["/path/to/mfluxible/clients/mcp_server.py"],
+      "command": "uvx",
+      "args": ["mfluxible-mcp"],
       "env": { "MFLUXIBLE_MCP_WAIT_SECONDS": "20" }
     }
   }
@@ -150,7 +154,7 @@ As of 0.6.4 the admin chat doesn't display images returned by an MCP tool at all
 Nothing here is specific to the clients above — any MCP host that launches stdio servers can run this tool. Four things are worth checking on a new one:
 
 1. **Where its MCP config lives**, and whether it uses `servers` or `mcpServers`. Most accept Claude Desktop's shape.
-2. **Absolute paths.** Hosts commonly launch stdio servers with a minimal environment, so point at `/path/to/mfluxible/.venv/bin/python` rather than a bare `python`.
+2. **Absolute paths.** Hosts commonly launch stdio servers with a minimal `PATH`, so a bare `uvx` may not resolve. Use the output of `which uvx`, or install the package (`uv pip install mfluxible-mcp`) and point at that environment's `bin/mfluxible-mcp`.
 3. **Its per-call timeout**, which is the number `MFLUXIBLE_MCP_WAIT_SECONDS` has to stay under. If you can't find it documented, time a call that you know takes minutes and watch when it gives up — and remember a host may enforce one in its UI as well as in its MCP client, as oMLX does.
 4. **Whether it renders inline images.** If it doesn't, the tool still works: the saved PNG path comes back in the caption.
 
@@ -158,7 +162,7 @@ Wherever the server is registered, if the HTTP server is on a different host or 
 
 ## Configuration
 
-Environment variables for `clients/mcp_server.py`, all optional. Set them where the tool is registered (`-e` on `claude mcp add`, or an `"env"` object in a JSON config).
+Environment variables for `mfluxible-mcp`, all optional. It has no config file of its own — an MCP host launches it with an explicit `env` block, which is the same job done in the place the host already looks. Set them where the tool is registered (`-e` on `claude mcp add`, or an `"env"` object in a JSON config).
 
 | Variable | Default | Purpose |
 |---|---|---|

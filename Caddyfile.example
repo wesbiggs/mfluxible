@@ -13,7 +13,7 @@
 #
 # Generate a token with:  openssl rand -hex 32
 #
-# The app itself must stay on loopback. `uvicorn server:app --app-dir server` binds
+# The app itself must stay on loopback. `mfluxible-server` binds
 # 127.0.0.1 by default, which is what makes this proxy the only way in; binding it to
 # 0.0.0.0 so something else can reach it puts the *unauthenticated* app on the network
 # beside this proxy rather than behind it, and the token stops meaning anything.
@@ -52,7 +52,7 @@ mfluxible.test {
 	#
 	# `header` is a core matcher, so this needs no plugin and no xcaddy build. It is an
 	# exact match on the whole value, not a prefix. Note it is also a plain string
-	# comparison, not the constant-time one server/auth.py uses for Basic: with a
+	# comparison, not the constant-time one mfluxible/auth.py uses for Basic: with a
 	# high-entropy token that difference isn't practically exploitable across a network,
 	# but it is a difference, and it's the reason to use `openssl rand` rather than a
 	# passphrase.
@@ -66,7 +66,7 @@ mfluxible.test {
 	}
 
 	handle {
-		# OpenAI's error envelope, matching what server/auth.py's own 401 returns, so a
+		# OpenAI's error envelope, matching what mfluxible/auth.py's own 401 returns, so a
 		# client that parses one parses the other. No WWW-Authenticate header: it would
 		# make a browser pop a Basic prompt that can never succeed here.
 		header Content-Type application/json

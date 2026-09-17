@@ -14,7 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from vlm import VlmMailbox
+from mfluxible.vlm import VlmMailbox
 from tests.doubles.toy_model import TOY_MODEL_SPEC
 
 
@@ -39,8 +39,8 @@ def mailbox(tmp_path):
 def vlm_client(monkeypatch, mailbox):
     """The real app with the mailbox switched on, and both waits shortened so a test
     that exercises a timeout finishes in milliseconds rather than three minutes."""
-    import server as server_module
-    from engine import MfluxEngine
+    import mfluxible.server as server_module
+    from mfluxible.engine import MfluxEngine
 
     monkeypatch.setattr(
         server_module,
@@ -250,7 +250,7 @@ def test_regions_round_trip_through_the_schema(vlm_client, mailbox):
 
 
 def test_the_worker_reads_an_array_out_of_a_fenced_reply():
-    from vlm_worker import _extract_json
+    from mfluxible.vlm_worker import _extract_json
 
     fenced = 'Here you go:\n```json\n[{"label": "apple", "box": [0.1, 0.2, 0.3, 0.4]}]\n```\nHope that helps.'
     assert _extract_json(fenced) == [{"label": "apple", "box": [0.1, 0.2, 0.3, 0.4]}]
@@ -262,7 +262,7 @@ def test_the_worker_drops_unusable_boxes_rather_than_coercing_them():
     """A box outside the frame, or inverted, means the reply wasn't measured against
     the image it was asked about. Clamping it would put a rectangle nobody chose into
     a list the user is about to click."""
-    from vlm_worker import _clean
+    from mfluxible.vlm_worker import _clean
 
     cleaned = _clean([
         {"label": "good", "box": [0.1, 0.1, 0.9, 0.9]},
@@ -279,14 +279,14 @@ def test_the_worker_drops_unusable_boxes_rather_than_coercing_them():
 
 def test_the_worker_names_a_missing_cli_rather_than_raising():
     """A person reading the harness needs to know it's the binary, not the image."""
-    import vlm_worker
+    from mfluxible import vlm_worker
 
     result = vlm_worker.detect("/nonexistent/path/to/an/image.png")
     assert "no longer on disk" in result["error"]
 
 
 def test_the_worker_caps_the_number_of_regions():
-    from vlm_worker import _clean
+    from mfluxible.vlm_worker import _clean
 
     many = [{"label": f"o{i}", "box": [0.0, 0.0, 0.5, 0.5]} for i in range(20)]
     assert len(_clean(many)) == 8
@@ -296,7 +296,7 @@ def test_the_worker_caps_the_number_of_regions():
 
 
 def test_the_default_command_drives_claude_code():
-    from vlm_worker import DEFAULT_COMMAND, build_command
+    from mfluxible.vlm_worker import DEFAULT_COMMAND, build_command
 
     argv = build_command(DEFAULT_COMMAND, image="a.png", prompt="find things")
     assert argv[0] == "claude"
@@ -309,7 +309,7 @@ def test_a_prompts_own_punctuation_cannot_reshape_the_command():
     """Split first, substitute second. Formatting the string and *then* splitting would
     let a quote inside the prompt swallow the rest of the line or split one argument
     into two -- and the prompt is long English prose with quotes and newlines in it."""
-    from vlm_worker import build_command
+    from mfluxible.vlm_worker import build_command
 
     nasty = 'say "hello" then\nstop --model evil; rm -rf /'
     argv = build_command("tool -p {prompt} --flag", image="a.png", prompt=nasty)
@@ -321,7 +321,7 @@ def test_a_prompts_own_punctuation_cannot_reshape_the_command():
 
 def test_a_detector_template_needs_only_the_image():
     """A tool that isn't prompt-driven simply never substitutes {prompt}."""
-    from vlm_worker import build_command
+    from mfluxible.vlm_worker import build_command
 
     argv = build_command("detect --format json {image}", image="a.png", prompt="ignored")
     assert argv == ["detect", "--format", "json", "a.png"]
@@ -329,14 +329,14 @@ def test_a_detector_template_needs_only_the_image():
 
 
 def test_placeholders_work_inside_a_token():
-    from vlm_worker import build_command
+    from mfluxible.vlm_worker import build_command
 
     argv = build_command("tool --image={image} --json", image="a.png", prompt="p")
     assert argv == ["tool", "--image=a.png", "--json"]
 
 
 def test_an_unparseable_template_yields_no_command_rather_than_raising():
-    from vlm_worker import build_command
+    from mfluxible.vlm_worker import build_command
 
     assert build_command('tool "unclosed', image="a.png", prompt="p") == []
     assert build_command("", image="a.png", prompt="p") == []
@@ -345,7 +345,7 @@ def test_an_unparseable_template_yields_no_command_rather_than_raising():
 def test_a_command_that_cannot_be_run_is_reported_not_raised(tmp_path, monkeypatch):
     """Every failure path returns a body for the server: the harness shows the reason,
     and a misconfigured template is a normal outcome rather than a crashed worker."""
-    import vlm_worker
+    from mfluxible import vlm_worker
 
     image = tmp_path / "x.png"
     image.write_bytes(_png())
@@ -362,7 +362,7 @@ def test_any_command_printing_the_agreed_json_is_enough(tmp_path, monkeypatch):
     a local detector. If this passes, so does anything that prints the same array."""
     import sys
 
-    import vlm_worker
+    from mfluxible import vlm_worker
 
     image = tmp_path / "x.png"
     image.write_bytes(_png())
@@ -385,7 +385,7 @@ def test_any_command_printing_the_agreed_json_is_enough(tmp_path, monkeypatch):
 
 
 def test_an_object_reply_carries_both_a_prompt_and_regions():
-    from vlm_worker import _clean_payload
+    from mfluxible.vlm_worker import _clean_payload
 
     payload = _clean_payload({
         "prompt": "  a single red apple on oak, soft window light  ",
@@ -398,7 +398,7 @@ def test_an_object_reply_carries_both_a_prompt_and_regions():
 def test_a_missing_or_blank_prompt_stays_none_rather_than_empty():
     """The harness tells "no prompt offered" apart from "an empty one": the first hides
     the affordance, the second would put a blank string into the prompt box."""
-    from vlm_worker import _clean_payload
+    from mfluxible.vlm_worker import _clean_payload
 
     assert _clean_payload({"regions": []})["prompt"] is None
     assert _clean_payload({"prompt": "   ", "regions": []})["prompt"] is None
@@ -408,7 +408,7 @@ def test_a_missing_or_blank_prompt_stays_none_rather_than_empty():
 def test_a_prompt_only_reply_is_valid():
     """A tool that captions but doesn't localize is still useful -- the prompt fills the
     box even though there is nothing to click."""
-    from vlm_worker import _clean_payload
+    from mfluxible.vlm_worker import _clean_payload
 
     payload = _clean_payload({"prompt": "a misty harbour at dawn"})
     assert payload["prompt"] == "a misty harbour at dawn"
@@ -419,7 +419,7 @@ def test_an_array_of_objects_is_not_mistaken_for_one_object():
     """The outermost bracket decides the shape. Checking for "{...}" first would slice
     from the array's first element to the last "}" inside it -- which parses cleanly and
     silently returns one region where the reply listed several."""
-    from vlm_worker import _extract_json
+    from mfluxible.vlm_worker import _extract_json
 
     reply = '[{"label": "a", "box": [0,0,1,1]}, {"label": "b", "box": [0,0,1,1]}]'
     parsed = _extract_json(reply)
@@ -432,7 +432,7 @@ def test_an_array_of_objects_is_not_mistaken_for_one_object():
 
 
 def test_the_prompt_is_capped():
-    from vlm_worker import _clean_payload
+    from mfluxible.vlm_worker import _clean_payload
 
     assert len(_clean_payload({"prompt": "x" * 5000})["prompt"]) == 2000
 
@@ -455,7 +455,7 @@ def test_a_fresh_mailbox_is_never_attached_however_young_the_clock_is(monkeypatc
     Pinned with the clock forced small rather than by waiting for a freshly booted
     machine: on any developer box uptime hides this, which is why it reached main.
     """
-    import vlm
+    from mfluxible import vlm
 
     monkeypatch.setattr(vlm.time, "monotonic", lambda: 5.0)
     box = vlm.VlmMailbox(pathlib.Path("/tmp/does-not-need-to-exist"))

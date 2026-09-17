@@ -33,7 +33,7 @@ def _matches(pattern: str, path: str) -> bool:
 
 
 def _app_routes():
-    import server as server_module
+    import mfluxible.server as server_module
 
     return [
         (route.path, methods)

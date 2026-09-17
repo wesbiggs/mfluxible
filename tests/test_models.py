@@ -1,6 +1,6 @@
 import pytest
 
-from models import CFG_GUIDANCE_FLOOR, MODELS, resolve
+from mfluxible.models import CFG_GUIDANCE_FLOOR, MODELS, resolve
 
 
 def test_resolve_by_key():

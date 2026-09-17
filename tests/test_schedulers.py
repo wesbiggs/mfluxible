@@ -10,7 +10,7 @@ import pytest
 from mflux.models.common.config.config import Config
 from mflux.models.common.config.model_config import ModelConfig
 
-from schedulers import (
+from mfluxible.schedulers import (
     SCHEDULER_PATH,
     FractionalStartLinearScheduler,
     MaskJob,
@@ -40,7 +40,7 @@ def _config(strength, scheduler="linear", steps=STEPS, model="z-image-turbo", si
 
 
 def _sigmas(strength, **kw):
-    return _config(strength, scheduler="schedulers.FractionalStartLinearScheduler", **kw).scheduler.sigmas.tolist()
+    return _config(strength, scheduler="mfluxible.schedulers.FractionalStartLinearScheduler", **kw).scheduler.sigmas.tolist()
 
 
 def _stock_sigmas(strength, **kw):
@@ -51,7 +51,7 @@ def test_mflux_resolves_the_scheduler_by_its_dotted_path():
     # The whole wiring is a string: engine.py hands mflux SCHEDULER_PATH and mflux
     # imports it (try_import_external_scheduler). If server/ ever stops being importable
     # as flat modules, this is what breaks, and it breaks here rather than mid-request.
-    assert isinstance(_config(0.25, "schedulers.FractionalStartLinearScheduler").scheduler,
+    assert isinstance(_config(0.25, "mfluxible.schedulers.FractionalStartLinearScheduler").scheduler,
                       FractionalStartLinearScheduler)
 
 
@@ -127,8 +127,8 @@ def test_start_fraction_matches_the_position_the_strength_names():
 # resolves, but its VAE throws away spatial structure -- so what a mask actually does
 # to a latent is only visible here.
 
-MASKED = "schedulers.MaskedBlendLinearScheduler"
-MASKED_FRACTIONAL = "schedulers.MaskedFractionalStartScheduler"
+MASKED = "mfluxible.schedulers.MaskedBlendLinearScheduler"
+MASKED_FRACTIONAL = "mfluxible.schedulers.MaskedFractionalStartScheduler"
 
 
 @pytest.fixture

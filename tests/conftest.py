@@ -1,14 +1,26 @@
 """Shared fixtures for the mfluxible test suite.
 
-Nothing here needs to touch sys.path itself -- pytest.ini's `pythonpath = server`
-setting puts server/ on sys.path before collection, matching how the app is actually
-run (`uvicorn server:app --app-dir server`).
+Nothing here needs to touch sys.path itself -- pytest.ini's `pythonpath = .` setting
+puts the repo root on sys.path before collection, so `import mfluxible.engine` resolves
+to the working tree whether or not the package is installed.
+
+The MFLUXIBLE_CONFIG line below has to come before that first import and is not
+housekeeping. Importing `mfluxible` applies a config file (see mfluxible/__init__.py),
+and discovery looks in the working directory and then ~/.config/mfluxible -- so without
+this, a developer's own config file would set MFLUXIBLE_MODEL for the whole suite and
+the failures would point anywhere but at the file that caused them. `none` turns
+discovery off; test_config.py drives the loader's functions directly instead of relying
+on that import-time side effect.
 """
 
-import pytest
-from fastapi.testclient import TestClient
+import os
 
-from tests.doubles.toy_model import TOY_MODEL_SPEC
+os.environ.setdefault("MFLUXIBLE_CONFIG", "none")
+
+import pytest  # noqa: E402  -- must follow the line above
+from fastapi.testclient import TestClient  # noqa: E402
+
+from tests.doubles.toy_model import TOY_MODEL_SPEC  # noqa: E402
 
 
 @pytest.fixture
@@ -17,7 +29,7 @@ async def toy_engine():
     beyond trivial array ops. Passing a ModelSpec instance directly (rather than a
     model-name string) bypasses models.py's registry entirely -- see toy_model.py's
     module docstring -- so this needs no change to production code."""
-    from engine import MfluxEngine
+    from mfluxible.engine import MfluxEngine
 
     engine = MfluxEngine(model=TOY_MODEL_SPEC, quantize=None, model_cache_dir=None)
     await engine.load()
@@ -34,8 +46,8 @@ def client(monkeypatch):
     looks up `engine` from its own module globals each time lifespan()/generate() run,
     so swapping the attribute is all it takes -- no dependency-injection wiring needed
     in server.py itself."""
-    import server as server_module
-    from engine import MfluxEngine
+    import mfluxible.server as server_module
+    from mfluxible.engine import MfluxEngine
 
     monkeypatch.setattr(
         server_module,

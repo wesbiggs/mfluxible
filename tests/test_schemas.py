@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from schemas import GenerateRequest
+from mfluxible.schemas import GenerateRequest
 
 
 def test_defaults():

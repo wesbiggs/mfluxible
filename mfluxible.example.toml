@@ -1,0 +1,98 @@
+# mfluxible configuration -- an alternative to setting environment variables.
+#
+# Copy this to `mfluxible.toml` in the directory you start the server from, or to
+# ~/.config/mfluxible/mfluxible.toml, or name it with `--config PATH`. Everything is
+# commented out, and a commented-out line means "use the default".
+#
+# A key here IS an environment variable with MFLUXIBLE_ dropped and the case lowered:
+# `model` is MFLUXIBLE_MODEL. There is no second set of names and no settings that only
+# exist in one place -- docs/server.md documents both at once.
+#
+# A real environment variable always wins over this file, so
+# `MFLUXIBLE_MODEL=flux-dev mfluxible-server` overrides `model` below for one run.
+#
+# A key that isn't a real setting is an error at startup rather than a line that
+# quietly does nothing.
+
+
+# -- the model -----------------------------------------------------------------------
+
+# Which of the fifteen checkpoints to run. Only the one named is ever downloaded.
+# model = "z-image-turbo"
+
+# Quantization bits: 4 for roughly half the memory, or "none" for full precision.
+# quantize = 8
+
+# Where the quantized weights are cached, so startup only pays for them once.
+# model_dir = "~/.cache/mfluxible"
+
+# LoRAs are baked in at load time, so they are a startup choice rather than a
+# per-request one. Scales must line up one-to-one with the paths.
+# lora_paths = ["/path/to/style.safetensors"]
+# lora_scales = [0.8]
+
+
+# -- memory --------------------------------------------------------------------------
+
+# The cap on MLX's reusable buffer cache, and the single most useful knob here if
+# generations get slower the longer the server has been up. "none" for MLX's default.
+# mlx_cache_limit_mb = 1024
+
+# Ask the OS not to page the weights out at all. Unset by default; see docs/server.md.
+# mlx_wired_limit_mb = 12288
+
+
+# -- where it listens ----------------------------------------------------------------
+
+# Used by `mfluxible-server` when --host/--port aren't given. Anything but a loopback
+# address is reachable from the network -- set the credentials below, or put it behind
+# a proxy, before doing that.
+# host = "127.0.0.1"
+# port = 8420
+
+# HTTP Basic auth. Both are required: setting one alone leaves auth OFF, because a
+# half-finished deployment is likelier than a deliberately blank username.
+# basic_auth_username = "mfluxible"
+# basic_auth_password = "change-me"
+
+# CORS. The default reflects back localhost and 127.0.0.1 on any port; the regex
+# replaces that pattern entirely, and the list adds exact origins on top of it.
+# cors_origin_regex = "https?://(localhost|127\\.0\\.0\\.1)(:\\d+)?"
+# cors_origins = ["https://frontend.example.com"]
+
+
+# -- object detection ----------------------------------------------------------------
+
+# Naming a directory is what switches the feature on: it is where images are stashed
+# for the worker, and the directory the detection command runs in. Off until set.
+# vlm_dir = "~/.cache/mfluxible/vlm"
+
+# How long a detection waits for the worker to answer.
+# vlm_timeout = 180
+
+# Read by the worker (`mfluxible-vlm-worker`), not the server. The command is run with
+# no shell, and `{image}`/`{prompt}` are substituted after it is split into arguments.
+#
+# Note what this line is: an arbitrary program that this machine will execute. That is
+# why the worker is a process you start yourself rather than an endpoint -- and it is
+# the reason to know which config file you are picking up, since one in the working
+# directory is found automatically. `MFLUXIBLE_CONFIG=none` turns that off.
+# vlm_command = "claude -p {prompt} --allowedTools Read --model opus"
+
+# Which model the *default* command uses. Ignored once vlm_command is set.
+# vlm_model = "opus"
+
+# Where the worker looks for the server, when --url isn't given.
+# server_url = "http://127.0.0.1:8420"
+
+# Sent by the worker as `Authorization: Bearer ...`, for a proxy-gated deployment.
+# bearer_token = "..."
+
+
+# -- variables that aren't ours ------------------------------------------------------
+
+# Anything in [env] is exported under its exact name, so settings belonging to other
+# libraries can live in the same file. HF_TOKEN is read by huggingface_hub and is what
+# gated weights need.
+# [env]
+# HF_TOKEN = "hf_..."

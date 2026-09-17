@@ -33,12 +33,46 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: |
-            server/requirements.txt
+            pyproject.toml
+            clients/pyproject.toml
             requirements-dev.txt
-            clients/requirements-mcp.txt
 
       - name: Install dependencies
         run: uv pip install --system -r requirements-dev.txt
 
       - name: Run tests
         run: pytest -v
+
+  build:
+    # Deliberately not macos-14: building a wheel runs no project code and needs none
+    # of its dependencies, only hatchling, so this is the one job that doesn't need
+    # Apple Silicon. It exists to catch packaging breakage on the PR that causes it
+    # rather than on the tag that tries to publish it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v10.0.1
+
+      - name: Build both distributions
+        run: |
+          uv build
+          uv build clients/ -o dist-mcp
+
+      # `uv build` builds the wheel from the sdist, so this checks the force-include in
+      # pyproject.toml survives that second resolution -- the specific way the harness
+      # could go missing. Without it the package installs, starts, generates images,
+      # and 500s on its own front page.
+      - name: The wheel must carry the harness the server serves at GET /
+        run: |
+          python -c "
+          import glob, sys, zipfile
+          names = zipfile.ZipFile(glob.glob('dist/*.whl')[0]).namelist()
+          if 'mfluxible/harness.html' not in names:
+              sys.exit('harness.html is missing from the wheel: ' + repr(sorted(names)))
+          print('harness.html present')
+          "
+
+      - name: Both distributions must describe themselves correctly
+        run: |
+          uv tool run twine check dist/* dist-mcp/*

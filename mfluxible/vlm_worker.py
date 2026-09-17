@@ -26,16 +26,21 @@ it can't be reached from the network at all, it's optional (the server runs fine
 nothing listening, and says so on /health), and starting it is what consent to that
 command running looks like.
 
-**Nothing in `server/` imports this, and nothing should.** The modules here resolve each
-other as flat siblings on `sys.path` (see CLAUDE.md's Layout note), so this file is
-importable from inside the server process purely by living in the same directory --
-which is an accident of layout, not an interface. It is a script with a `main()`,
-spawned by a person; an import from `server.py` would put an arbitrary subprocess back
-inside the request path, which is the whole thing this placement avoids.
+**Nothing else in this package imports this, and nothing should.** Living in the same
+package as server.py makes it importable from inside the server process, and that is a
+consequence of where it has to sit -- beside the server, on the machine holding the
+stash directory -- not an interface. It is a script with a `main()`, spawned by a
+person; an import from server.py would put an arbitrary subprocess back inside the
+request path, which is the whole thing this placement avoids.
 
-Run it alongside the server, with no configuration of its own:
+Run it alongside the server:
 
-    uv run server/vlm_worker.py
+    mfluxible-vlm-worker
+
+or, from a checkout, `uv run python -m mfluxible.vlm_worker`. It has to be reached as a
+module either way: running this file by path skips the package's __init__, which is what
+applies the config file, so the settings below would be read from a bare environment.
+The `__main__` guard at the bottom refuses that rather than letting it happen quietly.
 
 **It takes no MFLUXIBLE_VLM_DIR.** The server's copy of that setting is the only
 one: every job names the file it wants read, so the worker never invents a path and has
@@ -58,10 +63,17 @@ from urllib.parse import urlparse
 
 import requests
 
+from mfluxible import __version__
+
 # Environment-only, like the other clients: a --token flag would put the secret in
 # shell history and in `ps` output for as long as the worker runs, which here is
 # indefinitely. See CLAUDE.md for why the name is prefixed and why it says BEARER.
 TOKEN = os.environ.get("MFLUXIBLE_BEARER_TOKEN", "")
+
+# Where the server is. A setting rather than only a flag so that a worker started by
+# launchd -- which has a config file and no convenient command line -- can be pointed
+# at a non-default port without one. An explicit --url still wins.
+DEFAULT_SERVER_URL = os.environ.get("MFLUXIBLE_SERVER_URL", "").strip() or "http://127.0.0.1:8420"
 
 # Which model the *default* command uses. Ignored once MFLUXIBLE_VLM_COMMAND is
 # set, since that names the whole command line.
@@ -330,9 +342,22 @@ def run(base: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Answer mfluxible's object-detection jobs by running MFLUXIBLE_VLM_COMMAND."
+        prog="mfluxible-vlm-worker",
+        description="Answer mfluxible's object-detection jobs by running MFLUXIBLE_VLM_COMMAND.",
     )
-    parser.add_argument("--url", default="http://127.0.0.1:8420", help="mfluxible's base URL")
+    parser.add_argument(
+        "--url",
+        default=DEFAULT_SERVER_URL,
+        help=f"mfluxible's base URL (default: {DEFAULT_SERVER_URL})",
+    )
+    parser.add_argument(
+        "--config",
+        metavar="PATH",
+        help="config file to read instead of the discovered one. Declared here so it "
+        "appears in --help; it is read straight out of argv at import time, because "
+        "the settings above are resolved before this parser exists.",
+    )
+    parser.add_argument("--version", action="version", version=f"mfluxible {__version__}")
     args = parser.parse_args()
 
     parsed = urlparse(args.url)
@@ -348,4 +373,17 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # `python mfluxible/vlm_worker.py` would run, and would silently ignore the config
+    # file: executing a file by path never imports the package around it, so
+    # mfluxible/__init__.py -- which is what applies mfluxible.toml -- never runs, and
+    # the settings above would be read from a bare environment. A worker quietly using
+    # the default detection command because its config was skipped is exactly the kind
+    # of silent wrong answer this codebase refuses elsewhere, so it is a refusal here
+    # too rather than a warning.
+    if not __package__:
+        sys.exit(
+            "error: run this as `python -m mfluxible.vlm_worker` (or the installed "
+            "`mfluxible-vlm-worker`), not as a file path -- otherwise the config file "
+            "is not applied."
+        )
     main()

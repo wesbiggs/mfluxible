@@ -59,7 +59,7 @@ class ModelSpec:
     # Which scheduler the variant picks for itself when generate_image() isn't told
     # one -- and the only value `fractional_start` is safe on is "linear".
     #
-    # server/schedulers.py's FractionalStartLinearScheduler subclasses mflux's
+    # mfluxible/schedulers.py's FractionalStartLinearScheduler subclasses mflux's
     # LinearScheduler and reaches the model by being passed as `scheduler=`, replacing
     # whatever the variant would have chosen. On a linear-by-default model that's the
     # same schedule with one rung moved, which is the whole design. On any other model
@@ -78,7 +78,7 @@ class ModelSpec:
     @property
     def supports_mask(self) -> bool:
         # Two capabilities, one precondition: masked inpainting also reaches the model
-        # by replacing its scheduler (server/schedulers.py's MaskedBlend* classes
+        # by replacing its scheduler (mfluxible/schedulers.py's MaskedBlend* classes
         # subclass the same LinearScheduler), so it is safe in exactly the same place
         # a fractional start is. Kept as its own property rather than an alias because
         # a client asks two different questions of /health -- and because the two

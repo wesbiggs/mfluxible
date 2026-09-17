@@ -239,7 +239,7 @@ class Region(BaseModel):
 
 
 class VlmResult(BaseModel):
-    """What `server/vlm_worker.py` posts back for a claimed job.
+    """What `mfluxible/vlm_worker.py` posts back for a claimed job.
 
     Either a result (`prompt` and/or `regions`) or an `error`. An error is carried rather
     than signalled with a status code because the worker failing (no `claude` on

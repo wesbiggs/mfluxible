@@ -10,7 +10,7 @@ import os
 import pytest
 from PIL import Image
 
-from schemas import GenerateRequest
+from mfluxible.schemas import GenerateRequest
 
 
 async def _collect(engine, req):
@@ -183,7 +183,7 @@ async def test_fractional_start_selects_the_scheduler_and_reports_an_exact_stren
     )
     events = await _collect(toy_engine, req)
 
-    assert toy_engine.model.last_scheduler == "schedulers.FractionalStartLinearScheduler"
+    assert toy_engine.model.last_scheduler == "mfluxible.schedulers.FractionalStartLinearScheduler"
     assert events[0]["start_step"] == 2
     assert events[0]["effective_image_strength"] == 0.25
     assert [e["step"] for e in events[1:-1]] == [3, 4, 5, 6, 7, 8, 9, 10]
@@ -247,7 +247,7 @@ def test_an_interruption_still_says_which_step_it_stopped_on():
     # Driven through the callback directly -- mflux only ever reaches its interrupt path
     # from a literal KeyboardInterrupt on the server process (see CLAUDE.md), which is
     # not something a test can stage around a generation.
-    from engine import _StreamCallback
+    from mfluxible.engine import _StreamCallback
 
     emitted = []
     callback = _StreamCallback(None, 0, emitted.append, fractional_start=False)
@@ -283,7 +283,7 @@ def _masked_request(**overrides):
 
 
 async def test_a_masked_request_runs_the_masked_scheduler_and_clears_its_job(toy_engine):
-    import schedulers
+    from mfluxible import schedulers
 
     events = await _collect(toy_engine, _masked_request())
     assert events[-1]["type"] == "image"
@@ -291,7 +291,7 @@ async def test_a_masked_request_runs_the_masked_scheduler_and_clears_its_job(toy
     # and mflux imports it. ToyModel steps through config.scheduler, and _MaskedBlend
     # raises when no job is set -- so a completed generation is also proof the job was
     # there for every step.
-    assert toy_engine.model.last_scheduler == "schedulers.MaskedBlendLinearScheduler"
+    assert toy_engine.model.last_scheduler == "mfluxible.schedulers.MaskedBlendLinearScheduler"
     # Cleared in run()'s finally, not after_loop's: a job surviving the call would be
     # picked up by whatever generates next.
     assert schedulers.active_mask_job() is None
@@ -337,7 +337,7 @@ async def test_mask_composite_off_leaves_the_model_s_own_decode_alone(toy_engine
 
 async def test_a_mask_and_a_fractional_start_select_the_combined_scheduler(toy_engine):
     await _collect(toy_engine, _masked_request(image_strength=0.35, fractional_start=True))
-    assert toy_engine.model.last_scheduler == "schedulers.MaskedFractionalStartScheduler"
+    assert toy_engine.model.last_scheduler == "mfluxible.schedulers.MaskedFractionalStartScheduler"
 
 
 async def test_an_unmasked_request_still_passes_no_scheduler_at_all(toy_engine):
@@ -349,7 +349,7 @@ async def test_an_unmasked_request_still_passes_no_scheduler_at_all(toy_engine):
 
 
 async def test_the_mask_job_is_cleared_even_when_generation_fails(toy_engine, monkeypatch):
-    import schedulers
+    from mfluxible import schedulers
 
     # Fails at the VAE decode, i.e. *after* before_loop has set the job and the loop
     # has run -- which is the case that matters. A failure before the job exists would

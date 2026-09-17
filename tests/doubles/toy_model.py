@@ -33,7 +33,7 @@ from mflux.models.common.config.model_config import ModelConfig
 from mflux.models.common.vae.vae_util import VAEUtil
 from mflux.utils.image_util import ImageUtil
 
-from models import ModelSpec
+from mfluxible.models import ModelSpec
 
 # A fictitious ModelConfig for the toy model. supports_guidance/requires_sigma_shift
 # are both False, so the schedule stays a plain linspace and nothing here ever pays for

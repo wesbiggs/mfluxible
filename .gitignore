@@ -10,3 +10,13 @@ __pycache__/
 
 # Editor backup files.
 *~
+
+# Build artifacts from `uv build` (root) and `uv build clients/` (the MCP package).
+/dist/
+/dist-mcp/
+/clients/dist/
+
+# A real config file, as opposed to mfluxible.example.toml which is checked in.
+# Keeping it out matters more than usual: it can hold basic_auth_password and
+# bearer_token.
+/mfluxible.toml

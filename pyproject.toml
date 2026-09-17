@@ -1,0 +1,105 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mfluxible"
+description = "A streaming HTTP API for image generation on Apple Silicon, built on mflux."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Wes Biggs" }]
+keywords = ["mflux", "mlx", "apple-silicon", "image-generation", "flux", "diffusion"]
+
+# 3.11 rather than mflux's own 3.10 floor, and the reason is tomllib: the config file
+# in config.py is parsed with the standard library, and that module arrived in 3.11.
+# Taking a third-party TOML parser as a runtime dependency to buy back one Python
+# version nothing here is tested on is the worse trade.
+requires-python = ">=3.11"
+
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: GPU",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Graphics",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "mflux>=0.19.1",
+    "fastapi>=0.141.1",
+    "uvicorn[standard]>=0.52.4",
+    "Pillow>=12.3.0",
+    "python-multipart>=0.0.32",
+    # For vlm_worker.py, the detection sidecar in this package. It is a separate process
+    # the server never imports, but it ships and installs with the server, so its one
+    # dependency is declared here rather than relied on transitively -- huggingface_hub
+    # pulls requests in via mflux today, and that is not a contract to build on.
+    "requests>=2.34.2",
+]
+
+# One copy of the version, in the package, where /health can report it.
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/wesbiggs/mfluxible"
+Documentation = "https://github.com/wesbiggs/mfluxible/blob/main/README.md"
+Source = "https://github.com/wesbiggs/mfluxible"
+Issues = "https://github.com/wesbiggs/mfluxible/issues"
+Changelog = "https://github.com/wesbiggs/mfluxible/blob/main/CHANGELOG.md"
+
+[project.scripts]
+mfluxible-server = "mfluxible.cli:main"
+mfluxible-vlm-worker = "mfluxible.vlm_worker:main"
+
+[tool.hatch.version]
+path = "mfluxible/__init__.py"
+
+# ---------------------------------------------------------------------------------
+# uv: this is a packaging manifest, not a uv project.
+#
+# Without this line, the mere existence of this file switches `uv run` into project
+# mode -- it would write a uv.lock and install this project, with mflux and PyTorch
+# behind it, into .venv. That breaks something CLAUDE.md protects deliberately: a
+# machine running only `clients/stream_client.py` needs nothing but `requests`, and
+# `uv run clients/stream_client.py` there must not start resolving a server's
+# dependency tree. `managed = false` keeps uv's pre-existing behaviour exactly --
+# `uv run` falls back to ./.venv, no lock file is written, nothing is synced -- while
+# `uv build` and `uv pip install -e .` continue to work normally.
+#
+# Verified against uv 0.12.13, not assumed.
+# ---------------------------------------------------------------------------------
+[tool.uv]
+managed = false
+
+[tool.hatch.build.targets.wheel]
+packages = ["mfluxible"]
+
+# harness.html lives in clients/ because it is a client -- it consumes this API over
+# HTTP like everything else there (CLAUDE.md's Layout note). It is also the only client
+# the server serves itself, at GET /, so the wheel needs a copy beside server.py.
+# server._harness_path() prefers this installed copy and falls back to the checkout's.
+[tool.hatch.build.targets.wheel.force-include]
+"clients/harness.html" = "mfluxible/harness.html"
+
+# The sdist keeps the repo's own shape, so `uv build` (which builds the wheel *from*
+# the sdist) can still find clients/harness.html at the path force-include names above.
+# Tests are included so a downloaded sdist is something you can actually check.
+[tool.hatch.build.targets.sdist]
+include = [
+    "/mfluxible",
+    "/clients/harness.html",
+    "/tests",
+    "/docs",
+    "/pytest.ini",
+    "/requirements-dev.txt",
+    "/CHANGELOG.md",
+    "/CONTRIBUTING.md",
+    "/mfluxible.example.toml",
+]

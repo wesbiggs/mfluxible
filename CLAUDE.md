@@ -2,26 +2,129 @@
 
 ## Layout
 
-`server/` (server.py, engine.py, models.py, schemas.py, chat_stub.py, schedulers.py, auth.py, vlm.py, vlm_worker.py, requirements.txt) is the model + HTTP API. `clients/` (stream_client.py, stream_client.js, harness.html, mcp_server.py, requirements.txt, requirements-mcp.txt) is everything that *consumes* it over HTTP -- note that word, because `vlm_worker.py` also talks to the API over HTTP and is deliberately not there. It is a **sidecar**: it supplies a capability the server advertises rather than consuming one, must sit on the same machine (it reads the stash directory off disk), takes its directory from the server's own configuration, and is what `/health`'s `worker_attached` reports on. Its settings are documented in `docs/server.md` with the server's for the same reason. **Nothing in `server/` imports it and nothing should** -- these modules resolve each other as flat siblings, so it is importable from inside the server process purely by living in this directory, which is an accident of layout rather than an interface; an import would put an arbitrary subprocess back inside the request path. They're independent dependency-wise -- installing one's requirements.txt doesn't pull in the other's. server.py/engine.py/models.py/schemas.py/chat_stub.py/auth.py import each other as flat sibling modules (`from engine import ...`), not a package, so `server/` must stay on `sys.path` when running (e.g. `uv run uvicorn server:app --app-dir server`) -- don't add an `__init__.py` or turn this into a `server.*` package without updating those imports and the run command together.
+`mfluxible/` (server.py, engine.py, models.py, schemas.py, chat_stub.py, schedulers.py,
+auth.py, vlm.py, vlm_worker.py, config.py, cli.py) is the model + HTTP API, and is the
+package published as **`mfluxible`**. `clients/` (stream_client.py, stream_client.js,
+harness.html, mfluxible_mcp/, requirements.txt) is everything that *consumes* it over
+HTTP -- note that word, because `vlm_worker.py` also talks to the API over HTTP and is
+deliberately not there. It is a **sidecar**: it supplies a capability the server
+advertises rather than consuming one, must sit on the same machine (it reads the stash
+directory off disk), takes its directory from the server's own configuration, and is what
+`/health`'s `worker_attached` reports on. Its settings are documented in `docs/server.md`
+with the server's for the same reason. **Nothing else in the package imports it and
+nothing should** -- living beside server.py makes it importable from inside the server
+process, which is a consequence of having to sit on the same machine rather than an
+interface; an import would put an arbitrary subprocess back inside the request path.
 
-## uv, but with requirements.txt files -- deliberately not a uv project
+Two things inside `clients/` are not the same kind of thing, and the split matters for
+packaging. `mfluxible_mcp/` is a **second distribution** (`mfluxible-mcp`, its own
+`clients/pyproject.toml`), because it consumes the API over HTTP and so must never
+install mflux/MLX/PyTorch -- publishing it as an `mfluxible[mcp]` extra would have done
+exactly that. `stream_client.py`/`.js` stay plain scripts with a `requirements.txt`,
+since a single-file script run with `uv run` is the whole point of them.
+`harness.html` is the odd one: it is a client by the rule above and lives here, but it is
+also the only client the *server* serves (`GET /`), so the server's wheel force-includes
+a copy at `mfluxible/harness.html` and `server._harness_path()` prefers that over the
+checkout's. Its source of truth is still this directory.
 
-Setup is `uv venv --python 3.11`, `uv pip install -r <one of the requirements files>`, and
-`uv run <cmd>`; CI skips the venv entirely with `uv pip install --system`
-(`.github/workflows/tests.yml`). There is intentionally **no `pyproject.toml` and no
-`uv.lock`**, so `uv sync` is not the entry point here. Adding one would fold the four
-separate dependency sets -- `server/requirements.txt`, `clients/requirements.txt`,
-`clients/requirements-mcp.txt`, `requirements-dev.txt` -- into a single resolution, and
-those files staying separate is exactly what the Layout note above is protecting: a
-client-only or MCP-only install must never drag in mflux/PyTorch, and a machine running
-only the terminal client should need nothing but `requests`.
+**These are real Python packages now, and that is recent.** Until 0.9.0 the server was
+`server/` holding flat sibling modules resolved off `sys.path` (`from engine import ...`,
+run as `uvicorn server:app --app-dir server`). Packaging forced the change rather than
+taste: `models.py`, `auth.py`, `schemas.py` and `server.py` cannot be installed into
+site-packages under those names. So imports are absolute (`from mfluxible.engine import
+...`), the dotted scheduler paths handed to mflux are `mfluxible.schedulers.*`, and
+`pytest.ini` puts the repo root on `sys.path` rather than `server/`. The run command is
+`mfluxible-server`, or `uvicorn mfluxible.server:app` for anything it doesn't expose.
 
-`uv run` works fine outside a project: with no `pyproject.toml` it falls back to `./.venv`,
-so `uv run pytest` and `uv run clients/stream_client.py ...` pick up whatever was installed
-there without an `activate` step (verified against uv 0.12.9, not assumed). The MCP
-registration examples in `docs/mcp.md` hardcode `/path/to/mfluxible/.venv/bin/python`
-because Claude Desktop launches stdio servers with a minimal environment -- that path is
-the venv `uv venv` creates, so it stays correct under uv.
+## uv, but with pyproject.toml as a packaging manifest -- still not a uv project
+
+Setup is `uv venv --python 3.11`, `uv pip install -e .` (or `-r requirements-dev.txt`),
+and `uv run <cmd>`; CI skips the venv entirely with `uv pip install --system`
+(`.github/workflows/tests.yml`). There are now two `pyproject.toml` files -- the root one
+and `clients/` -- and **both set `[tool.uv] managed = false`, which is the load-bearing
+line.** Without it, the mere existence of a `pyproject.toml` switches `uv run` into
+project mode: it writes a `uv.lock` and installs the project, mflux and PyTorch behind
+it, into `.venv`. That would break the thing the Layout note protects -- a machine
+running only `clients/stream_client.py` needs nothing but `requests`, and
+`uv run clients/stream_client.py` there must not start resolving a server's dependency
+tree. `managed = false` keeps uv's prior behaviour byte for byte (`uv run` falls back to
+`./.venv`, no lock is written, nothing is synced) while leaving `uv build` and
+`uv pip install -e .` working normally. Verified against uv 0.12.13, not assumed, and
+pinned by `test_uv_is_told_this_is_not_a_project`.
+
+There is still **no `uv.lock` and no `uv sync`**, and the dependency sets are still
+separate -- they just live in different files now: the root `pyproject.toml`
+(`dependencies`), `clients/pyproject.toml` (the MCP tool), `clients/requirements.txt`
+(the terminal client) and `requirements-dev.txt` (a superset of all of them, for the test
+suite only). `server/requirements.txt` and `clients/requirements-mcp.txt` are gone; each
+distribution declares its own. A client-only or MCP-only install still never drags in
+mflux/PyTorch, which is the property that mattered, not the file format.
+
+`uv run` works fine outside a project: it falls back to `./.venv`, so `uv run pytest` and
+`uv run clients/stream_client.py ...` pick up whatever was installed there without an
+`activate` step. `docs/mcp.md` no longer hardcodes `/path/to/mfluxible/.venv/bin/python`
+-- an MCP host is pointed at `uvx mfluxible-mcp` instead, which is the whole reason that
+second distribution exists.
+
+## Versioning and releases
+
+`__version__` lives in `mfluxible/__init__.py` and `clients/mfluxible_mcp/__init__.py`;
+each `pyproject.toml` reads its own via `[tool.hatch.version]`, so those two literals are
+the only copies. The two distributions are **released together off one tag and always
+share a version** -- pinned by `test_the_two_distributions_ship_the_same_version`,
+because "which versions of these two am I running" should have one answer.
+`.github/workflows/release.yml` fires on `v*`, refuses to proceed if the tag disagrees
+with either `__version__`, and publishes via PyPI Trusted Publishing (no API token in
+repo secrets). `/health` reports `version`, and `docs/api.md`'s sample is checked against
+it by `test_docs.py` -- a literal version string in a doc is exactly the thing that rots.
+
+The build detail worth not rediscovering: `uv build` builds each wheel **from the sdist**,
+so the sdist's `include` list is what decides whether the wheel's `force-include` of
+`clients/harness.html` can resolve a second time. Lose that and you get a package that
+installs, starts, generates images and 500s on its own front page -- which no test in a
+checkout would notice, since a checkout always has the file. Hence
+`test_the_wheel_carries_the_harness_the_server_serves` and the CI build job.
+
+## The config file adds no settings, and applies at package import
+
+`mfluxible/config.py` reads an optional TOML file and puts it into `os.environ`. That is
+the whole mechanism, and it is what makes it free of drift: a key **is** an environment
+variable with `MFLUXIBLE_` dropped and lowercased (`model` -> `MFLUXIBLE_MODEL`), so
+there is one set of names, one parser per setting (in the module that owns it), and
+nothing for a file to mean differently from an export. Values are passed through
+verbatim -- `~` is not expanded and `quantize = 8` becomes `"8"` -- for the same reason;
+the only conversions are the ones TOML forces (bool -> `"true"`/`"false"`, list ->
+comma-joined, which is what `lora_paths` already took).
+
+**`apply()` runs in `mfluxible/__init__.py`, and it has to.** Every setting here is read
+at module import (`MODEL` in server.py, `MLX_CACHE_LIMIT_BYTES` in engine.py), so a file
+loaded any later would be read after the values it sets had already been decided. Putting
+it in the package rather than in `cli.py` is what makes `mfluxible-server` and
+`uvicorn mfluxible.server:app` behave identically. The cost is one real piece of
+awkwardness: `--config` cannot wait for argparse, because the package is imported before
+`main()` exists -- so `config.config_flag()` reads it out of `sys.argv`, the same
+technique `auth.resolve_bind_host()` already uses for `--host`, for the same reason.
+It also means `python mfluxible/vlm_worker.py` would silently skip the file (running a
+file by path never imports the package around it), which its `__main__` guard refuses
+rather than allowing.
+
+Three rules, each chosen against a specific silent failure:
+- **The real environment wins**, so a stale file in `~/.config` can never overrule a
+  launchd plist, and `MFLUXIBLE_MODEL=... mfluxible-server` is the one-off it looks like.
+- **An unknown key is an error**, because `mdoel = "flux-dev"` ignored key-by-key starts
+  a server on the wrong model and reports success.
+- **`config.KNOWN` is checked against the source**, by
+  `test_known_lists_exactly_the_variables_the_package_reads` -- it greps the package for
+  `environ.get("MFLUXIBLE_...")` and fails on either direction of drift. A new setting
+  that is readable from the environment and rejected from the config file is precisely
+  the half-wired state that list exists to prevent.
+
+The path *is not* on `/health`, deliberately: `Caddyfile.example` leaves that endpoint
+open specifically because it discloses no filesystem paths (see "Two auth schemes"), so
+it goes to stderr at startup instead. And note the sharp edge documented rather than
+worked around: `vlm_command` names an arbitrary program, and `./mfluxible.toml` is
+discovered without being asked for, so *where you start the worker* is now part of its
+trust boundary. `MFLUXIBLE_CONFIG=none` turns discovery off.
 
 ## API changes
 
@@ -42,7 +145,7 @@ the sections below say why the non-obvious parts are the way they are.
 
 ## No path from an exception to a response body, in either direction
 
-`server/server.py` contains no `except` clause at all, and that is the point rather
+`mfluxible/server.py` contains no `except` clause at all, and that is the point rather
 than a coincidence. Validation is `MfluxEngine.request_problem`, which *returns* the
 reason a request can't be honoured; a finished generation is `_collect_final_image`,
 which *returns* the `image` or `error` event; a bad OpenAI `size` is
@@ -88,7 +191,7 @@ does need its real type and is deliberately absent, since Pillow can't open one 
 
 ## Basic auth: CORS must wrap it, and it must not buffer the stream
 
-`server/auth.py` is off unless **both** `MFLUXIBLE_BASIC_AUTH_USERNAME` and
+`mfluxible/auth.py` is off unless **both** `MFLUXIBLE_BASIC_AUTH_USERNAME` and
 `MFLUXIBLE_BASIC_AUTH_PASSWORD` are set. Half-configured means off, not
 half-open: setting one of the two is far likelier to be a half-finished
 deployment than a deliberately blank username, and the failure worth avoiding is
@@ -150,7 +253,7 @@ same mechanism `engine.py` already depends on.
 
 ## Two auth schemes, and the browser is what decides between them
 
-`MFLUXIBLE_BASIC_AUTH_*` (server/auth.py) and `Caddyfile.example` are **alternatives, not
+`MFLUXIBLE_BASIC_AUTH_*` (mfluxible/auth.py) and `Caddyfile.example` are **alternatives, not
 layers**. The thing that makes them genuinely different -- rather than two spellings of
 one idea -- is that a browser can satisfy exactly one of them unaided.
 
@@ -228,9 +331,9 @@ documented rule covers both.
 
 ## mflux is a fast-moving dependency
 
-`server/engine.py` reaches into mflux internals that aren't public API: `model.callbacks.before_loop/in_loop/interrupt` are mutated directly, since `CallbackRegistry` has no `unregister()` as of mflux 0.19.1. The VAE-decode branching in `_decode_preview_b64` mirrors mflux's own `StepwiseHandler` on purpose, with one deliberate deviation: the non-packed branch goes through `VAEUtil.decode` rather than calling `vae.decode()` directly the way `StepwiseHandler` does. Qwen-Image's VAE is a 3D (video) decoder returning `(B, C, 1, H, W)` and `ImageUtil.to_image` wants 4D — `VAEUtil.decode` is what drops the singleton frame axis, and it's the same call each variant's own final decode makes, so previews and final images stay on identical handling. Calling `vae.decode()` bare here works for Z-Image and FLUX and breaks only on Qwen previews. If `uv pip install -U mflux` breaks this file, check `mflux/callbacks/callback_registry.py` and `mflux/callbacks/instances/stepwise_handler.py` in the installed package first — that's where this was reverse-engineered from (mflux ships no public docs for the callback system).
+`mfluxible/engine.py` reaches into mflux internals that aren't public API: `model.callbacks.before_loop/in_loop/interrupt` are mutated directly, since `CallbackRegistry` has no `unregister()` as of mflux 0.19.1. The VAE-decode branching in `_decode_preview_b64` mirrors mflux's own `StepwiseHandler` on purpose, with one deliberate deviation: the non-packed branch goes through `VAEUtil.decode` rather than calling `vae.decode()` directly the way `StepwiseHandler` does. Qwen-Image's VAE is a 3D (video) decoder returning `(B, C, 1, H, W)` and `ImageUtil.to_image` wants 4D — `VAEUtil.decode` is what drops the singleton frame axis, and it's the same call each variant's own final decode makes, so previews and final images stay on identical handling. Calling `vae.decode()` bare here works for Z-Image and FLUX and breaks only on Qwen previews. If `uv pip install -U mflux` breaks this file, check `mflux/callbacks/callback_registry.py` and `mflux/callbacks/instances/stepwise_handler.py` in the installed package first — that's where this was reverse-engineered from (mflux ships no public docs for the callback system).
 
-## server/schedulers.py depends on mflux conditioning the model on sigmas, not on the step index
+## mfluxible/schedulers.py depends on mflux conditioning the model on sigmas, not on the step index
 
 `fractional_start` works by moving `sigmas[init_time_step]` off the grid, so the input
 image is noised to a level that lies *between* two schedule rungs while the loop still
@@ -259,10 +362,13 @@ model means a sibling scheduler subclassing mflux's flow-match class, not relaxi
 check.
 
 The scheduler is selected by handing mflux a dotted import path
-(`Config` -> `try_import_external_scheduler`), which resolves only because `server/` is
-on `sys.path` as flat modules. That path must never be built from request data -- it is
-an arbitrary module import in the server process -- which is why the API takes a bool
-and `SCHEDULER_PATH` is a constant.
+(`Config` -> `try_import_external_scheduler`), now `mfluxible.schedulers.*` -- an
+ordinary package import, where it used to depend on `server/` being on `sys.path` as
+flat modules. It is still a string kept in step with a class by hand, and nothing checks
+it until mflux imports it mid-generation, which is why `test_schedulers.py` builds a real
+`Config` from it rather than asserting the literal. That path must never be built from
+request data -- it is an arbitrary module import in the server process -- which is why
+the API takes a bool and `SCHEDULER_PATH` is a constant.
 
 ## Inpainting rides mflux's scheduler slot, because callbacks cannot change anything
 
@@ -413,10 +519,10 @@ submit handler with a log line instead. The mask controls' visibility is pure CS
 `#imagePreview.hidden` and `#inpaint:not(:checked)`, scoped to `body` rather than
 `#baseSection` because one of them lives on the result pane.
 
-## server/chat_stub.py hardcodes a specific tool name, confirmed against one caller
+## mfluxible/chat_stub.py hardcodes a specific tool name, confirmed against one caller
 
 `POST /v1/chat/completions` only ever emits a tool call for a tool literally named
-`generate_image` (see `GENERATE_IMAGE_TOOL_NAME` in `server/chat_stub.py`) if the
+`generate_image` (see `GENERATE_IMAGE_TOOL_NAME` in `mfluxible/chat_stub.py`) if the
 caller's request actually offers one by that name in `tools` -- it never fabricates a
 tool call for a name it wasn't handed. That name isn't part of any OpenAI spec (tool
 names are caller-defined) and isn't necessarily Open WebUI's own coinage either --
@@ -505,12 +611,12 @@ it rather than inferring from a failing generation.
 
 ## The VLM mailbox, and why the thing that spends money is a sidecar
 
-`server/vlm.py` holds one pending job and copies a JSON array between two HTTP
+`mfluxible/vlm.py` holds one pending job and copies a JSON array between two HTTP
 requests. It loads no model, holds no key and makes no outbound call -- the harness
-POSTs an image and waits on an SSE stream, `server/vlm_worker.py` claims the job,
+POSTs an image and waits on an SSE stream, `mfluxible/vlm_worker.py` claims the job,
 shells out to `claude -p`, and posts regions back.
 
-**The worker is a separate process because of what it does, not to keep `server/`
+**The worker is a separate process because of what it does, not to keep the package
 tidy -- and that is a different claim from where its file sits.** It runs an arbitrary
 operator-configured command with filesystem access, which on the default setting also
 makes network calls and spends a Claude account. Had that lived behind an endpoint,
@@ -644,11 +750,11 @@ while a Find objects button on a server without the mailbox can only ever 404.
 
 ## mcp SDK also moved fast: FastMCP -> MCPServer
 
-`clients/mcp_server.py` targets `mcp` 2.x, where `mcp.server.fastmcp.FastMCP` (the commonly-documented v1 API) was renamed to `mcp.server.mcpserver.MCPServer`. Importing the old path raises a `ModuleNotFoundError` with a migration pointer, it doesn't just silently break — if that happens, you're looking at v1-flavored example code (`FastMCP(...)`) against a v2 install. `Context`, `Image`, and the `@server.tool()` decorator are all still there, just re-exported from `mcp.server.mcpserver` instead.
+`clients/mfluxible_mcp/server.py` targets `mcp` 2.x, where `mcp.server.fastmcp.FastMCP` (the commonly-documented v1 API) was renamed to `mcp.server.mcpserver.MCPServer`. Importing the old path raises a `ModuleNotFoundError` with a migration pointer, it doesn't just silently break — if that happens, you're looking at v1-flavored example code (`FastMCP(...)`) against a v2 install. `Context`, `Image`, and the `@server.tool()` decorator are all still there, just re-exported from `mcp.server.mcpserver` instead.
 
 ## Progress notifications do not reliably hold a host's tool-call timeout open
 
-This is why `clients/mcp_server.py` runs generation in a background task and hands back a
+This is why `clients/mfluxible_mcp/server.py` runs generation in a background task and hands back a
 `check_image` handle instead of just blocking. Measured 2026-08-31 against a live Claude
 Code session: a `generate_image` call died at ~60s with the MCP SDK's default
 `Request timed out` while the server was sending a progress notification every ~8s. The
@@ -765,7 +871,7 @@ the image. `mask_path` is for a mask something else already drew.
 
 ## One model per process, and every per-model difference lives in models.py
 
-`server/models.py` is the whole multi-model story: which mflux variant class, which `ModelConfig`, which latent creator, the default step count, whether `guidance`/`negative_prompt` mean anything, and which scheduler the variant picks for itself. `engine.py` has no per-model branching and shouldn't grow any — mflux's ZImage, Flux1, QwenImage, Krea2, ErnieImage and Flux2Klein happen to share a constructor signature, a `generate_image()` signature, a `save_model(base_path)` and a `callbacks` registry, which is the only reason this works.
+`mfluxible/models.py` is the whole multi-model story: which mflux variant class, which `ModelConfig`, which latent creator, the default step count, whether `guidance`/`negative_prompt` mean anything, and which scheduler the variant picks for itself. `engine.py` has no per-model branching and shouldn't grow any — mflux's ZImage, Flux1, QwenImage, Krea2, ErnieImage and Flux2Klein happen to share a constructor signature, a `generate_image()` signature, a `save_model(base_path)` and a `callbacks` registry, which is the only reason this works.
 
 That shared surface is **not** universal across mflux, which is where the table currently stops. `FIBO`, `BooguImage` and `LensImage` take no `lora_paths`/`lora_scales`, so `_load_sync`'s fresh-load branch raises `TypeError` before any weight loads; `Ideogram4` accepts no `image_path`/`image_strength`/`scheduler`; `BooguImage` has no latent creator at all (mflux's own CLI passes `latent_creator=None` and states stepwise output is unsupported), so step previews are impossible; `LensImage` has no `save_model()`, so the quantized-weight cache has nothing to write and every startup re-quantizes. Each of those needs a capability flag here *plus* engine.py honouring it — a new row alone would fail at load or mid-stream, not gracefully.
 

@@ -17,11 +17,11 @@ from fastapi import FastAPI, File, Form, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
-import chat_stub
-from auth import BasicAuthMiddleware, credentials_from_env, resolve_bind_host, startup_warning
-from engine import MfluxEngine
-from models import CFG_GUIDANCE_FLOOR, MODELS
-from schemas import (
+from mfluxible import __version__, chat_stub
+from mfluxible.auth import BasicAuthMiddleware, credentials_from_env, resolve_bind_host, startup_warning
+from mfluxible.engine import MfluxEngine
+from mfluxible.models import CFG_GUIDANCE_FLOOR, MODELS
+from mfluxible.schemas import (
     A1111Txt2ImgRequest,
     ChatCompletionRequest,
     GenerateRequest,
@@ -29,7 +29,7 @@ from schemas import (
     VlmRequest,
     VlmResult,
 )
-from vlm import mailbox_from_env
+from mfluxible.vlm import mailbox_from_env
 
 # Nothing configures logging here, so this lands on stderr via logging.lastResort --
 # the terminal running uvicorn -- the same way engine.py's does.
@@ -103,7 +103,7 @@ async def lifespan(app: FastAPI):
     engine.shutdown()
 
 
-app = FastAPI(title="mfluxible", lifespan=lifespan)
+app = FastAPI(title="mfluxible", version=__version__, lifespan=lifespan)
 
 # Default: reflect back any http(s)://localhost:<any port> or 127.0.0.1:<any
 # port> origin (Starlette's allow_origin_regex does a fullmatch against the
@@ -133,10 +133,34 @@ app.add_middleware(
 )
 
 
-# server/ and clients/ live in the same repo checkout but stay dependency-independent
-# (see CLAUDE.md) -- this reaches across that boundary only to serve a static file, not
-# to import anything, so it doesn't compromise that separation.
-HARNESS_PATH = Path(__file__).resolve().parent.parent / "clients" / "harness.html"
+def _harness_path() -> Path:
+    """Where harness.html is, which differs between an install and a checkout.
+
+    Its source of truth is `clients/harness.html`, because it *is* a client -- it
+    consumes this API over HTTP like everything else in that directory (see CLAUDE.md's
+    Layout note). But it is also the one client the server itself serves, at `GET /`, so
+    the wheel has to carry a copy: pyproject.toml force-includes it next to this module,
+    and installed that is the only copy there is.
+
+    Hence two candidates rather than one, in this order. The installed location is
+    checked first so that a checkout sitting beside an installed copy still serves its
+    own file -- the direction you want to be wrong in while editing the harness.
+
+    Nothing here falls back to "no harness": if neither exists the FileResponse raises,
+    which surfaces as a 500 naming the path on the server's own log. That is a broken
+    install rather than a request problem, and a stub page saying so would be a worse
+    answer than a loud failure.
+    """
+    packaged = Path(__file__).resolve().parent / "harness.html"
+    if packaged.is_file():
+        return packaged
+    return Path(__file__).resolve().parent.parent / "clients" / "harness.html"
+
+
+# Resolved once at import, like every other setting here. The file does not move while
+# a server runs, and a per-request stat to discover that it hasn't would be two syscalls
+# on the hottest path this server has.
+HARNESS_PATH = _harness_path()
 
 
 @app.get("/")
@@ -156,6 +180,9 @@ async def health():
     spec = engine.spec
     return {
         "status": "ok",
+        # Which release a client is talking to. Safe to leave open alongside the rest
+        # of this response for the same reason: it names no path and no account.
+        "version": __version__,
         "model_loaded": engine.model is not None,
         # What this process is running and which request fields it will accept, so a
         # client can pick sane defaults without knowing how the server was configured.
@@ -171,7 +198,7 @@ async def health():
             "default_guidance": spec.default_guidance,
             "supports_negative_prompt": spec.supports_negative_prompt,
             # False on models whose own default scheduler isn't the linear one
-            # server/schedulers.py extends -- see ModelSpec.default_scheduler. A client
+            # mfluxible/schedulers.py extends -- see ModelSpec.default_scheduler. A client
             # that predates this field should treat a missing value as "unknown, let
             # the server decide", the same way it treats a missing `model`.
             "supports_fractional_start": spec.supports_fractional_start,
@@ -247,7 +274,7 @@ async def generate(req: GenerateRequest):
 # ---------------------------------------------------------------------------
 #
 # Three endpoints, two clients: the harness submits an image and holds a stream,
-# server/vlm_worker.py claims the job and posts regions back. The server does no
+# mfluxible/vlm_worker.py claims the job and posts regions back. The server does no
 # detection -- see vlm.py's docstring for why that stays out of here.
 
 _VLM_OFF = {"type": "error", "message": "object detection is not enabled on this server."}

@@ -42,9 +42,9 @@ from mflux.models.common.latent_creator.latent_creator import LatentCreator
 from mflux.models.common.vae.vae_util import VAEUtil
 from mflux.utils.image_util import ImageUtil
 
-from models import CFG_GUIDANCE_FLOOR, ModelSpec, resolve
-from schedulers import MaskJob, clear_mask_job, scheduler_path, set_mask_job, start_fraction
-from schemas import GenerateRequest
+from mfluxible.models import CFG_GUIDANCE_FLOOR, ModelSpec, resolve
+from mfluxible.schedulers import MaskJob, clear_mask_job, scheduler_path, set_mask_job, start_fraction
+from mfluxible.schemas import GenerateRequest
 
 # Where anything a *client* must not see goes instead: exception text out of mflux,
 # MLX, HF-hub or Pillow, all of which is written for whoever is running the server.
@@ -609,7 +609,7 @@ class MfluxEngine:
             # See ModelSpec.supports_mask and schedulers.py's masked-inpainting note.
             return (
                 f"{self.spec.label} runs mflux's {self.spec.default_scheduler!r} scheduler, and "
-                "mask needs the linear schedule server/schedulers.py extends; omit the field "
+                "mask needs the linear schedule mfluxible/schedulers.py extends; omit the field "
                 "(image alone still works, regenerating the whole frame)."
             )
         if req.fractional_start and not self.spec.supports_fractional_start:

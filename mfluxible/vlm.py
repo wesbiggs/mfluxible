@@ -9,7 +9,7 @@ posts back come out of the harness's open stream.
 The server does no detection of its own. It never loads a model, never holds an
 API key and never makes an outbound call: it writes a file, holds one slot in
 memory and copies a JSON array from one HTTP request to another. Everything that
-spends a Claude account lives in `server/vlm_worker.py`, deliberately -- see
+spends a Claude account lives in `mfluxible/vlm_worker.py`, deliberately -- see
 the note in CLAUDE.md for why that is a client rather than a server feature.
 
 **One slot, not a queue.** MfluxEngine already serializes generations behind a
@@ -45,7 +45,7 @@ from PIL import Image, UnidentifiedImageError
 # mflux rotates an input image before encoding it, so a box measured against the
 # unrotated bytes would be applied in a different frame to the one it was chosen in.
 # The worker sees what this reports, and the mask is built against the same numbers.
-from engine import _oriented
+from mfluxible.engine import _oriented
 
 log = logging.getLogger("mfluxible.regions")
 

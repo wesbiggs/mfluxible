@@ -30,7 +30,7 @@ import time
 import uuid
 from typing import Any
 
-from schemas import ChatCompletionRequest, ChatMessage
+from mfluxible.schemas import ChatCompletionRequest, ChatMessage
 
 GENERATE_IMAGE_TOOL_NAME = "generate_image"
 

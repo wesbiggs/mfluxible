@@ -1,16 +1,22 @@
 # Test-only dependencies, on top of the server's own runtime requirements. Split out
-# rather than merged into server/requirements.txt so a production install of the
-# server doesn't pull in test tooling it'll never use.
--r server/requirements.txt
+# rather than folded into pyproject.toml's `dependencies` so a production install of
+# the server doesn't pull in test tooling it'll never use.
 
-# The MCP client is under test too (tests/test_mcp_server.py), and importing it needs
-# the mcp SDK. Pulled in by reference rather than as a second `mcp>=...` pin here: the
-# version constraint belongs in one place, and a test env that drifts from what the
-# tool is actually installed with is the one thing this file must not do. Note the
-# direction -- the dev env is a superset of every component, which is the opposite of
-# the separation the four requirements files keep for *installs* (see CLAUDE.md): a
-# client-only or MCP-only install still never sees mflux.
--r clients/requirements-mcp.txt
+# The server and its dependencies, editable, from pyproject.toml -- which is the one
+# place they are declared. The editable install is what makes `mfluxible-server` and
+# `mfluxible-vlm-worker` runnable from a checkout; pytest reaches the same tree through
+# pytest.ini's `pythonpath = .` and needs no install at all.
+-e .
+
+# The MCP client is a second distribution (clients/, published as `mfluxible-mcp`) and
+# is under test here too -- tests/test_mcp_server.py imports it. Pulled in by reference
+# rather than as a second copy of its pins: the version constraints belong in its own
+# pyproject, and a test env that drifts from what the tool actually installs with is
+# the one thing this file must not do. Note the direction -- the dev env is a superset
+# of every component, which is the opposite of the separation the install-time
+# dependency sets keep (see CLAUDE.md): a client-only or MCP-only install still never
+# sees mflux.
+-e ./clients
 
 pytest>=9.1.1
 pytest-asyncio>=1.4.0

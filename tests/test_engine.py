@@ -8,9 +8,9 @@ import io
 import pytest
 from PIL import Image
 
-from engine import MfluxEngine
-from models import CFG_GUIDANCE_FLOOR
-from schemas import GenerateRequest
+from mfluxible.engine import MfluxEngine
+from mfluxible.models import CFG_GUIDANCE_FLOOR
+from mfluxible.schemas import GenerateRequest
 from tests.doubles.toy_model import TOY_MODEL_SPEC
 
 

@@ -1,4 +1,4 @@
-"""Tests for clients/mcp_server.py, which is a client of the HTTP API rather than part
+"""Tests for clients/mfluxible_mcp/, which is a client of the HTTP API rather than part
 of the server -- so most of what matters here is whether it builds requests the server
 will actually accept, and whether everything it refuses comes back as a `ToolError`.
 
@@ -15,11 +15,11 @@ import io
 import pytest
 from PIL import Image
 
-import mcp_server
+from mfluxible_mcp import server as mcp_server
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp_types import TextContent
-from models import MODELS
-from schemas import GenerateRequest
+from mfluxible.models import MODELS
+from mfluxible.schemas import GenerateRequest
 
 BOX = [0.385, 0.195, 0.964, 0.794]
 """The cup in a 768x768 test scene, as the tool takes it. Its pixel form (296, 150,
@@ -204,7 +204,7 @@ def test_the_client_and_the_server_orient_an_image_identically():
     rule, and the size check that spans them only works while they agree. They are in
     different dependency sets -- the MCP client must never import the server -- so this
     is the only place the two can be held together."""
-    import engine
+    from mfluxible import engine
 
     for orientation in (1, 3, 6, 8):
         raw = _jpeg_with_orientation((40, 20), orientation)
@@ -522,7 +522,7 @@ async def test_the_mcp_tool_never_builds_a_request_its_own_server_rejects(
     No weights are touched -- MfluxEngine resolves its spec in __init__ and downloads
     nothing until load().
     """
-    from engine import MfluxEngine
+    from mfluxible.engine import MfluxEngine
 
     for spec in MODELS:
         async def _health(spec=spec):

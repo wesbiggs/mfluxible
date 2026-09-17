@@ -67,11 +67,14 @@ from mflux.models.common.schedulers.linear_scheduler import LinearScheduler
 
 # What mflux resolves back to this class. Config accepts a scheduler as a dotted path
 # and imports it (`try_import_external_scheduler`), so this string is the whole wiring.
-# It resolves because server/ is on sys.path as flat modules -- the same reason
-# `from engine import ...` works (see CLAUDE.md). Never build this string from request
-# data: an arbitrary dotted path is an arbitrary module import in the server process,
-# which is why the API exposes a bool and picks the path itself.
-SCHEDULER_PATH = "schedulers.FractionalStartLinearScheduler"
+# It resolves because `mfluxible` is an importable package -- installed, or a checkout
+# on sys.path. That is now an ordinary import rather than the sys.path arrangement this
+# used to depend on, but the string still has to be kept in step with the class below
+# by hand, since nothing checks a dotted path until mflux imports it mid-generation.
+# Never build this string from request data: an arbitrary dotted path is an arbitrary
+# module import in the server process, which is why the API exposes a bool and picks
+# the path itself.
+SCHEDULER_PATH = "mfluxible.schedulers.FractionalStartLinearScheduler"
 
 
 def start_fraction(num_inference_steps: int, image_strength: float | None, init_time_step: int) -> float:
@@ -251,9 +254,9 @@ class MaskedFractionalStartScheduler(_MaskedBlend, FractionalStartLinearSchedule
 # two bools rather than anything assembled from a request -- see SCHEDULER_PATH above.
 def scheduler_path(*, masked: bool, fractional: bool) -> str | None:
     if masked and fractional:
-        return "schedulers.MaskedFractionalStartScheduler"
+        return "mfluxible.schedulers.MaskedFractionalStartScheduler"
     if masked:
-        return "schedulers.MaskedBlendLinearScheduler"
+        return "mfluxible.schedulers.MaskedBlendLinearScheduler"
     if fractional:
         return SCHEDULER_PATH
     return None

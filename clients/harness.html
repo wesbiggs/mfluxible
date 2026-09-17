@@ -2018,7 +2018,7 @@ async function findObjects() {
             setRegionNote(
               event.worker_attached
                 ? "looking…"
-                : "waiting — no detection worker is attached. Start server/vlm_worker.py.",
+                : "waiting — no detection worker is attached. Start mfluxible-vlm-worker.",
               !event.worker_attached,
             );
           } else if (event.type === "error") {

@@ -7,29 +7,53 @@ Rather than a full node-graph tool (ComfyUI) or a proprietary format (Draw Thing
 ## Layout
 
 ```
-server/             the model + HTTP API (FastAPI)
+mfluxible/          the model + HTTP API (FastAPI), and the detection sidecar
 clients/            everything that talks to it: terminal scripts, a browser harness, an MCP tool
 Caddyfile.example   optional: a reverse proxy that puts a bearer token in front of the API
 ```
 
-Nothing in `clients/` needs `server/`'s dependencies (mflux, PyTorch, etc.) or vice versa — install only what you need for what you're doing.
+Two packages are published from here, and they stay separate so that neither install
+drags in the other's dependencies:
+
+| | install | what it is |
+|---|---|---|
+| **`mfluxible`** | `pip install mfluxible` | the server, its `mfluxible-vlm-worker` sidecar, and the browser harness. Apple Silicon only — mflux and MLX are |
+| **`mfluxible-mcp`** | `uvx mfluxible-mcp` | the [MCP tool](docs/mcp.md). Talks HTTP to a running server, so it needs no mflux, no MLX and no PyTorch, and can live on a different machine |
 
 ## Quickstart
+
+Requires Python 3.11+ on Apple Silicon.
+
+```bash
+pip install mfluxible
+mfluxible-server
+```
+
+That listens on `127.0.0.1:8420`; `--host`, `--port` and `--config` are the flags, and
+`mfluxible-server --help` lists them. Everything else is configured with environment
+variables or a [config file](docs/server.md#configuration).
+
+<details>
+<summary>Running from a checkout instead</summary>
 
 Dependencies are managed with [uv](https://docs.astral.sh/uv/) — `brew install uv`, or see its [installation docs](https://docs.astral.sh/uv/getting-started/installation/).
 
 ```bash
 uv venv --python 3.11
-uv pip install -r server/requirements.txt
+uv pip install -e .
 
-uv run uvicorn server:app --app-dir server --host 127.0.0.1 --port 8420
+uv run mfluxible-server --host 127.0.0.1 --port 8420
 ```
 
-`uv venv` creates `.venv/` in the repo root; `uv pip install` and `uv run` both find it there, so nothing needs activating. There's deliberately no `pyproject.toml` — each half of the repo keeps its own `requirements.txt` (see [Layout](#layout)) and you install only the one you need, which is why this is `uv pip`/`uv run` rather than `uv sync`.
+`uv venv` creates `.venv/` in the repo root; `uv pip install` and `uv run` both find it there, so nothing needs activating. `uvicorn mfluxible.server:app` works too and is the way to reach any uvicorn option `mfluxible-server` doesn't expose — the config file is applied when the package is imported, so both routes behave identically.
+
+Note that `pyproject.toml` here is a packaging manifest, not a uv project: it sets `[tool.uv] managed = false`, so `uv run` keeps using `.venv` and writes no lock file. That is what lets a machine running only `clients/stream_client.py` install `requests` and nothing else.
+
+</details>
 
 The model loads on startup, before the server accepts any requests. On first run this downloads its weights from Hugging Face — expect a sizable one-time download — then quantizes them and caches the quantized copy (see [Model cache](docs/server.md#model-cache)); both only happen once.
 
-The default model is Z-Image-Turbo ([Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo)). To run something else, set `MFLUXIBLE_MODEL` before starting the server — fifteen checkpoints across Z-Image, FLUX.1, FLUX.2 Klein, Qwen-Image, Krea-2 and ERNIE-Image are supported; only the model you select is ever downloaded. See [Models](docs/server.md#models) for the full table, what differs between them, and roughly how much memory each needs — 8.6 GB to 31 GB of weights at the default quantization, about half that at `MFLUXIBLE_QUANTIZE=4`.
+The default model is Z-Image-Turbo ([Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo)). To run something else, set `MFLUXIBLE_MODEL` (or `model` in a config file) before starting the server — fifteen checkpoints across Z-Image, FLUX.1, FLUX.2 Klein, Qwen-Image, Krea-2 and ERNIE-Image are supported; only the model you select is ever downloaded. See [Models](docs/server.md#models) for the full table, what differs between them, and roughly how much memory each needs — 8.6 GB to 31 GB of weights at the default quantization, about half that at `MFLUXIBLE_QUANTIZE=4`.
 
 Once it's running:
 
@@ -47,7 +71,8 @@ or use one of the [clients](docs/clients.md) for something more visual.
 - **[MCP tool](docs/mcp.md)** — generating images from an MCP client: what the tool does, how to register it with each tested client, and its own environment variables.
 - **[API](docs/api.md)** — every endpoint: the native streaming endpoint and its SSE event schema, image-to-image and fractional start, the OpenAI-compatible `/v1` endpoints, and the AUTOMATIC1111-shaped `txt2img` shim SillyTavern needs.
 - **[Server](docs/server.md)** — running it: how a synchronous mflux call is streamed out of an async server, environment variables (memory, model cache, LoRAs, CORS), the models it can run, binding to the network, authentication, and troubleshooting.
-- **[Contributing](CONTRIBUTING.md)** — for developers: the weight-free test suite and CI, and what it takes to add another mflux model.
+- **[Contributing](CONTRIBUTING.md)** — for developers: the weight-free test suite and CI, what it takes to add another mflux model, and how a release is cut.
+- **[Changelog](CHANGELOG.md)** — what changed in each version.
 
 ## License
 

@@ -859,5 +859,16 @@ async def check_image(
     return _result(job)
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Entry point for the `mfluxible-mcp` console script.
+
+    A function rather than bare module-level code so there is something for
+    pyproject.toml to name: an MCP host launches this over stdio, and pointing that
+    host at an installed command is what replaces pointing it at an interpreter path
+    inside somebody's checkout.
+    """
     server.run()
+
+
+if __name__ == "__main__":
+    main()

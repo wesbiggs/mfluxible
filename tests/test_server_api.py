@@ -7,7 +7,7 @@ import json
 
 from PIL import Image
 
-from models import MODELS
+from mfluxible.models import MODELS
 
 
 def test_health_reports_the_configured_model(client):
@@ -332,7 +332,7 @@ _LEAKY_MESSAGE = "No such file: '/Users/someone/.cache/huggingface/hub/models--x
 
 
 def _make_generation_fail(client):
-    import server as server_module
+    import mfluxible.server as server_module
 
     def boom(*_args, **_kwargs):
         raise FileNotFoundError(_LEAKY_MESSAGE)
@@ -505,9 +505,9 @@ def test_a1111_shim_never_builds_a_request_its_own_model_rejects(monkeypatch):
     No weights are touched: MfluxEngine resolves its spec in __init__ and downloads
     nothing until load().
     """
-    import server as server_module
-    from engine import MfluxEngine
-    from schemas import A1111Txt2ImgRequest
+    import mfluxible.server as server_module
+    from mfluxible.engine import MfluxEngine
+    from mfluxible.schemas import A1111Txt2ImgRequest
 
     # The maximal payload SillyTavern can send, across the cfg_scale values that
     # matter: its own default, one at the CFG floor (where a negative prompt would be

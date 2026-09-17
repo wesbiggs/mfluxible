@@ -9,7 +9,7 @@ import base64
 
 import pytest
 
-from auth import is_authorized, is_loopback, resolve_bind_host, startup_warning
+from mfluxible.auth import is_authorized, is_loopback, resolve_bind_host, startup_warning
 
 CREDS = ("tavern", "hunter2")
 
@@ -22,7 +22,7 @@ def _header(username: str, password: str) -> dict:
 @pytest.fixture
 def auth_client(client, monkeypatch):
     """The app fixture, with auth switched on."""
-    import server as server_module
+    import mfluxible.server as server_module
 
     monkeypatch.setattr(server_module, "BASIC_AUTH", CREDS)
     return client
@@ -40,7 +40,7 @@ def test_endpoints_are_open_when_no_credentials_are_configured(client):
 
 
 def test_credentials_from_env_needs_both_halves(monkeypatch):
-    import auth
+    from mfluxible import auth
 
     monkeypatch.setenv("MFLUXIBLE_BASIC_AUTH_USERNAME", "tavern")
     monkeypatch.delenv("MFLUXIBLE_BASIC_AUTH_PASSWORD", raising=False)
@@ -224,8 +224,8 @@ def _boot(monkeypatch, caplog, argv, basic_auth):
 
     from fastapi.testclient import TestClient
 
-    import server as server_module
-    from engine import MfluxEngine
+    import mfluxible.server as server_module
+    from mfluxible.engine import MfluxEngine
     from tests.doubles.toy_model import TOY_MODEL_SPEC
 
     # auth.resolve_bind_host reads sys.argv at call time, so patching it here reaches it.

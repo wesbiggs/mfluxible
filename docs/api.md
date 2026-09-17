@@ -17,6 +17,7 @@ Returns:
 ```json
 {
   "status": "ok",
+  "version": "0.9.0",
   "model_loaded": true,
   "available": ["z-image-turbo", "z-image", "flux-schnell", "flux-dev", "krea-dev", "qwen-image", "krea-2", "krea-2-raw", "ernie-image-turbo", "ernie-image", "flux2-klein-4b", "flux2-klein-9b", "flux2-klein-9b-kv", "flux2-klein-base-4b", "flux2-klein-base-9b"],
   "model": {
@@ -36,7 +37,7 @@ Returns:
 }
 ```
 
-`model_loaded` is useful for waiting on startup (weight download + quantization can take a while the first time) before sending a generation request.
+`version` is the release of mfluxible answering, and is the one field here a client can use to tell two deployments apart. `model_loaded` is useful for waiting on startup (weight download + quantization can take a while the first time) before sending a generation request.
 
 `model` describes what this process is running and which request fields it will accept, so a client can fill in sensible defaults without being told how the server was configured: `default_steps` is what `steps` falls back to, and `supports_guidance` / `supports_negative_prompt` / `supports_fractional_start` / `supports_mask` say whether `guidance` / `negative_prompt` / `fractional_start` / `mask` are accepted or rejected with a 400. `available` lists every model this build knows how to run — all but `model.name` would need a restart (and a download) to use.
 
@@ -118,7 +119,7 @@ Note the degenerate end: `image_strength: 1.0` makes `init_time_step` equal `ste
 
 It works because `init_time_step` is doing two jobs. Job one — which step the loop starts at — genuinely has to be an integer: every step integrates between adjacent grid points, `dt = sigmas[t+1] - sigmas[t]`, so there is no such thing as starting halfway through one. Job two — the noise level the input image is blended to, `sigmas[init_time_step]` — is just an array lookup, and nothing requires it to land on a grid point. Sharing one integer between them is what quantizes the dial.
 
-So [`server/schedulers.py`](../server/schedulers.py) moves the rung rather than the index: it takes the schedule the request's own `steps` produces and replaces `sigmas[init_time_step]` with a point interpolated toward its neighbour, at the exact position `image_strength` names. The loop still starts on the same whole step and still runs `steps - start_step` of them; only its first step is shorter. At 10 steps, `0.25` lands halfway between the rungs `0.2` and `0.3` reach, `0.22` lands a fifth of the way, and so on — with no change to how many steps run, so a strength sweep isn't also a step-count sweep.
+So [`mfluxible/schedulers.py`](../mfluxible/schedulers.py) moves the rung rather than the index: it takes the schedule the request's own `steps` produces and replaces `sigmas[init_time_step]` with a point interpolated toward its neighbour, at the exact position `image_strength` names. The loop still starts on the same whole step and still runs `steps - start_step` of them; only its first step is shorter. At 10 steps, `0.25` lands halfway between the rungs `0.2` and `0.3` reach, `0.22` lands a fifth of the way, and so on — with no change to how many steps run, so a strength sweep isn't also a step-count sweep.
 
 This is safe rather than a mismatch between the latents and what the model thinks it is denoising because **every variant conditions the transformer on `sigmas[t]` itself, not on the step index** — `ZImage` computes `timestep = 1 - sigmas[t]` inline, and the FLUX and Qwen transformers read `config.scheduler.sigmas[...]` for their time embedding. Moving the rung moves the conditioning with it. That's the assumption to re-check if a future mflux version makes images from this path come out wrong.
 
@@ -181,7 +182,7 @@ rectangle. **404 unless `MFLUXIBLE_VLM_DIR` is set** — check `regions.enabled`
 [`/health`](#get-health) first.
 
 The server does no detection of its own: it stashes the image, holds the request open,
-and waits for `server/vlm_worker.py` to claim the job and post regions back (see
+and waits for `mfluxible/vlm_worker.py` to claim the job and post regions back (see
 [Object detection](server.md#object-detection)). Nothing here loads a model, holds an
 API key or makes an outbound call.
 
@@ -341,7 +342,7 @@ Any other `id` is a 404 with OpenAI's own `model_not_found` error code, the same
 
 ## `POST /v1/chat/completions`
 
-Not a chat model — a stub that exists so a frontend requiring an actual "chat model" behind its Native/agentic tool-calling mode (Open WebUI is the motivating case) can point that connection at mfluxible too, instead of running a separate LLM (Ollama, `llama-server`, ...) just to decide "yes, call the image tool" on every message. See [`server/chat_stub.py`](../server/chat_stub.py) for the full rationale; the short version is there's no reasoning to replace, so there's nothing an LLM gets right that a hardcoded rule doesn't get right for free, at zero extra memory (it's pure Python in the same process as the diffusion model — no weights, no inference).
+Not a chat model — a stub that exists so a frontend requiring an actual "chat model" behind its Native/agentic tool-calling mode (Open WebUI is the motivating case) can point that connection at mfluxible too, instead of running a separate LLM (Ollama, `llama-server`, ...) just to decide "yes, call the image tool" on every message. See [`mfluxible/chat_stub.py`](../mfluxible/chat_stub.py) for the full rationale; the short version is there's no reasoning to replace, so there's nothing an LLM gets right that a hardcoded rule doesn't get right for free, at zero extra memory (it's pure Python in the same process as the diffusion model — no weights, no inference).
 
 It plays exactly one deterministic turn of OpenAI's function-calling protocol:
 

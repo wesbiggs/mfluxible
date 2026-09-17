@@ -11,7 +11,7 @@ import json
 import pathlib
 import re
 
-from models import MODELS
+from mfluxible.models import MODELS
 
 API_DOC = pathlib.Path(__file__).resolve().parents[1] / "docs" / "api.md"
 
@@ -33,3 +33,15 @@ def test_documented_health_sample_lists_every_model_in_table_order():
     # server.md's model table is written in that same order, so a reader comparing the
     # two should see them line up.
     assert _health_sample()["available"] == [spec.key for spec in MODELS]
+
+
+def test_the_documented_health_sample_reports_the_current_version():
+    """The sample carries a literal version string, so it goes stale at every release.
+
+    Cheap to pin and easy to miss otherwise: nothing else reads that field, so a wrong
+    one would sit in the docs indefinitely, quietly telling readers they are looking at
+    a response from an older build than the one they installed.
+    """
+    from mfluxible import __version__
+
+    assert _health_sample()["version"] == __version__

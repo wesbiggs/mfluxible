@@ -1,8 +1,17 @@
 # Server
 
+```bash
+pip install mfluxible
+mfluxible-server
+```
+
+Requires Python 3.11+ on Apple Silicon. See the [README](../README.md#quickstart) for
+running it from a checkout instead, and [Configuration](#configuration) for everything
+you can set.
+
 ## How it works
 
-mflux's `generate_image()` is synchronous: it runs the whole denoising loop in one thread and invokes registered callbacks at each step (`InLoopCallback`). The server runs that call on a dedicated single-worker thread (not just any worker thread — see the comment at the top of `server/engine.py` for why that matters with MLX) and bridges each callback invocation back to the event loop as an SSE event via `call_soon_threadsafe`, so a single async server can stream progress out of an otherwise blocking call.
+mflux's `generate_image()` is synchronous: it runs the whole denoising loop in one thread and invokes registered callbacks at each step (`InLoopCallback`). The server runs that call on a dedicated single-worker thread (not just any worker thread — see the comment at the top of `mfluxible/engine.py` for why that matters with MLX) and bridges each callback invocation back to the event loop as an SSE event via `call_soon_threadsafe`, so a single async server can stream progress out of an otherwise blocking call.
 
 Only one generation runs at a time (there's a lock) — MLX/Metal generation against one shared model instance isn't set up here for concurrency.
 
@@ -10,26 +19,95 @@ Preview images are decoded the same way mflux's own `--stepwise-image-output-dir
 
 ## Configuration
 
-Environment variables for `server.py`, all optional.
+Every setting below is optional, and there are two ways to set each one: an environment
+variable, or a key in a [config file](#config-file). They are the same setting — a key is
+its variable with `MFLUXIBLE_` dropped and the case lowered, so `model` sets
+`MFLUXIBLE_MODEL`. Where both say something, **the environment wins**.
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `MFLUXIBLE_MODEL` | `z-image-turbo` | Which model to run — any of the fifteen in [Models](#models) |
-| `MFLUXIBLE_QUANTIZE` | `8` | Quantization bits; try `4` for less memory, `none` for full precision |
-| `MFLUXIBLE_MODEL_DIR` | `~/.cache/mfluxible` | Where quantized weights are cached (see [Model cache](#model-cache)) |
-| `MFLUXIBLE_MLX_CACHE_LIMIT_MB` | `1024` | Cap on MLX's reusable buffer cache; `none` for MLX's own default (see [Memory](#memory)) |
-| `MFLUXIBLE_MLX_WIRED_LIMIT_MB` | unset | Wire this much memory so the OS cannot page the weights out (see [Memory](#memory)) |
-| `MFLUXIBLE_LORA_PATHS` | unset | Comma-separated local LoRA `.safetensors` files to bake in (see [LoRAs](#loras)) |
-| `MFLUXIBLE_LORA_SCALES` | `1.0` each | Comma-separated scales matching `MFLUXIBLE_LORA_PATHS` |
-| `MFLUXIBLE_BASIC_AUTH_USERNAME` | unset | HTTP Basic username; auth is off unless this **and** the password are both set (see [Authentication](#authentication)) |
-| `MFLUXIBLE_BASIC_AUTH_PASSWORD` | unset | HTTP Basic password; required alongside the username |
-| `MFLUXIBLE_CORS_ORIGIN_REGEX` | `https?://(localhost\|127\.0\.0\.1)(:\d+)?` | Origins to reflect back in CORS (see [CORS](#cors)) |
-| `MFLUXIBLE_CORS_ORIGINS` | unset | Comma-separated exact-match origins, in addition to the regex |
-| `MFLUXIBLE_VLM_DIR` | unset | Enables object detection and says where images are stashed (see [Object detection](#object-detection)) |
-| `MFLUXIBLE_VLM_TIMEOUT` | `180` | Seconds a detection waits for a worker's answer before giving up |
-| `MFLUXIBLE_VLM_COMMAND` | `claude -p …` | What `vlm_worker.py` runs per detection (see [Using a different tool](#using-a-different-tool)) |
-| `MFLUXIBLE_VLM_MODEL` | `opus` | Which model the **default** command uses; ignored if you set your own command |
-| `HF_TOKEN` | unset | Not an mfluxible variable — `huggingface_hub` reads it, and gated models need it (see [Gated weights](#gated-weights-and-hf_token)) |
+The last four are read by `mfluxible-vlm-worker` rather than the server. They are listed
+here, with the server's, because the worker is co-configured with it and runs on the same
+machine — see [Object detection](#object-detection).
+
+| Variable | Config key | Default | Purpose |
+|---|---|---|---|
+| `MFLUXIBLE_MODEL` | `model` | `z-image-turbo` | Which model to run — any of the fifteen in [Models](#models) |
+| `MFLUXIBLE_QUANTIZE` | `quantize` | `8` | Quantization bits; try `4` for less memory, `none` for full precision |
+| `MFLUXIBLE_MODEL_DIR` | `model_dir` | `~/.cache/mfluxible` | Where quantized weights are cached (see [Model cache](#model-cache)) |
+| `MFLUXIBLE_MLX_CACHE_LIMIT_MB` | `mlx_cache_limit_mb` | `1024` | Cap on MLX's reusable buffer cache; `none` for MLX's own default (see [Memory](#memory)) |
+| `MFLUXIBLE_MLX_WIRED_LIMIT_MB` | `mlx_wired_limit_mb` | unset | Wire this much memory so the OS cannot page the weights out (see [Memory](#memory)) |
+| `MFLUXIBLE_LORA_PATHS` | `lora_paths` | unset | Local LoRA `.safetensors` files to bake in (see [LoRAs](#loras)) |
+| `MFLUXIBLE_LORA_SCALES` | `lora_scales` | `1.0` each | Scales matching `MFLUXIBLE_LORA_PATHS` one for one |
+| `MFLUXIBLE_HOST` | `host` | `127.0.0.1` | Where `mfluxible-server` binds when `--host` isn't given |
+| `MFLUXIBLE_PORT` | `port` | `8420` | Likewise for `--port` |
+| `MFLUXIBLE_BASIC_AUTH_USERNAME` | `basic_auth_username` | unset | HTTP Basic username; auth is off unless this **and** the password are both set (see [Authentication](#authentication)) |
+| `MFLUXIBLE_BASIC_AUTH_PASSWORD` | `basic_auth_password` | unset | HTTP Basic password; required alongside the username |
+| `MFLUXIBLE_CORS_ORIGIN_REGEX` | `cors_origin_regex` | `https?://(localhost\|127\.0\.0\.1)(:\d+)?` | Origins to reflect back in CORS (see [CORS](#cors)) |
+| `MFLUXIBLE_CORS_ORIGINS` | `cors_origins` | unset | Exact-match origins, in addition to the regex |
+| `MFLUXIBLE_VLM_DIR` | `vlm_dir` | unset | Enables object detection and says where images are stashed (see [Object detection](#object-detection)) |
+| `MFLUXIBLE_VLM_TIMEOUT` | `vlm_timeout` | `180` | Seconds a detection waits for a worker's answer before giving up |
+| `MFLUXIBLE_CONFIG` | — | unset | Which config file to read; `none` disables discovery entirely. Not settable from a config file, for obvious reasons |
+| `HF_TOKEN` | `[env]` table | unset | Not an mfluxible variable — `huggingface_hub` reads it, and gated models need it (see [Gated weights](#gated-weights-and-hf_token)) |
+| `MFLUXIBLE_VLM_COMMAND` | `vlm_command` | `claude -p …` | *(worker)* What it runs per detection (see [Using a different tool](#using-a-different-tool)) |
+| `MFLUXIBLE_VLM_MODEL` | `vlm_model` | `opus` | *(worker)* Which model the **default** command uses; ignored if you set your own command |
+| `MFLUXIBLE_SERVER_URL` | `server_url` | `http://127.0.0.1:8420` | *(worker)* Where to find the server, when `--url` isn't given |
+| `MFLUXIBLE_BEARER_TOKEN` | `bearer_token` | unset | *(worker)* Sent as `Authorization: Bearer …`, if a proxy gates the API |
+
+### Config file
+
+A TOML file, as an alternative to exporting the variables above. Copy
+[`mfluxible.example.toml`](../mfluxible.example.toml) — every key in it is commented out
+and documented — and put it wherever suits:
+
+```toml
+model = "flux-dev"
+quantize = 4
+port = 9000
+
+vlm_dir = "~/.cache/mfluxible/vlm"
+
+[env]
+HF_TOKEN = "hf_..."
+```
+
+It is looked for in this order, and the first hit wins — they are never merged, because a
+value that could have come from either of two files is a value you have to go hunting for:
+
+1. `--config PATH`, on `mfluxible-server` or `mfluxible-vlm-worker`
+2. `MFLUXIBLE_CONFIG`
+3. `./mfluxible.toml`, in the directory you started the process from
+4. `~/.config/mfluxible/mfluxible.toml`
+
+Naming a file that isn't there is an error; finding nothing at 3 or 4 is not. To turn
+discovery off completely — for a deployment that configures everything through the
+environment and wants no file to have a say — set `MFLUXIBLE_CONFIG=none`.
+
+Four things worth knowing:
+
+- **The environment wins.** A variable that is already set is left alone, so
+  `MFLUXIBLE_MODEL=flux-dev mfluxible-server` is the one-off override it looks like, and
+  a file in your home directory can never quietly overrule a launchd plist.
+- **An unrecognised key is a startup error**, not a line that does nothing. `mdoel =
+  "flux-dev"` should not produce a server running the default model and reporting success.
+- **Values are not interpreted.** `~` is expanded by whatever reads the setting, exactly
+  as it would be from the environment, so the file and the variable always behave the
+  same. The one convenience is that a list is joined with commas, so
+  `lora_paths = ["a.safetensors", "b.safetensors"]` reads the way you would expect.
+- **`[env]` is an escape hatch, not a section.** Names in it are exported exactly as
+  written, which is how a variable belonging to some other library — `HF_TOKEN` — can
+  live in the same file. Everything else in the file is flat.
+
+`mfluxible-server` prints which file it loaded on stderr as it starts. It is deliberately
+*not* reported on `/health`: that endpoint is left open by
+[`Caddyfile.example`](../Caddyfile.example) precisely because it discloses no filesystem
+paths.
+
+One caution, and it belongs to `vlm_command` specifically. That setting names a program
+this machine will run, and rule 3 above means a file in the current directory is picked up
+without being asked for. Starting the worker somewhere you did not put that file is the
+case to think about; `MFLUXIBLE_CONFIG` names one explicitly, and `none` turns discovery
+off. This is the same trust boundary the worker already has — see
+[Running the worker](#running-the-worker) — only now it can be reached by a file as well
+as by an export.
 
 ### Memory
 
@@ -57,7 +135,7 @@ This means a second, smaller copy of the weights lives on disk alongside HF's ca
 
 ```bash
 MFLUXIBLE_LORA_PATHS="/path/to/style.safetensors" MFLUXIBLE_LORA_SCALES="0.8" \
-  uv run uvicorn server:app --app-dir server --host 127.0.0.1 --port 8420
+  mfluxible-server
 ```
 
 LoRA weights are applied and permanently merged ("baked") into the model at load time — this is mflux's own design, not a limitation added here. That makes it a server-startup choice, not a per-request one: one running server has one fixed LoRA configuration (or none), and switching LoRAs means restarting the server with different env vars, the same way `MFLUXIBLE_QUANTIZE` works. Each distinct combination of LoRA paths/scales gets its own model-cache directory (named with a hash of that exact config), so switching between a few LoRA setups doesn't require re-quantizing each time you switch back.
@@ -77,7 +155,7 @@ a subject and the thing it is holding can be masked together.
 **The server does no detection.** It never loads a vision model, never holds an API key
 and never makes an outbound call — it writes a file, holds one job in memory, and copies
 a JSON array from one request to another. The work is done by
-`server/vlm_worker.py`, which runs alongside (see
+`mfluxible/vlm_worker.py`, which runs alongside (see
 [Running the worker](#running-the-worker) below). With nothing running, the feature simply reports no worker attached and the harness says so.
 
 That split is deliberate rather than tidiness: the worker runs an arbitrary configured
@@ -101,7 +179,7 @@ Stashed images are pruned after an hour, on the next detection.
 
 #### Running the worker
 
-`server/vlm_worker.py` is what makes the harness's **Find objects** button work. The
+`mfluxible/vlm_worker.py` is what makes the harness's **Find objects** button work. The
 harness can see an image and drive the GPU but has no vision model; this process
 supplies one. It long-polls the server for a pending detection, runs a command against
 the stashed image, and posts the regions back for the harness's open stream to deliver.
@@ -115,20 +193,22 @@ server opens the mailbox, it does not launch anything. Until the worker is runni
 `/health` reports `regions.worker_attached: false` and the harness's **Find objects**
 button says nothing is listening.
 
-It takes no configuration of its own — every job names the file to read, so there is no
-directory to keep in step:
+It needs no directory of its own — every job names the file to read, so there is nothing
+to keep in step with the server:
 
 ```bash
-uv run server/vlm_worker.py
+mfluxible-vlm-worker
 ```
 
-| Variable | Default | Meaning |
-| --- | --- | --- |
-| `MFLUXIBLE_VLM_COMMAND` | `claude -p {prompt} --allowedTools Read --model $MFLUXIBLE_VLM_MODEL` | The command to run per detection |
-| `MFLUXIBLE_VLM_MODEL` | `opus` | Which model the **default** command uses; ignored if you set your own command |
-| `MFLUXIBLE_BEARER_TOKEN` | unset | Sent as `Authorization: Bearer …`, if a proxy gates the API |
+From a checkout, `uv run python -m mfluxible.vlm_worker`. Either way it has to be reached
+as a module: running `mfluxible/vlm_worker.py` by path never imports the package around
+it, so the [config file](#config-file) would not be applied and the settings would come
+from a bare environment. It refuses that rather than starting with a configuration you
+did not ask for.
 
-`--url` points at the server's base URL (default `http://127.0.0.1:8420`). As with the
+Its four settings — `vlm_command`, `vlm_model`, `server_url` and `bearer_token` — are in
+the [table above](#configuration) with the server's, and can live in the same config
+file. `--url` overrides `server_url` and `--config` names a file explicitly. As with the
 terminal clients, setting `MFLUXIBLE_BEARER_TOKEN` *and* putting credentials in the URL
 is refused rather than resolved.
 
@@ -248,7 +328,7 @@ Disk costs more than RAM on the first run, and it's the download that dominates:
 
 mflux's own aliases work too (`schnell`, `dev`, `qwen`, `zimage`, `klein-4b`, `krea2`, …), and an unrecognised name fails at startup with the list of valid ones — before anything is downloaded.
 
-**Only the model you select is ever fetched.** All fifteen are named in `server/models.py`, but an entry there is inert data: its mflux imports are deferred into a loader function that runs at load time, and mflux downloads weights inside the model's constructor, not at import. The fourteen you aren't running cost nothing beyond their row in that table.
+**Only the model you select is ever fetched.** All fifteen are named in `mfluxible/models.py`, but an entry there is inert data: its mflux imports are deferred into a loader function that runs at load time, and mflux downloads weights inside the model's constructor, not at import. The fourteen you aren't running cost nothing beyond their row in that table.
 
 Switching models means restarting the server, the same way `MFLUXIBLE_QUANTIZE` and LoRAs do. Each model + quantization + LoRA combination keeps its own quantized cache directory, so switching back doesn't re-quantize.
 
@@ -282,13 +362,13 @@ Adding a model mfluxible doesn't already run is a [CONTRIBUTING](../CONTRIBUTING
 The server doesn't have to run on the same machine as the clients. Point it at a spare Apple Silicon box (a Mac Mini, say) and bind it to the network instead of loopback:
 
 ```bash
-uv run uvicorn server:app --app-dir server --host 0.0.0.0 --port 8420
+mfluxible-server --host 0.0.0.0
 ```
 
 Then everything else just points at that host instead of `127.0.0.1`, no code changes needed:
 
 - `stream_client.py` / `stream_client.js`: `--url http://mac-mini.local:8420/mfluxible/v1/images/generations`
-- `mcp_server.py`: set `MFLUXIBLE_URL=http://mac-mini.local:8420/mfluxible/v1/images/generations` when registering it, e.g. `claude mcp add mfluxible --scope user -e MFLUXIBLE_URL=http://mac-mini.local:8420/mfluxible/v1/images/generations -- /path/to/mfluxible/.venv/bin/python /path/to/mfluxible/clients/mcp_server.py` — or, in Claude Desktop's config, `"env": {"MFLUXIBLE_URL": "http://mac-mini.local:8420/mfluxible/v1/images/generations"}` alongside `command`/`args`
+- `mfluxible-mcp`: set `MFLUXIBLE_URL=http://mac-mini.local:8420/mfluxible/v1/images/generations` when registering it, e.g. `claude mcp add mfluxible --scope user -e MFLUXIBLE_URL=http://mac-mini.local:8420/mfluxible/v1/images/generations -- uvx mfluxible-mcp` — or, in Claude Desktop's config, `"env": {"MFLUXIBLE_URL": "http://mac-mini.local:8420/mfluxible/v1/images/generations"}` alongside `command`/`args`. This is the case that package exists for: the MCP tool needs no mflux, so it installs on the laptop while the model stays on the Mac Mini
 
 ### Authentication
 
@@ -312,7 +392,7 @@ Set **both** `MFLUXIBLE_BASIC_AUTH_USERNAME` and `MFLUXIBLE_BASIC_AUTH_PASSWORD`
 
 ```bash
 MFLUXIBLE_BASIC_AUTH_USERNAME=tavern MFLUXIBLE_BASIC_AUTH_PASSWORD='a long random string' \
-  uv run uvicorn server:app --app-dir server --host 0.0.0.0 --port 8420
+  mfluxible-server --host 0.0.0.0
 ```
 
 Setting only one of the two leaves auth **off**: a half-finished deployment is far likelier than a deliberately blank username, and quietly serving unauthenticated is the failure worth avoiding. Bind to a non-loopback address without both set and the server logs a warning at startup, before it downloads anything.
@@ -336,11 +416,11 @@ Clients send the token as `Authorization: Bearer <token>`:
 
 - **Harness** — paste it into **Advanced → API token**. It's kept in `localStorage`, so it survives a reload and "Reset all"; entering it re-probes `/health`.
 - **`stream_client.py` / `stream_client.js`** — `export MFLUXIBLE_BEARER_TOKEN=...`. Environment rather than a flag so the secret stays out of shell history and `ps`. Setting it *and* putting credentials in `--url` is refused rather than silently resolved.
-- **`mcp_server.py`** — `MFLUXIBLE_BEARER_TOKEN` where the tool is registered; see [the MCP configuration table](mcp.md#configuration).
+- **`mfluxible-mcp`** — `MFLUXIBLE_BEARER_TOKEN` where the tool is registered; see [the MCP configuration table](mcp.md#configuration).
 - **Open WebUI** — its API-key field, which sends this header already.
 - **`curl`** — `-H "Authorization: Bearer $MFLUXIBLE_BEARER_TOKEN"`.
 
-Two caveats worth stating plainly. Caddy's `header` matcher is a plain string comparison, not the constant-time one `server/auth.py` uses — not practically exploitable across a network with a high-entropy token, but a reason to use `openssl rand` rather than a passphrase. And a bearer token over plain HTTP is readable in transit exactly as Basic is, so the `tls internal` line in the example is doing real work; on a tailnet, `tls <host>.<tailnet>.ts.net` gets a publicly-trusted certificate and needs no trust step on any device already on the tailnet.
+Two caveats worth stating plainly. Caddy's `header` matcher is a plain string comparison, not the constant-time one `mfluxible/auth.py` uses — not practically exploitable across a network with a high-entropy token, but a reason to use `openssl rand` rather than a passphrase. And a bearer token over plain HTTP is readable in transit exactly as Basic is, so the `tls internal` line in the example is doing real work; on a tailnet, `tls <host>.<tailnet>.ts.net` gets a publicly-trusted certificate and needs no trust step on any device already on the tailnet.
 
 #### What neither of these is
 
