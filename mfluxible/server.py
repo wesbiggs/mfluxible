@@ -251,7 +251,7 @@ async def _collect_final_image(req: GenerateRequest) -> dict:
 # This is mfluxible's own API -- streaming `thinking` events with step timings and
 # previews, guidance/negative_prompt, etc. -- moved off /v1/images/generations so that
 # path can be a genuine OpenAI-compatible endpoint instead (see below). Every bundled
-# client (harness.html, stream_client.py/js, mcp_server.py) targets this path.
+# client (harness.html, stream_client.py/js, mfluxible_mcp/server.py) targets this path.
 @app.post("/mfluxible/v1/images/generations")
 async def generate(req: GenerateRequest):
     # Checked before the response begins: for a stream, failing once StreamingResponse

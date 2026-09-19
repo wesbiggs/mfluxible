@@ -97,14 +97,14 @@ The ~60s the default `MFLUXIBLE_MCP_WAIT_SECONDS` is sized against was measured 
 {
   "mcpServers": {
     "mfluxible": {
-      "command": "uvx",
+      "command": "/opt/homebrew/bin/uvx",
       "args": ["mfluxible-mcp"]
     }
   }
 }
 ```
 
-Merge that entry into the existing `mcpServers` object if the file already lists other servers. Both paths have to be absolute — Desktop launches stdio servers with a minimal environment that doesn't inherit your shell's `PATH`, so a bare `python` or a relative path fails to resolve. Then quit Desktop completely (⌘Q; closing the window leaves the process running) and reopen it.
+Merge that entry into the existing `mcpServers` object if the file already lists other servers. **`command` has to be an absolute path**, which is why this example spells `uvx` out where the [Claude Code](#claude-code) one doesn't. Desktop launches stdio servers with launchd's environment rather than your shell's, and with `launchctl getenv PATH` unset that is the system default `/usr/bin:/bin:/usr/sbin:/sbin` — which holds neither Homebrew's `/opt/homebrew/bin` (`/usr/local/bin` on Intel) nor the uv installer's `~/.local/bin`. So a bare `uvx`, like a bare `python` or any relative path, fails to resolve, and the server dies at launch with nothing to show for it but a `CONNECTION_CLOSED`. Run `which uvx` and paste what it prints. Then quit Desktop completely (⌘Q; closing the window leaves the process running) and reopen it.
 
 The tool appears under Developer/Extensions and in the composer's tool menu — not under **Connectors**, which lists remote OAuth connectors only, so a local stdio server like this one will never show up there.
 
@@ -138,6 +138,8 @@ It searches `./mcp.json`, `~/.config/omlx/mcp.json`, `$OMLX_MCP_CONFIG` and `--m
   }
 }
 ```
+
+`command` is bare there because oMLX is usually started from a terminal, which hands it your shell's `PATH`. Started from the menu-bar app it gets launchd's instead, and then needs the same absolute path [Claude Desktop](#claude-desktop) does.
 
 Three things differ from the Claude hosts:
 

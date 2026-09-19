@@ -333,7 +333,7 @@ with; `MFLUXIBLE_TOKEN` alone read like a third member of that family.
 
 `MFLUXIBLE_BEARER_TOKEN` is environment-only in all three clients, not a `--token` flag: a flag
 puts the secret in shell history and in `ps` output for the length of a generation, and
-`mcp_server.py` has no command line to take one on anyway (an MCP host launches it as a
+`mfluxible_mcp/server.py` has no command line to take one on anyway (an MCP host launches it as a
 stdio subprocess).
 
 Setting `MFLUXIBLE_BEARER_TOKEN` *and* putting credentials in the URL is **refused** rather than
@@ -833,7 +833,7 @@ rather than passed straight through.
 `image_strength` is 0.0 when a mask is present. The server now defaults this too
 (`DEFAULT_MASKED_IMAGE_STRENGTH`, see the inpainting section above, which carries the
 measurements), so this is **deliberate duplication rather than the only copy**: the same rule
-that has `mcp_server.py` treat a missing `/health` field as "unknown, let the server decide"
+that has `mfluxible_mcp/server.py` treat a missing `/health` field as "unknown, let the server decide"
 means it has to keep working against a server that predates the server-side default. The two
 can't disagree -- both are 0.0 -- and the client sending an explicit 0.0 means the server's
 own default never fires for an MCP call either way. It has to be a literal 0.0 rather than
@@ -900,7 +900,7 @@ Two things in that file are load-bearing rather than stylistic:
 - **The mflux imports are deferred into each spec's `load()` function**, so naming four models costs nothing. mflux downloads weights inside the variant's constructor (`WeightLoader.load` → `PathResolution.resolve` → HF snapshot download), never at import, so a process only ever fetches/quantizes/caches the one model `MFLUXIBLE_MODEL` selected. Don't hoist those imports to module level "for tidiness" — it wouldn't download anything, but it would drag every model's module graph into every process and quietly make that guarantee depend on mflux never doing work at import time.
 - **`model_config` must be passed on the cached-load branch too** (`_load_sync`). A saved directory holds weights and tokenizers, not the model's scheduler/sequence-length settings, and each variant's own default would otherwise win — `Flux1` defaults to *schnell*, so a `flux-dev` cache dir would silently load as schnell.
 
-The clients deliberately send `steps` (and `guidance`) as null rather than a number of their own: whichever model is loaded decides, so none of them needs reconfiguring when the server switches models. Don't "fix" a missing default back into `stream_client.*`, `harness.html` or `mcp_server.py` — a step count that suits Z-Image-Turbo is four times too small for FLUX.1-dev. `harness.html` and `mcp_server.py` additionally read `/health` to learn what the loaded model accepts; both treat a failed or model-less `/health` as "unknown, let the server decide" rather than an error, so they keep working against a server that predates that field.
+The clients deliberately send `steps` (and `guidance`) as null rather than a number of their own: whichever model is loaded decides, so none of them needs reconfiguring when the server switches models. Don't "fix" a missing default back into `stream_client.*`, `harness.html` or `mfluxible_mcp/server.py` — a step count that suits Z-Image-Turbo is four times too small for FLUX.1-dev. `harness.html` and `mfluxible_mcp/server.py` additionally read `/health` to learn what the loaded model accepts; both treat a failed or model-less `/health` as "unknown, let the server decide" rather than an error, so they keep working against a server that predates that field.
 
 Guidance and negative prompts are rejected with a 400 on models that can't act on them rather than accepted and dropped, because mflux accepts both arguments on every variant and silently ignores them (its own CLIs print a warning instead). `request_problem` runs in the endpoint, *before* `StreamingResponse` starts: failing inside the generator would mean a 200 status line already on the wire and a torn body.
 
