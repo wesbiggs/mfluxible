@@ -548,6 +548,17 @@ that path, and **"Use as Base Image" deliberately does not go through it**: ther
 result on screen *is* the image being adopted, so taking the pane down would cost its
 Download link and its compare handle for nothing.
 
+The live preview shares `.pane img`'s size cap rather than carrying its own. It used to
+be capped at 340px, inherited from the single-column harness where previews were a 200px
+thumbnail strip, and that cap threw away resolution the server had already paid to decode
+and send -- `docs/api.md` states the contract outright: a preview is always the full
+requested resolution and downscaling is a client's business. It also made the result jump
+on the one transition where nothing about the framing has changed. The shimmer that
+replaces it is keyed on `body:has(#submitBtn:disabled)` rather than on the preview pane
+being up, which is the same derivation the progress sweep uses and load-bearing in the
+other direction: the `error` event does not take the pane down, so a failed run leaves its
+last preview on screen and a shimmer tied to the pane would run over it for ever.
+
 `pendingCompareSrc` is captured in the submit handler rather than read off the form when
 the `image` event lands, and the two genuinely diverge: a generation is long enough to
 drop a different image or clear one meanwhile, and either would put an unrelated picture

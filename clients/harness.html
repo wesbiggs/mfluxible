@@ -615,7 +615,58 @@
     background-size: 18px 18px;
     background-position: 0 0, 9px 9px;
   }
-  #previewWrap img { max-height: min(340px, max(180px, calc(100dvh - var(--header) - var(--console) - 78px))); }
+  /* ---------- live preview ---------- */
+
+  /* A preview is the same picture as the result, at the same size, and shares
+     .pane img's cap rather than carrying its own. It used to be capped at 340px --
+     inherited from the single-column harness, where previews were a 200px thumbnail
+     strip -- which threw away resolution the server had already paid to decode and
+     send (docs/api.md: a preview is always the full requested resolution, and
+     downscaling is a client's business). It also made the result *jump* on the one
+     transition where nothing about the framing has changed. What marks a preview
+     provisional is the shimmer and the Live preview tag, not being small. */
+  #previewFrame {
+    position: relative;
+    line-height: 0;
+    border-radius: var(--r-lg);
+    overflow: hidden;
+    max-width: 100%;
+  }
+  /* Keyed on #submitBtn:disabled rather than on the pane being up -- the same
+     derivation the progress sweep uses, and here it is load-bearing in the other
+     direction: a failed run leaves its last preview on screen (the error event
+     doesn't take the pane down), and a shimmer tied to the pane would run over it
+     for ever. The button is re-enabled in the submit handler's finally, so this
+     stops whether the run finished or failed. */
+  body:has(#submitBtn:disabled) #previewFrame::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    /* White rather than themed, for the reason the compare divider is: it lies over
+       an arbitrary image, not over the page. */
+    background: linear-gradient(100deg,
+      transparent 32%,
+      rgb(255 255 255 / 0.14) 44%,
+      rgb(255 255 255 / 0.26) 50%,
+      rgb(255 255 255 / 0.14) 56%,
+      transparent 68%);
+    background-size: 220% 100%;
+    background-repeat: no-repeat;
+    animation: shimmer 1.9s linear infinite;
+  }
+  /* 100% -> 0% sweeps the band left to right: with a background wider than its box,
+     100% pins the gradient's right edge to the box's, putting the band off the left. */
+  @keyframes shimmer {
+    from { background-position: 100% 0; }
+    to   { background-position: 0% 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    body:has(#submitBtn:disabled) #previewFrame::after {
+      animation: none;
+      background: rgb(255 255 255 / 0.09);
+    }
+  }
 
   /* ---------- before/after compare ---------- */
 
@@ -799,7 +850,6 @@
     .stage { grid-template-rows: auto auto; }
     .canvas { padding: 1rem; min-height: 220px; }
     .pane img { max-height: 55dvh; }
-    #previewWrap img { max-height: 40dvh; }
     .console { height: 160px; }
     #modelInfo { max-width: 42vw; }
   }
@@ -1012,7 +1062,9 @@
       </div>
 
       <div id="previewWrap" class="pane hidden">
-        <img id="previewImg" alt="preview">
+        <div id="previewFrame">
+          <img id="previewImg" alt="preview">
+        </div>
         <div class="paneBar"><span class="tag live">Live preview</span></div>
       </div>
 
