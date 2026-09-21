@@ -617,6 +617,72 @@
   }
   #previewWrap img { max-height: min(340px, max(180px, calc(100dvh - var(--header) - var(--console) - 78px))); }
 
+  /* ---------- before/after compare ---------- */
+
+  /* The result with the image it was generated from laid over it, clipped to a
+     vertical split. The result is what sizes the box and the base image is stretched
+     to fill it -- object-fit: fill, not contain, because that is what the server does
+     with it: mflux resizes the input to the request's width/height with a plain
+     resize() and no aspect handling (ImageUtil.scale_to_dimensions), so the stretched
+     copy is the "before" the model actually saw. Letterboxing it would show a picture
+     no part of this generation was based on. */
+  #compare { position: relative; line-height: 0; max-width: 100%; }
+  /* Scoped to .comparing rather than to every result: on an image with a handle a
+     drag means "move the split", but a plain text-to-image result stays draggable out
+     of the page, which it is today. */
+  #compare.comparing img { user-select: none; -webkit-user-drag: none; }
+  #compareBase {
+    position: absolute;
+    inset: 0;
+    width: 100%; height: 100%;
+    /* .pane img caps both, and this one is already bounded by the result underneath. */
+    max-width: none; max-height: none;
+    object-fit: fill;
+    /* --split is the handle, as a percentage from the left edge. Everything left of it
+       is the new image and everything right of it the old one, which is what puts the
+       handle's rest position at 100%: a result arrives shown whole, and the base is
+       dragged in from the right. */
+    clip-path: inset(0 0 0 var(--split, 100%));
+  }
+  #compareHandle {
+    position: absolute;
+    top: 0; bottom: 0;
+    left: var(--split, 100%);
+    width: 2px;
+    margin-left: -1px;
+    cursor: ew-resize;
+    /* Fixed white-on-dark rather than themed, for the reason --mask-edge is its own
+       colour: this sits over an arbitrary photograph, not over the page, and either
+       theme's accent can vanish into one. */
+    background: #fff;
+    box-shadow: 0 0 0 1px rgb(16 24 40 / 0.45);
+  }
+  #compareHandle::after {
+    content: "\2194";
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    width: 30px; height: 30px;
+    display: grid; place-items: center;
+    border-radius: 50%;
+    background: var(--panel);
+    border: 1.5px solid var(--accent);
+    color: var(--accent);
+    font-size: 15px;
+    line-height: 1;
+    box-shadow: var(--shadow-md);
+  }
+  #compareHandle:focus-visible { outline: none; }
+  #compareHandle:focus-visible::after { box-shadow: 0 0 0 3px var(--accent-ring); }
+  /* Off unless this particular result has something to compare against: a
+     text-to-image run had no base image, and a handle that reveals nothing underneath
+     is worse than no handle. The script sets .comparing from what the *request*
+     carried, not from what the form holds now. */
+  #compare:not(.comparing) #compareBase,
+  #compare:not(.comparing) #compareHandle { display: none; }
+  #compare.comparing { cursor: ew-resize; touch-action: none; }
+  #finalWrap:not(:has(#compare.comparing)) .compareOnly { display: none; }
+
   .paneBar {
     display: flex;
     align-items: center;
@@ -636,7 +702,7 @@
     background: var(--accent-soft);
     color: var(--accent);
   }
-  .tag.live { background: var(--panel-sunken); color: var(--muted); border: 1px solid var(--border); }
+  .tag.live, .tag.base { background: var(--panel-sunken); color: var(--muted); border: 1px solid var(--border); }
   .paneAction {
     font: inherit;
     font-size: 0.78rem;
@@ -907,6 +973,14 @@
   <main class="stage">
     <div class="canvas">
 
+      <div id="baseWrap" class="pane hidden">
+        <img id="baseImg" alt="base image">
+        <div class="paneBar">
+          <span class="tag base">Base image</span>
+          <span>the image the next generation starts from</span>
+        </div>
+      </div>
+
       <div id="maskWrap" class="pane hidden">
         <div id="maskEditor">
           <img id="maskBaseImg" alt="base image being masked">
@@ -943,9 +1017,16 @@
       </div>
 
       <div id="finalWrap" class="pane hidden">
-        <img id="finalImg" alt="result">
+        <div id="compare">
+          <img id="finalImg" alt="result">
+          <img id="compareBase" alt="the base image this result was generated from">
+          <div id="compareHandle" role="slider" tabindex="0"
+               aria-label="Reveal the base image"
+               aria-valuemin="0" aria-valuemax="100" aria-valuenow="100"></div>
+        </div>
         <div class="paneBar">
           <span class="tag">Result</span>
+          <span class="compareOnly">drag to compare with the base image</span>
           <a id="downloadLink" class="paneAction" download="output.png">Download PNG</a>
           <button type="button" class="paneAction" id="useLastBtn" disabled>Use as Base Image</button>
           <button type="button" class="paneAction maskOnly" id="backToMaskBtn">Back to mask</button>
@@ -1000,10 +1081,15 @@ const seedEl = document.getElementById("seed");
 const submitBtn = document.getElementById("submitBtn");
 const resetBtn = document.getElementById("resetBtn");
 const logEl = document.getElementById("log");
+const baseWrap = document.getElementById("baseWrap");
+const baseImg = document.getElementById("baseImg");
 const previewWrap = document.getElementById("previewWrap");
 const previewImg = document.getElementById("previewImg");
 const finalWrap = document.getElementById("finalWrap");
 const finalImg = document.getElementById("finalImg");
+const compare = document.getElementById("compare");
+const compareBase = document.getElementById("compareBase");
+const compareHandle = document.getElementById("compareHandle");
 const downloadLink = document.getElementById("downloadLink");
 const inpaintEl = document.getElementById("inpaint");
 const inpaintWrap = document.getElementById("inpaintWrap");
@@ -1114,6 +1200,37 @@ function previewMimeType(type) {
   return PREVIEW_MIME_TYPES.find((known) => known === String(type).toLowerCase()) || "image/png";
 }
 
+// The canvas holds one pane at a time -- .canvas lays its children out in rows, so two
+// at once push each other off screen. #baseWrap is the fallback rather than somewhere
+// you switch to: it fills the canvas with the input image whenever there is one and
+// nothing more specific to look at, which is what a fresh drop, an unticked Inpaint box
+// and a run with previews off all leave behind. Derived from the .hidden classes the
+// other three already carry, so there is no fifth piece of state to keep in step -- and
+// it leaves #emptyState reading correctly, since that too is keyed on .hidden.
+function syncBasePane() {
+  const specific = [maskWrap, previewWrap, finalWrap].some((p) => !p.classList.contains("hidden"));
+  const show = Boolean(baseImageB64) && !specific;
+  baseWrap.classList.toggle("hidden", !show);
+  // Assigning an unchanged .src is a no-op, so this is safe to run on every call: the
+  // element shares #imagePreview's decode of the same data: URL rather than fetching.
+  if (show) baseImg.src = imagePreview.src;
+}
+
+// A dropped or picked file is a new input, so whatever the canvas is showing was made
+// from something else -- leaving it up is the page claiming a result for an image the
+// form no longer holds. "Use as Base Image" deliberately doesn't come through here:
+// there the result on screen *is* the image being adopted, and clearing the pane would
+// take its Download link and its compare handle with it for nothing.
+function showInputImage() {
+  previewWrap.classList.add("hidden");
+  previewImg.removeAttribute("src");
+  finalWrap.classList.add("hidden");
+  // With Inpaint ticked the editor is the better view of the very same image: it is
+  // the base image, with the region about to be repainted drawn over it.
+  showMaskEditor(maskIsActive());
+  syncBasePane();
+}
+
 function setBaseImage(b64, mimeType) {
   baseImageB64 = b64;
   // Regions describe the image that was detected on, so a new one invalidates them
@@ -1150,6 +1267,7 @@ function setBaseImage(b64, mimeType) {
   // the complete check rather than a bare listener.
   if (imagePreview.complete) applyDimensions();
   else imagePreview.addEventListener("load", applyDimensions, { once: true });
+  syncBasePane();
 }
 
 function clearBaseImage() {
@@ -1164,6 +1282,7 @@ function clearBaseImage() {
   // #imagePreview.hidden either way; this is the state behind them.
   clearMask();
   maskWrap.classList.add("hidden");
+  syncBasePane();
 }
 
 // mflux embeds full generation metadata -- including the exact prompt -- as an
@@ -1295,6 +1414,7 @@ async function handleImageFile(file) {
     return;
   }
   setBaseImage(await fileToBase64(file), file.type);
+  showInputImage();
   if (file.type === "image/png") applyEmbeddedMetadata(new Uint8Array(await file.arrayBuffer()));
 }
 
@@ -1422,6 +1542,10 @@ async function refreshModel() {
   if (noMask) {
     inpaintEl.checked = false;
     maskWrap.classList.add("hidden");
+    // Safe to call from here even though this runs before the mask module's own
+    // top-level consts: it reads .hidden classes and #imagePreview, nothing of the
+    // canvas state below.
+    syncBasePane();
   }
   inpaintWrap.classList.toggle("hidden", noMask);
   // Must follow noMask's declaration, not just read it: both live in this function's
@@ -1489,6 +1613,7 @@ function handleEvent(event) {
       if (event.preview) {
         previewImg.src = `data:image/png;base64,${event.preview}`;
         previewWrap.classList.remove("hidden");
+        syncBasePane();
       }
       break;
     case "image": {
@@ -1500,6 +1625,10 @@ function handleEvent(event) {
       // drop the preview rather than leaving a lower-fidelity duplicate on screen.
       previewWrap.classList.add("hidden");
       previewImg.removeAttribute("src");
+      // What this result is compared against was decided when the request went out,
+      // not now -- see pendingCompareSrc.
+      setCompareBase(pendingCompareSrc);
+      syncBasePane();
       log(`done (seed=${event.seed}, ${event.generation_time.toFixed(1)}s)`);
       lastResultB64 = event.data;
       useLastBtn.disabled = false;
@@ -1531,6 +1660,7 @@ function resetAll() {
   previewImg.removeAttribute("src");
   finalWrap.classList.add("hidden");
   finalImg.removeAttribute("src");
+  setCompareBase(null);
   downloadLink.removeAttribute("href");
   // form.reset() fires no "change" event, so the Server URL returning to its default
   // wouldn't otherwise re-check what's on the other end. This also restores the
@@ -1542,6 +1672,79 @@ function resetAll() {
 resetBtn.addEventListener("click", resetAll);
 urlEl.addEventListener("change", refreshModel);
 refreshModel();
+
+// ---------------------------------------------------------------------------
+// Before/after compare
+// ---------------------------------------------------------------------------
+//
+// The result pane stacks the base image over the result and clips it to a vertical
+// split, so dragging the handle left wipes the generation away and shows what it
+// started from. Everything left of the handle is the new image, so 100% -- the rest
+// position -- is the result shown whole, and the old one comes in from the right.
+//
+// The data: URL of the base image the *displayed* result was generated from, or null
+// for a text-to-image run that had none. Held separately from baseImageB64 because the
+// two genuinely diverge: dropping a new image mid-run, or clearing one afterwards,
+// changes what the next request will send without changing what this result was made
+// from. Reading the form here instead would put an unrelated image behind the handle.
+let pendingCompareSrc = null;
+
+const SPLIT_STEP = 2;
+let splitPercent = 100;
+
+function setSplit(percent) {
+  splitPercent = Math.min(100, Math.max(0, percent));
+  compare.style.setProperty("--split", `${splitPercent}%`);
+  compareHandle.setAttribute("aria-valuenow", Math.round(splitPercent));
+}
+
+// A null src turns the whole affordance off -- see the .comparing note in the CSS.
+function setCompareBase(src) {
+  compare.classList.toggle("comparing", Boolean(src));
+  if (src) compareBase.src = src;
+  else compareBase.removeAttribute("src");
+  setSplit(100);
+}
+
+function splitFromPointer(e) {
+  const r = compare.getBoundingClientRect();
+  if (r.width) setSplit(((e.clientX - r.left) / r.width) * 100);
+}
+
+compare.addEventListener("pointerdown", (e) => {
+  if (!compare.classList.contains("comparing")) return;
+  // Otherwise the browser starts its own drag of the <img> and the split sticks
+  // wherever the press landed.
+  e.preventDefault();
+  // Moved first, capture second, and the capture is best-effort: setPointerCapture
+  // throws if the id names no active pointer, and an exception here would swallow the
+  // press itself. Losing the capture costs a drag that stops at the edge of the image;
+  // losing the press costs the click that started it.
+  splitFromPointer(e);
+  compareHandle.focus();
+  // Pointer capture rather than document-level listeners: a drag that leaves the image
+  // -- or the window -- still tracks, and still ends, without this watching for it.
+  try { compare.setPointerCapture(e.pointerId); } catch (err) { /* press only */ }
+});
+compare.addEventListener("pointermove", (e) => {
+  if (compare.hasPointerCapture(e.pointerId)) splitFromPointer(e);
+});
+const releaseSplit = (e) => {
+  if (compare.hasPointerCapture(e.pointerId)) compare.releasePointerCapture(e.pointerId);
+};
+compare.addEventListener("pointerup", releaseSplit);
+compare.addEventListener("pointercancel", releaseSplit);
+
+// The handle is the one control on this page with no equivalent anywhere in the form,
+// so a drag can't be the only way to work it.
+compareHandle.addEventListener("keydown", (e) => {
+  if (e.key === "Home") setSplit(0);
+  else if (e.key === "End") setSplit(100);
+  else if (e.key === "ArrowLeft") setSplit(splitPercent - SPLIT_STEP);
+  else if (e.key === "ArrowRight") setSplit(splitPercent + SPLIT_STEP);
+  else return;
+  e.preventDefault();
+});
 
 // ---------------------------------------------------------------------------
 // Mask editor
@@ -1702,6 +1905,7 @@ function showMaskEditor(on) {
     finalWrap.classList.add("hidden");
     sizeMaskToBaseImage();
   }
+  syncBasePane();
 }
 
 function surfacePoint(e) {
@@ -2092,6 +2296,12 @@ form.addEventListener("submit", async (e) => {
   previewWrap.classList.add("hidden");
   finalWrap.classList.add("hidden");
   maskWrap.classList.add("hidden");
+  // Which leaves the input image on the canvas for the length of the run, rather than
+  // an empty state telling someone to hit Generate while they are waiting on it.
+  syncBasePane();
+  // Captured on the way out rather than read off the form when the result lands: a
+  // generation is long enough for someone to drop a different image meanwhile.
+  pendingCompareSrc = baseImageB64 ? imagePreview.src : null;
   submitBtn.disabled = true;
   resetBtn.disabled = true;
   submitBtn.textContent = "Generating...";

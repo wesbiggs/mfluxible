@@ -533,6 +533,31 @@ submit handler with a log line instead. The mask controls' visibility is pure CS
 `#imagePreview.hidden` and `#inpaint:not(:checked)`, scoped to `body` rather than
 `#baseSection` because one of them lives on the result pane.
 
+## The harness's stage is a fallback chain, and the compare handle has its own memory
+
+`.canvas` lays its children out in rows, so two visible panes push each other off screen
+-- which is why `showMaskEditor` already hid the other two. `#baseWrap` is the fourth and
+it is the *fallback* rather than somewhere you switch to: `syncBasePane()` shows it
+whenever there is an input image and none of the other three is up, derived from the
+`.hidden` classes they already carry rather than from a fifth piece of state. That
+derivation is also what keeps `#emptyState` honest, since it is keyed on the same classes.
+
+What it fixes is that dropping a new image left the previous run's result on the stage --
+the page claiming a result for an image the form no longer held. `showInputImage()` is
+that path, and **"Use as Base Image" deliberately does not go through it**: there the
+result on screen *is* the image being adopted, so taking the pane down would cost its
+Download link and its compare handle for nothing.
+
+`pendingCompareSrc` is captured in the submit handler rather than read off the form when
+the `image` event lands, and the two genuinely diverge: a generation is long enough to
+drop a different image or clear one meanwhile, and either would put an unrelated picture
+behind the handle. The base is drawn `object-fit: fill` for the same reason it is drawn at
+all -- mflux resizes the input to the request's width/height with a plain `resize()`
+(`ImageUtil.scale_to_dimensions`), so the stretched copy is the "before" the model saw and
+a letterboxed one would be a picture of nothing that happened. The handle's own line is
+fixed white-on-dark rather than themed, for the reason `--mask-edge` is its own colour:
+it sits over an arbitrary photograph, not over the page.
+
 ## mfluxible/chat_stub.py hardcodes a specific tool name, confirmed against one caller
 
 `POST /v1/chat/completions` only ever emits a tool call for a tool literally named
