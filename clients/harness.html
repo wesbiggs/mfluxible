@@ -37,6 +37,18 @@
     --sidebar: 384px;
     --header: 52px;
     --console: 190px;
+    /* How tall an image on the stage may be: the viewport less the header, the
+       console, the canvas's padding and the label row under the image. Three rules
+       need this number -- .pane img, the mask editor's image and the blank output
+       pane, which has to be sized before there is an image to size it -- so it is a
+       token, and the narrow layout below overrides it in one place rather than three.
+       Getting that wrong used to be invisible: #maskEditor img out-specifies .pane img,
+       so the narrow override missed it. */
+    --pane-max-h: max(180px, calc(100dvh - var(--header) - var(--console) - 78px));
+    /* The blank output pane, and deliberately dark in both schemes -- it stands in for
+       an image rather than for page chrome, the same argument the shimmer band and the
+       compare divider make, and the white shimmer needs something to read against. */
+    --placeholder: #2a303c;
     --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
     --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   }
@@ -435,7 +447,7 @@
   #maskEditor img {
     display: block;
     max-width: 100%;
-    max-height: max(180px, calc(100dvh - var(--header) - var(--console) - 78px));
+    max-height: var(--pane-max-h);
     user-select: none;
     -webkit-user-drag: none;
   }
@@ -604,7 +616,7 @@
     max-width: 100%;
     /* Fit inside the canvas rather than making it scroll: the viewport less the header,
        the console, this canvas's own padding and the label row beneath the image. */
-    max-height: max(180px, calc(100dvh - var(--header) - var(--console) - 78px));
+    max-height: var(--pane-max-h);
     border-radius: var(--r-lg);
     box-shadow: var(--shadow-md);
     /* Checkerboard, so a transparent PNG reads as transparent rather than as white. */
@@ -625,12 +637,32 @@
      downscaling is a client's business). It also made the result *jump* on the one
      transition where nothing about the framing has changed. What marks a preview
      provisional is the shimmer and the Live preview tag, not being small. */
+  /* The frame is a plain wrapper -- it takes its size from the image inside it, which
+     during a run is a transparent SVG at the output's exact dimensions (blankOutput).
+     That is deliberately not a CSS box sized from custom properties: .pane is
+     shrink-to-fit inside .canvas, so a percentage width here resolves against a
+     containing block that is itself sized by this element, and the frame collapses to
+     the width of the tag row underneath it. Giving the placeholder a real intrinsic
+     size instead means it lays out through .pane img like any preview does, along the
+     one code path, rather than through a second one that could drift from it. */
   #previewFrame {
     position: relative;
     line-height: 0;
     border-radius: var(--r-lg);
     overflow: hidden;
+    box-shadow: var(--shadow-md);
+    background: var(--placeholder);
     max-width: 100%;
+  }
+  /* The frame owns the radius, the shadow and the backdrop now -- and the backdrop is
+     the point: the placeholder SVG paints nothing, so what shows through it is
+     --placeholder. Dropping the checkerboard matters for the same reason. It is there
+     so a transparent PNG reads as transparent, and here transparent is the blank
+     state rather than a property of the picture. */
+  #previewFrame img {
+    border-radius: 0;
+    box-shadow: none;
+    background: none;
   }
   /* Keyed on #submitBtn:disabled rather than on the pane being up -- the same
      derivation the progress sweep uses, and here it is load-bearing in the other
@@ -849,7 +881,7 @@
     .actions { position: sticky; bottom: 0; box-shadow: 0 -1px 3px rgb(16 24 40 / 0.06); }
     .stage { grid-template-rows: auto auto; }
     .canvas { padding: 1rem; min-height: 220px; }
-    .pane img { max-height: 55dvh; }
+    :root { --pane-max-h: 55dvh; }
     .console { height: 160px; }
     #modelInfo { max-width: 42vw; }
   }
@@ -1065,7 +1097,7 @@
         <div id="previewFrame">
           <img id="previewImg" alt="preview">
         </div>
-        <div class="paneBar"><span class="tag live">Live preview</span></div>
+        <div class="paneBar"><span class="tag live" id="previewTag">Live preview</span></div>
       </div>
 
       <div id="finalWrap" class="pane hidden">
@@ -1136,7 +1168,9 @@ const logEl = document.getElementById("log");
 const baseWrap = document.getElementById("baseWrap");
 const baseImg = document.getElementById("baseImg");
 const previewWrap = document.getElementById("previewWrap");
+const previewFrame = document.getElementById("previewFrame");
 const previewImg = document.getElementById("previewImg");
+const previewTag = document.getElementById("previewTag");
 const finalWrap = document.getElementById("finalWrap");
 const finalImg = document.getElementById("finalImg");
 const compare = document.getElementById("compare");
@@ -1256,7 +1290,9 @@ function previewMimeType(type) {
 // at once push each other off screen. #baseWrap is the fallback rather than somewhere
 // you switch to: it fills the canvas with the input image whenever there is one and
 // nothing more specific to look at, which is what a fresh drop, an unticked Inpaint box
-// and a run with previews off all leave behind. Derived from the .hidden classes the
+// and a run that ended without producing anything all leave behind. Note that a run in
+// flight is *not* one of those -- the submit handler opens the blank output pane, which
+// is more specific than the input. Derived from the .hidden classes the
 // other three already carry, so there is no fifth piece of state to keep in step -- and
 // it leaves #emptyState reading correctly, since that too is keyed on .hidden.
 function syncBasePane() {
@@ -1276,11 +1312,34 @@ function syncBasePane() {
 function showInputImage() {
   previewWrap.classList.add("hidden");
   previewImg.removeAttribute("src");
+  previewFrame.classList.remove("pending");
   finalWrap.classList.add("hidden");
   // With Inpaint ticked the editor is the better view of the very same image: it is
   // the base image, with the region about to be repainted drawn over it.
   showMaskEditor(maskIsActive());
   syncBasePane();
+}
+
+// The blank output pane, as a transparent SVG at the size the result will be. An
+// <img> with a real intrinsic size lays out through .pane img exactly as a preview
+// does, so the first preview lands in a box that is already the right shape and in the
+// right place -- where a CSS-sized box would be a second layout path to keep in step
+// with the first. Nothing is painted; --placeholder behind it is what you see.
+//
+// Both numbers go through snapToStep, which is what the server does with them (mflux
+// floors width and height to a multiple of 16), so the blank box is the size that will
+// actually arrive rather than the size that was asked for. That agreement is currently
+// free -- the fields carry step="16", so the browser's own validation refuses to submit
+// a hand-typed 1000 in the first place -- which makes this belt and braces rather than
+// a correction, and the thing that keeps the blank honest if that step ever changes.
+// They are coerced to integers before being interpolated for the same reason
+// previewMimeType exists: this builds a URL, and nothing that reaches one should be a
+// string taken from a field.
+function blankOutput(width, height) {
+  const w = snapToStep(Math.round(Number(width)) || 16);
+  const h = snapToStep(Math.round(Number(height)) || 16);
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}"></svg>`;
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
 }
 
 function setBaseImage(b64, mimeType) {
@@ -1664,6 +1723,8 @@ function handleEvent(event) {
       log(`  step ${event.step}/${event.total_steps} (${event.step_ms}ms, ${event.elapsed_ms}ms total)`);
       if (event.preview) {
         previewImg.src = `data:image/png;base64,${event.preview}`;
+        previewFrame.classList.remove("pending");
+        previewTag.textContent = "Live preview";
         previewWrap.classList.remove("hidden");
         syncBasePane();
       }
@@ -1677,6 +1738,7 @@ function handleEvent(event) {
       // drop the preview rather than leaving a lower-fidelity duplicate on screen.
       previewWrap.classList.add("hidden");
       previewImg.removeAttribute("src");
+      previewFrame.classList.remove("pending");
       // What this result is compared against was decided when the request went out,
       // not now -- see pendingCompareSrc.
       setCompareBase(pendingCompareSrc);
@@ -1710,6 +1772,7 @@ function resetAll() {
   logEl.textContent = "";
   previewWrap.classList.add("hidden");
   previewImg.removeAttribute("src");
+  previewFrame.classList.remove("pending");
   finalWrap.classList.add("hidden");
   finalImg.removeAttribute("src");
   setCompareBase(null);
@@ -2345,11 +2408,18 @@ form.addEventListener("submit", async (e) => {
     return;
   }
   logEl.textContent = "";
-  previewWrap.classList.add("hidden");
   finalWrap.classList.add("hidden");
   maskWrap.classList.add("hidden");
-  // Which leaves the input image on the canvas for the length of the run, rather than
-  // an empty state telling someone to hit Generate while they are waiting on it.
+  // The output pane goes blank rather than the stage falling back to the input image
+  // or to an empty state telling someone to hit Generate while they are already
+  // waiting on one: an empty box the shape of the output, which the first preview --
+  // or the result, with previews off -- fills without moving anything. Sized off the
+  // fields rather than off `body` below, because it has to be on screen before the
+  // request is built, let alone sent.
+  previewImg.src = blankOutput(widthEl.value, heightEl.value);
+  previewFrame.classList.add("pending");
+  previewTag.textContent = "Generating";
+  previewWrap.classList.remove("hidden");
   syncBasePane();
   // Captured on the way out rather than read off the form when the result lands: a
   // generation is long enough for someone to drop a different image meanwhile.
@@ -2394,6 +2464,16 @@ form.addEventListener("submit", async (e) => {
     submitBtn.disabled = false;
     resetBtn.disabled = false;
     submitBtn.textContent = "Generate";
+    // A blank pane outlives any run that produced no image -- a failure, an interrupt
+    // before the first preview, a stream that ended without one -- and with the
+    // shimmer stopped by the line above it is then a dead end. A preview that *did*
+    // arrive stays: on an interrupt it is the last thing the run produced. Nothing to
+    // do on success, where the image event already took this pane down.
+    if (previewFrame.classList.contains("pending")) {
+      previewWrap.classList.add("hidden");
+      previewImg.removeAttribute("src");
+      syncBasePane();
+    }
   }
 });
 </script>

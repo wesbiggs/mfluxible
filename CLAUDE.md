@@ -541,12 +541,27 @@ it is the *fallback* rather than somewhere you switch to: `syncBasePane()` shows
 whenever there is an input image and none of the other three is up, derived from the
 `.hidden` classes they already carry rather than from a fifth piece of state. That
 derivation is also what keeps `#emptyState` honest, since it is keyed on the same classes.
+A run *in flight* is deliberately not one of the states it covers: the submit handler
+opens the preview pane blank, which is more specific than the input image.
 
 What it fixes is that dropping a new image left the previous run's result on the stage --
 the page claiming a result for an image the form no longer held. `showInputImage()` is
 that path, and **"Use as Base Image" deliberately does not go through it**: there the
 result on screen *is* the image being adopted, so taking the pane down would cost its
 Download link and its compare handle for nothing.
+
+**The blank output pane is an `<img>` with a real intrinsic size, not a CSS box, and
+that is the second attempt.** The first sized `#previewFrame` from custom properties
+(`aspect-ratio` plus `width: min(100%, calc(var(--pane-max-h) * ...))`) and collapsed to
+94px wide: `.pane` is shrink-to-fit inside `.canvas`, so that percentage resolves against
+a containing block this very element is sizing, and what actually decided the width was
+the tag row underneath. `blankOutput()` returns a transparent SVG data URL at the
+output's dimensions instead, so the placeholder lays out through `.pane img` along the
+same path a preview does -- measured identical at every transition, blank to preview to
+result -- rather than through a second path that could drift from it. Its dimensions go
+through `snapToStep` because the server floors both to a multiple of 16; that agreement
+is currently free, since the fields carry `step="16"` and the browser's own validation
+refuses to submit anything else, so it is what keeps the blank honest if that changes.
 
 The live preview shares `.pane img`'s size cap rather than carrying its own. It used to
 be capped at 340px, inherited from the single-column harness where previews were a 200px
