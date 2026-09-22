@@ -32,7 +32,7 @@ Returns:
     "supports_fractional_start": true,
     "supports_mask": true
   },
-  "vlm": {"enabled": false, "backend": "local", "worker_attached": false, "model_loaded": false},
+  "vlm": {"enabled": false, "worker_attached": false, "model_loaded": false},
   "memory": {"active_bytes": 10307921920, "cache_bytes": 1073741824, "peak_bytes": 12884901888}
 }
 ```
@@ -43,9 +43,11 @@ Returns:
 
 Treat any of those `supports_*` keys being **absent** as "unknown, let the server decide" rather than as `false` — that is what a server predating the key means, and it is how the bundled harness and MCP tool read them. Note also that `supports_negative_prompt` is necessary but not sufficient: a negative prompt also needs classifier-free guidance switched on, so on a model whose `default_guidance` is `1.0` (Krea-2) sending one without raising `guidance` is still a 400. See [Models](server.md#models).
 
-`vlm` describes object detection (see [`POST /mfluxible/v1/vlm/describe`](#post-mfluxiblev1vlmdescribe)). `enabled` is whether `MFLUXIBLE_VLM_DIR` was set. `backend` is `"local"` (a vision model inside the server process) or `"worker"` (a sidecar claiming jobs) — see [Object detection](server.md#object-detection). `worker_attached` is whether a detection worker has long-polled recently, which is only a fact about the server under `backend: "worker"`; under `"local"` it is simply `false`, because the field means what it says and there is no worker. `model_loaded` is whether the local model has been loaded yet, so a client can warn that the next detection includes a multi-gigabyte download. The harness draws its **Find objects** button off `enabled` and picks its waiting message off the other three.
+`vlm` describes object detection (see [`POST /mfluxible/v1/vlm/describe`](#post-mfluxiblev1vlmdescribe)). `enabled` is whether `MFLUXIBLE_VLM_DIR` was set. `worker_attached` is whether a detection worker has long-polled recently. `model_loaded` is whether the local model has been loaded yet, so a client can warn that the next detection includes a multi-gigabyte download. The harness draws its **Find objects** button off `enabled` and picks its waiting message off the rest.
 
-Absent means the same as `enabled: false` here — unlike the `supports_*` keys above, the safe reading for a missing block is off, since offering the button to a server that would 404 is worse than not offering it. A missing `backend` means a server predating the local one, i.e. a worker-only server.
+`backend` is `"local"` (a vision model inside the server process) or `"worker"` (a sidecar claiming jobs) — see [Object detection](server.md#object-detection). **It is only present when `enabled` is `true`**: with the feature off nothing answers a detection, so naming the backend that would have is a fact about a code path the server will never take. Read `enabled` first and the absence is unambiguous. When it is `"local"`, `worker_attached` is always `false` — the field means what it says and there is no worker — so a client that wants to say "nothing is listening" should check `backend` before it believes that.
+
+The whole block being absent means the same as `enabled: false` — unlike the `supports_*` keys above, the safe reading for a missing block is off, since offering the button to a server that would 404 is worse than not offering it.
 
 `memory` reports MLX's own byte counters for the server process. `active_bytes` is memory backing live arrays — near zero until the first generation, since weights are quantized lazily and only materialize when something first forces evaluation. `cache_bytes` is buffers MLX has freed but retains for reuse: reclaimable, but it counts toward the process's memory footprint just the same, so on a memory-tight machine it is worth watching between generations. `peak_bytes` is the high-water mark of active memory. All three are plain counters, so polling `/health` mid-generation is cheap and does not disturb the run.
 

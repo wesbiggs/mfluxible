@@ -15,7 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from mfluxible.vlm import BACKENDS, VlmMailbox
+from mfluxible.vlm import VlmMailbox
 from tests.doubles.toy_model import TOY_MODEL_SPEC
 
 
@@ -175,11 +175,12 @@ def test_health_reports_the_feature_off_by_default(client):
     assert body["vlm"]["enabled"] is False
     assert body["vlm"]["worker_attached"] is False
     # Nothing is loaded until a detection asks for it, and with the feature off nothing
-    # ever will. `backend` still reports which one *would* answer -- it is a property of
-    # the configuration, not of the mailbox -- so it is asserted for membership rather
-    # than for a value, since this fixture takes it from the ambient environment.
+    # ever will.
     assert body["vlm"]["model_loaded"] is False
-    assert body["vlm"]["backend"] in BACKENDS
+    # And `backend` is absent rather than reporting the value the setting happens to
+    # hold: nothing answers a detection here, so naming the backend that would have is
+    # a claim about a code path this server never takes.
+    assert "backend" not in body["vlm"]
 
 
 def test_nothing_is_loaded_when_the_feature_is_off(monkeypatch, client):
@@ -233,6 +234,10 @@ def test_health_reports_the_feature_on_when_configured(vlm_client):
     body = vlm_client.get("/health").json()
     assert body["vlm"]["enabled"] is True
     assert body["vlm"]["worker_attached"] is False
+    # The other side of the rule above: switched on, something really does answer a
+    # detection, so the block names which. Both directions are pinned because the
+    # conditional key is the sort of thing a later tidy-up makes unconditional again.
+    assert body["vlm"]["backend"] == "worker"
 
 
 def test_a_worker_polling_shows_up_as_attached(vlm_client):

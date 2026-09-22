@@ -187,6 +187,38 @@ async def harness():
     return FileResponse(HARNESS_PATH, media_type="text/html")
 
 
+def _vlm_health() -> dict:
+    """The `vlm` block on /health.
+
+    **`backend` is absent when the feature is off**, rather than reporting whichever
+    value the setting happens to hold. With no directory named, nothing answers a
+    detection and the routes 404, so naming the backend that *would* have answered is a
+    fact about a code path this server will never take -- and `enabled: false` beside a
+    backend name reads like a half-configured feature, which is the one thing it is not.
+    Its absence means "no backend is in play" rather than "an older server", because the
+    key it sits beside already answers that: a client reads `enabled` first.
+
+    `worker_attached` and `model_loaded` stay in both cases, because `false` is what
+    they actually are -- nothing has polled, nothing is loaded -- rather than an answer
+    about a road not taken.
+    """
+    return {
+        "enabled": MAILBOX is not None,
+        # Which backend answers, so a client knows whether `worker_attached` is a fact
+        # about this server or a fact about a process that isn't involved.
+        **({"backend": VLM_BACKEND} if MAILBOX is not None else {}),
+        # Left literal under the local backend, where it is simply False: reporting True
+        # because "something is attached" would make the one field whose name says
+        # "worker" stop meaning it. A client that predates `backend` shows a spurious
+        # "start the worker" note and detects successfully anyway, which is the harmless
+        # direction for this to be wrong in.
+        "worker_attached": MAILBOX is not None and MAILBOX.worker_attached(),
+        # Whether the first detection will include a download. Only meaningful for the
+        # local backend; False and static for the worker.
+        "model_loaded": DETECTOR is not None and DETECTOR.loaded,
+    }
+
+
 @app.get("/health")
 async def health():
     # MLX's own accounting, in bytes. `active` is memory currently backing live
@@ -233,21 +265,7 @@ async def health():
         # could only fail -- the same "ask before you offer it" rule the model block
         # above exists for. No path here: the directory is the server's business, and
         # /health is the one endpoint the bundled Caddyfile leaves open.
-        "vlm": {
-            "enabled": MAILBOX is not None,
-            # Which backend answers, so a client knows whether `worker_attached` is a
-            # fact about this server or a fact about a process that isn't involved.
-            "backend": VLM_BACKEND,
-            # Left literal under the local backend, where it is simply False: reporting
-            # True because "something is attached" would make the one field whose name
-            # says "worker" stop meaning it. A client that predates `backend` shows a
-            # spurious "start the worker" note and detects successfully anyway, which is
-            # the harmless direction for this to be wrong in.
-            "worker_attached": MAILBOX is not None and MAILBOX.worker_attached(),
-            # Whether the first detection will include a download. Only meaningful for
-            # the local backend; False and static for the worker.
-            "model_loaded": DETECTOR is not None and DETECTOR.loaded,
-        },
+        "vlm": _vlm_health(),
         "memory": {
             "active_bytes": mx.get_active_memory(),
             "cache_bytes": mx.get_cache_memory(),
