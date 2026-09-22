@@ -9,6 +9,7 @@ import base64
 import io
 import json
 import pathlib
+import sys
 
 import pytest
 from fastapi.testclient import TestClient
@@ -179,6 +180,47 @@ def test_health_reports_the_feature_off_by_default(client):
     # than for a value, since this fixture takes it from the ambient environment.
     assert body["vlm"]["model_loaded"] is False
     assert body["vlm"]["backend"] in BACKENDS
+
+
+def test_nothing_is_loaded_when_the_feature_is_off(monkeypatch, client):
+    """The guarantee the local backend's default rests on.
+
+    It is on unless `MFLUXIBLE_VLM_DIR` names a directory, so "off means nothing is
+    downloaded, imported or held" has to be true structurally rather than by inspection.
+    `DETECTOR` is still constructed with the feature off -- it is a name and three Nones,
+    and the backend is a property of the configuration rather than of the mailbox -- so
+    the thing worth pinning is that no request can reach the weights through it.
+
+    What would break this is a reordering in `vlm_describe`: the `MAILBOX is None` guard
+    is the first statement in it, and moving the detection kick-off above that guard
+    would start downloading three gigabytes on a server whose operator never switched
+    the feature on. Wiring both entry points is what makes that a failure here rather
+    than a surprise in someone's cache directory.
+    """
+    import mfluxible.server as server_module
+    from mfluxible.vlm_local import LocalDetector
+
+    tripped = []
+    for name in ("load_sync", "detect_sync"):
+        original = getattr(LocalDetector, name)
+
+        def wired(self, *args, _name=name, _original=original, **kwargs):
+            tripped.append(_name)
+            return _original(self, *args, **kwargs)
+
+        monkeypatch.setattr(LocalDetector, name, wired)
+    monkeypatch.setattr(server_module, "DETECTOR", LocalDetector())
+
+    assert server_module.MAILBOX is None
+    client.post("/mfluxible/v1/vlm/describe", json={"image": _b64(_png())})
+    client.get("/mfluxible/v1/vlm/next")
+    client.post("/mfluxible/v1/vlm/abc", json={"regions": []})
+    client.get("/health")
+
+    assert tripped == []
+    # And the import that pulls transformers and opencv behind it never happened either,
+    # which is what lets `mlx-vlm` be an extra rather than a dependency.
+    assert "mlx_vlm" not in sys.modules
 
 
 def test_the_endpoints_are_absent_when_the_feature_is_off(client):
