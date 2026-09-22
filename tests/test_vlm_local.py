@@ -244,9 +244,15 @@ def test_an_unparseable_reply_is_logged_for_diagnosis(monkeypatch, tmp_path, cap
     though it can never reach a response body. Before this, the failure was a black box:
     reproducing it required patching `_generated_text` by hand to see what the model
     actually said.
+
+    mlx-vlm is faked into `sys.modules` rather than imported for real, the same reason
+    the module docstring gives for loading no weights here: CI never installs the `vlm`
+    extra (it drags in transformers), so a bare `import mlx_vlm` would only ever pass
+    where a developer happened to have it installed already -- which is exactly how this
+    test's first version passed locally and failed in CI.
     """
-    import mlx_vlm
-    import mlx_vlm.prompt_utils as prompt_utils
+    import sys
+    import types
 
     image_path = tmp_path / "in.png"
     Image.new("RGB", (64, 64)).save(image_path)
@@ -256,12 +262,15 @@ def test_an_unparseable_reply_is_logged_for_diagnosis(monkeypatch, tmp_path, cap
     detector._processor = object()
     detector._config = {"model_type": "qwen2_5_vl"}
 
-    monkeypatch.setattr(prompt_utils, "apply_chat_template", lambda *a, **k: "prompt")
-
     class _Result:
         text = "I'm not able to help with that request."
 
-    monkeypatch.setattr(mlx_vlm, "generate", lambda *a, **k: _Result())
+    fake_mlx_vlm = types.ModuleType("mlx_vlm")
+    fake_mlx_vlm.generate = lambda *a, **k: _Result()
+    fake_prompt_utils = types.ModuleType("mlx_vlm.prompt_utils")
+    fake_prompt_utils.apply_chat_template = lambda *a, **k: "prompt"
+    monkeypatch.setitem(sys.modules, "mlx_vlm", fake_mlx_vlm)
+    monkeypatch.setitem(sys.modules, "mlx_vlm.prompt_utils", fake_prompt_utils)
 
     with caplog.at_level("WARNING", logger="mfluxible.vlm_local"):
         result = detector.detect_sync(image_path)
