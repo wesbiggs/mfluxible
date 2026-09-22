@@ -66,6 +66,9 @@ KNOWN = frozenset(
         "cors_origins",
         "vlm_dir",
         "vlm_timeout",
+        "vlm_backend",
+        "vlm_load_timeout",
+        "vlm_local_model",
         # how `mfluxible-server` binds, when no flag says otherwise
         "host",
         "port",

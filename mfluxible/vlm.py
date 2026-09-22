@@ -214,12 +214,60 @@ class VlmMailbox:
                 log.warning("could not prune a stashed detection image: %s", exc.strerror)
 
 
+# Which side actually runs a detection. Two backends, named for where the model is:
+#
+#   "local"  -- mfluxible/vlm_local.py, a vision model loaded into this process on the
+#               first request that needs one. The default, because for a model that
+#               loads from Python the sidecar buys nothing: the argument that keeps
+#               vlm_worker.py out of the server is about running an arbitrary command
+#               that spends an account, and a local model does neither.
+#   "worker" -- mfluxible/vlm_worker.py, the sidecar, which is still how you reach
+#               `claude -p` or any other CLI. See MFLUXIBLE_VLM_COMMAND.
+#
+# This is a choice, never an inference. Selecting the worker automatically whenever one
+# happened to be attached would make the answer to "what detected this?" depend on
+# whether a process was running a second ago, and would silently change which model a
+# deployment uses when someone starts a worker to try it out. The same reasoning that
+# has the clients refuse a bearer token beside URL credentials rather than picking a
+# winner applies here: two plausible readings means ask, not guess.
+BACKEND_LOCAL = "local"
+BACKEND_WORKER = "worker"
+BACKENDS = (BACKEND_LOCAL, BACKEND_WORKER)
+
+
+def backend_from_env() -> str:
+    """Which backend MFLUXIBLE_VLM_BACKEND selects. Defaults to the in-process one.
+
+    An unrecognized value raises, at import, the way an unknown MFLUXIBLE_MODEL does --
+    `MFLUXIBLE_VLM_BACKEND=sidecar` is a typo for something real, and a server that
+    shrugged and used the default would answer detections with a model the operator
+    believes is not running.
+    """
+    raw = os.environ.get("MFLUXIBLE_VLM_BACKEND", "").strip().lower()
+    if not raw:
+        return BACKEND_LOCAL
+    if raw not in BACKENDS:
+        raise ValueError(
+            f"MFLUXIBLE_VLM_BACKEND={raw!r} is not a backend; use one of {', '.join(BACKENDS)}"
+        )
+    return raw
+
+
 def mailbox_from_env() -> VlmMailbox | None:
     """The mailbox MFLUXIBLE_VLM_DIR asks for, or None when it is unset.
 
     One variable both enables and configures, rather than a boolean beside a path:
-    there is no useful "on but nowhere to put anything" state, and the feature
-    spends a Claude account, so it stays off until someone names a directory.
+    there is no useful "on but nowhere to put anything" state, and the feature costs
+    something real whichever backend serves it -- a sidecar spends the account running
+    `claude -p`, the in-process model downloads and then holds gigabytes of weights --
+    so it stays off until someone names a directory.
+
+    **The stash survives the local backend, which has the bytes in memory already and
+    could skip it.** Keeping it is what makes that backend a backend: the Job carries a
+    path, superseding closes the previous stream, the dimension guards compare the same
+    numbers, and `_vlm_sse` cannot tell which side answered. One of those paths having
+    no file would mean two lifecycles to keep in step instead of one, to save a PNG
+    write against a multi-second inference.
     """
     raw = os.environ.get("MFLUXIBLE_VLM_DIR", "").strip()
     if not raw:

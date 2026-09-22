@@ -2015,12 +2015,21 @@ async function findObjects() {
           if (!line.startsWith("data: ")) continue;
           const event = JSON.parse(line.slice("data: ".length));
           if (event.type === "pending") {
-            setRegionNote(
-              event.worker_attached
-                ? "looking…"
-                : "waiting — no detection worker is attached. Start mfluxible-vlm-worker.",
-              !event.worker_attached,
-            );
+            // Which backend answered decides what a wait means. Under `local` there is
+            // no worker to attach and nothing to tell anyone to start, so the only wait
+            // worth naming is the first one — which downloads a few gigabytes and would
+            // otherwise look exactly like a hang. A server predating this field sends no
+            // `backend` at all, which falls through to the worker wording it used to
+            // send, so an older deployment reads the same as it always did.
+            const local = event.backend === "local";
+            const ready = local || event.worker_attached;
+            let note = "looking…";
+            if (!ready) {
+              note = "waiting — no detection worker is attached. Start mfluxible-vlm-worker.";
+            } else if (local && event.model_loaded === false) {
+              note = "loading the vision model — the first run downloads it, so give it a minute…";
+            }
+            setRegionNote(note, !ready);
           } else if (event.type === "error") {
             setRegionNote(event.message, true);
           } else if (event.type === "result") {

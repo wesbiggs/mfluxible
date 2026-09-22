@@ -65,12 +65,24 @@
 
 # -- object detection ----------------------------------------------------------------
 
-# Naming a directory is what switches the feature on: it is where images are stashed
-# for the worker, and the directory the detection command runs in. Off until set.
+# Naming a directory is what switches the feature on: it is where images are stashed,
+# and -- under the worker backend -- the directory the detection command runs in. Off
+# until set, whichever backend you choose.
 # vlm_dir = "~/.cache/mfluxible/vlm"
 
-# How long a detection waits for the worker to answer.
+# Which side runs a detection. "local" loads a vision model into the server process on
+# the first request that needs one; "worker" hands jobs to `mfluxible-vlm-worker`, which
+# is how you reach `claude -p` or any other command-line tool.
+# vlm_backend = "local"
+
+# The model the local backend loads. Needs `mfluxible[vlm]` installed.
+# vlm_local_model = "mlx-community/Qwen2.5-VL-3B-Instruct-4bit"
+
+# How long a warm detection waits for its answer.
 # vlm_timeout = 180
+
+# What the *first* local detection waits instead, since it downloads the weights.
+# vlm_load_timeout = 900
 
 # Read by the worker (`mfluxible-vlm-worker`), not the server. The command is run with
 # no shell, and `{image}`/`{prompt}` are substituted after it is split into arguments.

@@ -51,9 +51,7 @@ loading this project's instructions on every call.
 """
 
 import argparse
-import json
 import os
-import re
 import shlex
 import subprocess
 import sys
@@ -64,6 +62,7 @@ from urllib.parse import urlparse
 import requests
 
 from mfluxible import __version__
+from mfluxible.vlm_reply import clean_payload, extract_json
 
 # Environment-only, like the other clients: a --token flag would put the secret in
 # shell history and in `ps` output for as long as the worker runs, which here is
@@ -166,80 +165,10 @@ def _headers() -> dict:
     return {"Authorization": f"Bearer {TOKEN}"} if TOKEN else {}
 
 
-def _extract_json(text: str) -> dict | list | None:
-    """The JSON value out of a reply, read the way an eye would. Returns None if there
-    isn't one -- the caller turns that into a message for the harness rather than a
-    traceback, since a model answering in prose is an ordinary outcome, not a crash.
-
-    An object `{prompt, regions}` is the shape asked for; a bare array is accepted as
-    regions with no prompt, because that was this contract's earlier shape and a wrapper
-    written against it should keep working rather than start returning nothing.
-    """
-    fence = re.search(r"```(?:json)?\s*(.+?)```", text, re.S)
-    for candidate in ([fence.group(1)] if fence else []) + [text]:
-        # Whichever bracket opens *first* is the outer container, and only its matching
-        # closer can end it. Trying "{...}" before "[...]" unconditionally would read an
-        # array of objects as its own first element -- the last "}" sits inside the array,
-        # so the slice parses cleanly and silently returns one region instead of all of
-        # them. Picking by position is what makes the two shapes unambiguous.
-        openers = [(candidate.find(o), o, c) for o, c in (("{", "}"), ("[", "]"))]
-        openers = sorted((pos, o, c) for pos, o, c in openers if pos != -1)
-        for start, _opener, closer in openers:
-            end = candidate.rfind(closer)
-            if end <= start:
-                continue
-            try:
-                parsed = json.loads(candidate[start : end + 1])
-            except json.JSONDecodeError:
-                continue
-            if isinstance(parsed, (dict, list)):
-                return parsed
-    return None
-
-
-def _clean_payload(parsed: dict | list) -> dict:
-    """The reply reduced to what the server accepts: a prompt and a list of regions.
-
-    A bare array means regions only. A missing or blank prompt stays None rather than
-    becoming "": the harness distinguishes "no prompt offered" from "an empty one".
-    """
-    if isinstance(parsed, list):
-        return {"prompt": None, "regions": _clean(parsed)}
-    raw_prompt = parsed.get("prompt")
-    prompt = raw_prompt.strip() if isinstance(raw_prompt, str) else ""
-    regions = parsed.get("regions")
-    return {
-        # Capped for the same reason a label is: this lands in a textarea and in a
-        # JSON body, and nothing useful is lost past a couple of thousand characters.
-        "prompt": prompt[:2000] or None,
-        "regions": _clean(regions if isinstance(regions, list) else []),
-    }
-
-
-def _clean(parsed: list) -> list[dict]:
-    """Only the entries that are usable as a mask rectangle.
-
-    Dropped rather than repaired, and silently: a box outside [0,1] or inverted means
-    the reply wasn't measured against the frame it was asked about, and a coerced
-    version of it would be a rectangle nobody chose sitting in a list the user is about
-    to click. An empty result reads as "nothing found", which is honest.
-    """
-    out = []
-    for item in parsed:
-        if not isinstance(item, dict):
-            continue
-        box = item.get("box")
-        if not isinstance(box, (list, tuple)) or len(box) != 4:
-            continue
-        try:
-            x0, y0, x1, y1 = (float(v) for v in box)
-        except (TypeError, ValueError):
-            continue
-        if not (0.0 <= x0 < x1 <= 1.0 and 0.0 <= y0 < y1 <= 1.0):
-            continue
-        label = str(item.get("label") or "object").strip()[:80]
-        out.append({"label": label or "object", "box": [x0, y0, x1, y1]})
-    return out[:8]
+# The reply's shape lives in mfluxible/vlm_reply.py, not here, because there are two
+# backends now and they have to agree on it exactly -- see that module's docstring.
+# This one still holds the *command* end of the contract: what gets run, and how its
+# stdout becomes one of those replies.
 
 
 def detect(image_path: str) -> dict:
@@ -276,10 +205,10 @@ def detect(image_path: str) -> dict:
         tail = detail[-1][:200] if detail else f"exit code {proc.returncode}"
         return {"error": f"{cmd[0]} failed: {tail}"}
 
-    parsed = _extract_json(proc.stdout or "")
+    parsed = extract_json(proc.stdout or "")
     if parsed is None:
         return {"error": "the reply held no JSON object."}
-    return _clean_payload(parsed)
+    return clean_payload(parsed)
 
 
 def run(base: str) -> None:

@@ -47,6 +47,19 @@ dependencies = [
 # One copy of the version, in the package, where /health can report it.
 dynamic = ["version"]
 
+# The in-process detection backend, which is optional in the literal sense: object
+# detection is off until MFLUXIBLE_VLM_DIR names a directory, and the worker backend
+# needs none of this. It is a genuinely heavy extra -- mlx-vlm pulls transformers,
+# opencv and a second web framework behind it -- which is the whole reason it is not in
+# `dependencies`, where it would land on every install of a server that generates
+# images and detects nothing.
+#
+# Note this is an extra on *this* distribution rather than a second one. The split
+# CLAUDE.md protects is about a client never installing MLX; here the MLX is already
+# the point, so the same reasoning does not apply.
+[project.optional-dependencies]
+vlm = ["mlx-vlm>=0.7.2"]
+
 [project.urls]
 Homepage = "https://github.com/wesbiggs/mfluxible"
 Documentation = "https://github.com/wesbiggs/mfluxible/blob/main/README.md"

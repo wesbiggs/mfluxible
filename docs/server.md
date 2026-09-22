@@ -24,9 +24,10 @@ variable, or a key in a [config file](#config-file). They are the same setting �
 its variable with `MFLUXIBLE_` dropped and the case lowered, so `model` sets
 `MFLUXIBLE_MODEL`. Where both say something, **the environment wins**.
 
-The last four are read by `mfluxible-vlm-worker` rather than the server. They are listed
-here, with the server's, because the worker is co-configured with it and runs on the same
-machine — see [Object detection](#object-detection).
+The last four are read by `mfluxible-vlm-worker` rather than the server, and only matter
+under `MFLUXIBLE_VLM_BACKEND=worker`. They are listed here, with the server's, because the
+worker is co-configured with it and runs on the same machine — see
+[Object detection](#object-detection).
 
 | Variable | Config key | Default | Purpose |
 |---|---|---|---|
@@ -44,7 +45,10 @@ machine — see [Object detection](#object-detection).
 | `MFLUXIBLE_CORS_ORIGIN_REGEX` | `cors_origin_regex` | `https?://(localhost\|127\.0\.0\.1)(:\d+)?` | Origins to reflect back in CORS (see [CORS](#cors)) |
 | `MFLUXIBLE_CORS_ORIGINS` | `cors_origins` | unset | Exact-match origins, in addition to the regex |
 | `MFLUXIBLE_VLM_DIR` | `vlm_dir` | unset | Enables object detection and says where images are stashed (see [Object detection](#object-detection)) |
-| `MFLUXIBLE_VLM_TIMEOUT` | `vlm_timeout` | `180` | Seconds a detection waits for a worker's answer before giving up |
+| `MFLUXIBLE_VLM_BACKEND` | `vlm_backend` | `local` | Which side runs a detection: `local` (a model in this process) or `worker` (the sidecar) |
+| `MFLUXIBLE_VLM_LOCAL_MODEL` | `vlm_local_model` | `mlx-community/Qwen2.5-VL-3B-Instruct-4bit` | *(local)* The model to load; needs the `vlm` extra installed |
+| `MFLUXIBLE_VLM_TIMEOUT` | `vlm_timeout` | `180` | Seconds a warm detection waits for its answer before giving up |
+| `MFLUXIBLE_VLM_LOAD_TIMEOUT` | `vlm_load_timeout` | `900` | Seconds the **first** local detection waits instead, since it downloads the weights |
 | `MFLUXIBLE_CONFIG` | — | unset | Which config file to read; `none` disables discovery entirely. Not settable from a config file, for obvious reasons |
 | `HF_TOKEN` | `[env]` table | unset | Not an mfluxible variable — `huggingface_hub` reads it, and gated models need it (see [Gated weights](#gated-weights-and-hf_token)) |
 | `MFLUXIBLE_VLM_COMMAND` | `vlm_command` | `claude -p …` | *(worker)* What it runs per detection (see [Using a different tool](#using-a-different-tool)) |
@@ -153,42 +157,89 @@ On by default, reflecting back any `http(s)://localhost:<any port>` or `127.0.0.
 ### Object detection
 
 Off unless `MFLUXIBLE_VLM_DIR` names a directory. Switched on, the server gains the
-three `/mfluxible/v1/vlm/` endpoints ([API](api.md#post-mfluxiblev1vlmdescribe))
+`/mfluxible/v1/vlm/` endpoints ([API](api.md#post-mfluxiblev1vlmdescribe))
 and the harness grows a **Find objects** button that fills a row of togglable regions.
 Each one is an independent toggle and the mask is the union of whatever is selected, so
 a subject and the thing it is holding can be masked together.
 
-**The server does no detection.** It never loads a vision model, never holds an API key
-and never makes an outbound call — it writes a file, holds one job in memory, and copies
-a JSON array from one request to another. The work is done by
-`mfluxible/vlm_worker.py`, which runs alongside (see
-[Running the worker](#running-the-worker) below). With nothing running, the feature simply reports no worker attached and the harness says so.
+**Two backends, and `MFLUXIBLE_VLM_BACKEND` picks one.** They exist for different
+reasons rather than as alternatives to benchmark against each other:
 
-That split is deliberate rather than tidiness: the worker runs an arbitrary configured
-command with filesystem access, and an HTTP endpoint that spawned one would be by far
-the most dangerous thing here. As a client it cannot be reached from the network at all,
-and starting it is what consent to that command running looks like.
+| | `local` (default) | `worker` |
+|---|---|---|
+| Where the model runs | In the server process | In a sidecar you start |
+| What it is | An MLX vision model, loaded on first use | Any command line, `claude -p` by default |
+| Extra install | `mfluxible[vlm]` | none |
+| Extra process | none | `mfluxible-vlm-worker` |
+| Costs | ~3GB of weights, held while the server runs | Whatever the command costs to run |
 
-**Which detector runs is the worker's business, not the server's.**
-`MFLUXIBLE_VLM_COMMAND` names the whole command line — [Claude Code](https://claude.com/claude-code)
-by default, but any program that prints the agreed JSON object to stdout will do, including a local detector or a script of your own. It is set on the worker rather
-than read by the server; see [Using a different tool](#using-a-different-tool).
+Start with `local`. It needs no second process and no account, and a server whose users
+never press the button never pays for it — nothing is downloaded or loaded until the
+first detection asks.
+
+```bash
+uv pip install 'mfluxible[vlm]'
+MFLUXIBLE_VLM_DIR=~/.cache/mfluxible/vlm mfluxible-server
+```
+
+The first detection downloads a few gigabytes and takes minutes; the harness says so
+rather than appearing to hang, and `MFLUXIBLE_VLM_LOAD_TIMEOUT` (15 minutes) is what it
+waits, separately from the `MFLUXIBLE_VLM_TIMEOUT` that applies once the model is warm.
+Later detections take seconds. `/health` reports `vlm.model_loaded` if you want to know
+which you are about to get.
+
+`MFLUXIBLE_VLM_LOCAL_MODEL` changes the model. The default is Qwen2.5-VL at 3B and
+4-bit, chosen for *localization* rather than description — the larger checkpoints write
+better prompts and place worse boxes, which is the wrong trade for a feature whose
+output is a mask rectangle. Anything mlx-vlm can load and that answers with pixel boxes
+will work, but note that the coordinate dialect is not a setting: see
+[Using a different tool](#using-a-different-tool).
+
+**What it costs while it is loaded.** The weights sit beside the image model's in the
+same unified memory, and detections share the generation lock — so a detection waits
+behind a running generation, and a generation waits behind a running detection. That is
+deliberate: two MLX consumers interleaving on one device is not something this server
+has ever been safe under. On a machine where the image model already fills memory, watch
+`/health`'s `memory` block after switching this on, and see [Memory](#memory).
+
+**The `worker` backend is how you reach a command line**, and is what to use for
+`claude -p`, a cloud API behind a script of your own, or a local detector that isn't an
+MLX model. There the server does no detection at all: it never loads a model, never
+holds an API key and never makes an outbound call — it writes a file, holds one job in
+memory, and copies a JSON array from one request to another.
+
+```bash
+MFLUXIBLE_VLM_BACKEND=worker MFLUXIBLE_VLM_DIR=~/.cache/mfluxible/vlm mfluxible-server
+```
+
+That split is deliberate rather than tidiness, and it is the reason the sidecar survives
+having a default that doesn't need one: the worker runs an arbitrary configured command
+with filesystem access, and an HTTP endpoint that spawned one would be by far the most
+dangerous thing here. As a separate process it cannot be reached from the network at
+all, and starting it is what consent to that command running looks like. None of that
+argument reaches a local MLX model, which runs no command and spends nothing — which is
+why that one is allowed to live in the server and this one is not.
+
+A worker polling a server set to `local` is told so and exits, rather than long-polling
+forever for jobs that will never come.
 
 One variable both enables and configures because there is no useful "on, but nowhere to
-put anything" state. Point the worker at the same directory: it is also the working
-directory the detection command runs in, which matters twice on the default — a stashed
-image inside it is already readable without widening the CLI's allowed roots, and a
-directory with no `CLAUDE.md` keeps a one-shot detection from loading a project's
-instructions on every call.
+put anything" state. Under `worker`, point the worker at the same directory: it is also
+the working directory the detection command runs in, which matters twice on the default
+— a stashed image inside it is already readable without widening the CLI's allowed
+roots, and a directory with no `CLAUDE.md` keeps a one-shot detection from loading a
+project's instructions on every call.
 
 Stashed images are pruned after an hour, on the next detection.
 
 #### Running the worker
 
-`mfluxible/vlm_worker.py` is what makes the harness's **Find objects** button work. The
-harness can see an image and drive the GPU but has no vision model; this process
-supplies one. It long-polls the server for a pending detection, runs a command against
-the stashed image, and posts the regions back for the harness's open stream to deliver.
+Only under `MFLUXIBLE_VLM_BACKEND=worker`; a server left on the default answers its own
+detections and hands a worker nothing.
+
+`mfluxible/vlm_worker.py` runs a command line against the stashed image and posts the
+regions back for the harness's open stream to deliver. It long-polls the server for a
+pending detection, so it can be started and stopped at any time.
 
 By default that command is [Claude Code](https://claude.com/claude-code) — the CLI on
 `PATH` and already signed in — but nothing here is specific to it; see
@@ -264,9 +315,17 @@ MFLUXIBLE_VLM_COMMAND='python3 ~/bin/boxes_to_fractions.py {image}'
 ```
 
 That last one is the common case, and it is deliberate that it needs a wrapper: tools
-disagree about coordinates — pixels, 0–1000, `xywh` — and a conversion setting here would
-turn a wrongly-scaled box into a plausible-looking one. Keeping a single reader keeps a
-bad box visibly bad.
+disagree about coordinates — pixels, 0–1000, `xywh`, and Gemini even puts `y` first —
+and a conversion setting here would turn a wrongly-scaled box into a plausible-looking
+one. Keeping a single reader keeps a bad box visibly bad.
+
+The `local` backend is the one exception, and it is not really one: it converts Qwen's
+absolute pixels to fractions itself, but by dividing by a frame it computed and resized
+the image to, not by a scale anyone configured. A backend that knows its own model's
+convention is a driver; a menu of coordinate systems would be a dial. That is also why
+pointing `MFLUXIBLE_VLM_LOCAL_MODEL` at a model that answers in some other dialect will
+produce dropped regions rather than wrong ones — the fractions land outside `[0,1]` and
+are discarded, which is the visible failure rather than the silent one.
 
 The template is split with `shlex` and run **without a shell**, so quoting behaves as you
 would expect while `;` and `|` are ordinary argument characters. Splitting happens before
