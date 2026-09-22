@@ -13,13 +13,31 @@ from mfluxible.vlm_local import (
     DEFAULT_FACTOR,
     DEFAULT_MAX_PIXELS,
     DEFAULT_MIN_PIXELS,
+    PROMPT,
     LocalDetector,
     _budget,
     _generated_text,
     smart_resize,
     to_fractions,
 )
-from mfluxible.vlm_reply import clean_payload
+from mfluxible.vlm_reply import MAX_REGIONS, clean_payload
+
+
+# --- the prompt template -------------------------------------------------------------
+
+
+def test_the_json_example_survives_formatting_intact():
+    """PROMPT is filled with `.format(max_regions=...)`, and it also carries a literal
+    JSON example (`{"prompt": ..., "regions": [...]}`) for the model to imitate. Every
+    brace in that example has to survive as a literal brace rather than being read as a
+    format field -- doubled to `{{`/`}}` in the source -- or `.format` raises KeyError on
+    the first one it meets (regressed once: `KeyError: '"prompt"'`, from the unescaped
+    example above). Only `{max_regions}` is a real placeholder.
+    """
+    filled = PROMPT.format(max_regions=MAX_REGIONS)
+    assert '{"prompt": string, "regions": [{"label": string, "bbox_2d": [x1, y1, x2, y2]}]}' in filled
+    assert f"at most {MAX_REGIONS}." in filled
+    assert "{" not in filled.split("at most")[-1]
 
 
 # --- the frame ---------------------------------------------------------------------

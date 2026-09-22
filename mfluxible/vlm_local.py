@@ -81,7 +81,7 @@ BOX_KEY = "bbox_2d"
 
 PROMPT = """Reply with ONLY a JSON object of this shape:
 
-{"prompt": string, "regions": [{"label": string, "bbox_2d": [x1, y1, x2, y2]}]}
+{{"prompt": string, "regions": [{{"label": string, "bbox_2d": [x1, y1, x2, y2]}}]}}
 
 "prompt" is a text-to-image prompt that would plausibly regenerate this picture. Describe the whole frame the way a prompt is written -- subject, pose, composition, setting, lighting, colour, style and medium -- not the way a caption describes a photograph. Do not open with "an image of" or "a picture showing". One paragraph, no line breaks.
 
