@@ -2,8 +2,8 @@
 
 Nothing here loads weights -- CI would be downloading gigabytes per run for a
 non-determinism it could not assert on anyway. What it does cover is the part that is
-arithmetic rather than inference, and that part is where this backend can be *silently*
-wrong: the frame the model is shown, and the division that turns its pixels into the
+arithmetic rather than inference: the frame `smart_resize` predicts before handing an
+image to the processor, and the division that turns Qwen3-VL's 0-1000 boxes into the
 fractions everything downstream assumes.
 """
 
@@ -81,40 +81,29 @@ def test_a_huge_image_is_shrunk_and_a_tiny_one_grown():
 
 @pytest.mark.parametrize("height,width", [(3000, 4000), (768, 1024), (4032, 3024)])
 def test_the_aspect_ratio_is_held_loosely_and_that_is_enough(height, width):
-    """Qwen floors each axis onto the 28-grid independently, so the ratio drifts by a
-    couple of percent on an ordinary photograph (measured: 2.4-2.8%) and further on an
-    extreme panorama. That is upstream's algorithm, not a rounding bug here.
+    """Qwen floors each axis onto its 32-grid independently, so the ratio drifts by a
+    couple of percent on an ordinary photograph and further on an extreme panorama.
+    That is upstream's algorithm, not a rounding bug here.
 
     It does not cost coordinate accuracy, which is the thing worth being clear about:
     the resize maps the whole width onto the whole width, so an object covering half the
     frame covers half of it in either size. The drift restretches shapes slightly -- a
     circle arrives a shade elliptical -- which is a question about how well the model
-    sees, not about where its answer lands. The exactness of the mapping is pinned by
-    the test below rather than by this tolerance.
+    sees, not about where its answer lands.
     """
     h, w = smart_resize(height, width)
     assert abs((w / h) / (width / height) - 1) < 0.05
 
 
-def test_a_fraction_means_the_same_thing_in_both_sizes():
-    """The property the whole conversion rests on, and the reason smart_resize is
-    allowed to distort at all: `to_fractions` divides by the resized frame, and the
-    result is applied to an image of the original size. Those two numbers differ on
-    almost every request, so the mapping has to be scale-invariant rather than merely
-    close -- which is the same argument the MCP tool's mask_boxes are fractions for.
+def test_the_conversion_needs_no_information_about_the_image_at_all():
+    """Unlike Qwen2.5-VL's absolute pixels -- which needed dividing by the exact frame
+    `smart_resize` computed for that request -- Qwen3-VL's 0-1000 values are already
+    relative to the whole image (see BOX_KEY's comment in vlm_local.py). So the same
+    reply converts identically no matter what size the image was or what frame it got
+    resized to before generation; `to_fractions` doesn't even take one any more.
     """
-    original_h, original_w = 3000, 4000
-    frame_h, frame_w = smart_resize(original_h, original_w)
-
-    # The middle-right quarter of the frame, in the resized image's own pixels.
-    box = [frame_w * 0.5, frame_h * 0.25, frame_w * 1.0, frame_h * 0.75]
-    parsed = to_fractions([{"label": "x", "bbox_2d": box}], width=frame_w, height=frame_h)
-
-    assert parsed[0]["box"] == pytest.approx([0.5, 0.25, 1.0, 0.75])
-    # And read back against the original, it is still the middle-right quarter.
-    x0, y0, x1, y1 = parsed[0]["box"]
-    assert (x0 * original_w, y0 * original_h) == pytest.approx((2000.0, 750.0))
-    assert (x1 * original_w, y1 * original_h) == pytest.approx((4000.0, 2250.0))
+    reply = [{"label": "x", "bbox_2d": [250, 500, 750, 900]}]
+    assert to_fractions(reply)[0]["box"] == [0.25, 0.5, 0.75, 0.9]
 
 
 # --- the budget is read off the model, not assumed ---------------------------------
@@ -170,39 +159,38 @@ def test_a_nonsense_budget_is_ignored_rather_than_used():
     assert _budget(processor) == (DEFAULT_FACTOR, DEFAULT_MIN_PIXELS, DEFAULT_MAX_PIXELS)
 
 
-# --- pixels to fractions -----------------------------------------------------------
+# --- relative coordinates to fractions ----------------------------------------------
 
 
-def test_pixel_boxes_become_fractions_of_the_frame_they_were_measured_in():
+def test_relative_boxes_become_fractions_of_the_whole_image():
     parsed = to_fractions(
-        {"prompt": "a mug", "regions": [{"label": "mug", "bbox_2d": [140, 280, 560, 700]}]},
-        width=1400,
-        height=1400,
+        {"prompt": "a mug", "regions": [{"label": "mug", "bbox_2d": [100, 200, 400, 500]}]}
     )
     assert parsed["regions"][0]["box"] == [0.1, 0.2, 0.4, 0.5]
 
 
-def test_a_non_square_frame_divides_each_axis_by_its_own_edge():
-    """The failure this catches is dividing both axes by one number, which on a 4:3
-    frame transposes nothing and stretches everything -- a box that looks plausible."""
-    parsed = to_fractions([{"label": "x", "bbox_2d": [100, 100, 200, 200]}], width=1000, height=500)
-    assert parsed[0]["box"] == [0.1, 0.2, 0.2, 0.4]
+def test_x_and_y_are_not_transposed():
+    """Both axes divide by the same FRAME_SPAN now, so there is no width/height mix-up
+    to guard against -- but a transposition bug reading x1/y1 as y1/x1 would still
+    produce a plausible-looking wrong box, so it is worth pinning that x-values land in
+    x-slots and y-values in y-slots."""
+    parsed = to_fractions([{"label": "x", "bbox_2d": [100, 300, 200, 600]}])
+    assert parsed[0]["box"] == [0.1, 0.3, 0.2, 0.6]
 
 
 def test_a_bare_array_converts_the_same_way_an_object_does():
     """vlm_reply accepts both shapes, so this has to as well -- otherwise a model
-    answering in the older array form would reach the cleaner still holding pixels."""
-    parsed = to_fractions([{"label": "a", "bbox_2d": [0, 0, 50, 100]}], width=100, height=200)
-    assert parsed[0]["box"] == [0.0, 0.0, 0.5, 0.5]
+    answering in the older array form would reach the cleaner still holding raw values."""
+    parsed = to_fractions([{"label": "a", "bbox_2d": [0, 0, 500, 250]}])
+    assert parsed[0]["box"] == [0.0, 0.0, 0.5, 0.25]
 
 
-def test_a_box_measured_against_the_wrong_frame_is_dropped_not_rescaled():
-    """The conversion deliberately does no validation of its own. If the frame were ever
-    wrong in the direction that matters, the quotients leave [0,1] and vlm_reply's range
-    check drops them -- one rejection point for every backend, rather than two."""
-    payload = clean_payload(
-        to_fractions([{"label": "x", "bbox_2d": [0, 0, 2000, 2000]}], width=500, height=500)
-    )
+def test_a_reply_outside_the_0_1000_scale_is_dropped_not_rescaled():
+    """The conversion deliberately does no validation of its own. A reply measured in
+    some other scale -- absolute pixels, say -- produces quotients outside [0,1], and
+    vlm_reply's range check drops them there -- one rejection point for every backend,
+    rather than two."""
+    payload = clean_payload(to_fractions([{"label": "x", "bbox_2d": [0, 0, 2000, 2000]}]))
     assert payload["regions"] == []
 
 
@@ -212,26 +200,23 @@ def test_entries_that_are_not_boxes_are_left_for_the_cleaner():
             {"label": "short", "bbox_2d": [1, 2]},
             {"label": "words", "bbox_2d": ["a", "b", "c", "d"]},
             "not an object",
-            {"label": "fine", "bbox_2d": [0, 0, 10, 10]},
-        ],
-        width=100,
-        height=100,
+            {"label": "fine", "bbox_2d": [0, 0, 100, 100]},
+        ]
     )
     assert clean_payload(parsed)["regions"] == [{"label": "fine", "box": [0.0, 0.0, 0.1, 0.1]}]
 
 
 def test_a_reply_already_speaking_box_is_converted_too():
     """Some replies come back under the generic key rather than Qwen's. They are still
-    pixels -- this prompt asked for pixels -- so the key is what varies, not the unit."""
-    parsed = to_fractions([{"label": "a", "box": [0, 0, 25, 50]}], width=100, height=100)
+    on the same 0-1000 scale -- this prompt asks for that scale -- so the key is what
+    varies, not the unit."""
+    parsed = to_fractions([{"label": "a", "box": [0, 0, 250, 500]}])
     assert parsed[0]["box"] == [0.0, 0.0, 0.25, 0.5]
 
 
 def test_something_that_is_not_a_reply_passes_through_untouched():
-    assert to_fractions("nonsense", width=10, height=10) == "nonsense"
-    assert to_fractions({"prompt": "no regions here"}, width=10, height=10) == {
-        "prompt": "no regions here"
-    }
+    assert to_fractions("nonsense") == "nonsense"
+    assert to_fractions({"prompt": "no regions here"}) == {"prompt": "no regions here"}
 
 
 # --- the generate() return shape ---------------------------------------------------

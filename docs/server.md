@@ -46,7 +46,7 @@ worker is co-configured with it and runs on the same machine — see
 | `MFLUXIBLE_CORS_ORIGINS` | `cors_origins` | unset | Exact-match origins, in addition to the regex |
 | `MFLUXIBLE_VLM_DIR` | `vlm_dir` | unset | Enables object detection and says where images are stashed (see [Object detection](#object-detection)) |
 | `MFLUXIBLE_VLM_BACKEND` | `vlm_backend` | `local` | Which side runs a detection: `local` (a model in this process) or `worker` (the sidecar) |
-| `MFLUXIBLE_VLM_LOCAL_MODEL` | `vlm_local_model` | `mlx-community/Qwen2.5-VL-3B-Instruct-4bit` | *(local)* The model to load; needs the `vlm` extra installed |
+| `MFLUXIBLE_VLM_LOCAL_MODEL` | `vlm_local_model` | `mlx-community/Qwen3-VL-4B-Instruct-4bit` | *(local)* The model to load; needs the `vlm` extra installed |
 | `MFLUXIBLE_VLM_TIMEOUT` | `vlm_timeout` | `180` | Seconds a warm detection waits for its answer before giving up |
 | `MFLUXIBLE_VLM_LOAD_TIMEOUT` | `vlm_load_timeout` | `900` | Seconds the **first** local detection waits instead, since it downloads the weights |
 | `MFLUXIBLE_CONFIG` | — | unset | Which config file to read; `none` disables discovery entirely. Not settable from a config file, for obvious reasons |
@@ -188,11 +188,11 @@ waits, separately from the `MFLUXIBLE_VLM_TIMEOUT` that applies once the model i
 Later detections take seconds. `/health` reports `vlm.model_loaded` if you want to know
 which you are about to get.
 
-`MFLUXIBLE_VLM_LOCAL_MODEL` changes the model. The default is Qwen2.5-VL at 3B and
-4-bit, chosen for *localization* rather than description — the larger checkpoints write
-better prompts and place worse boxes, which is the wrong trade for a feature whose
-output is a mask rectangle. Anything mlx-vlm can load and that answers with pixel boxes
-will work, but note that the coordinate dialect is not a setting: see
+`MFLUXIBLE_VLM_LOCAL_MODEL` changes the model. The default is Qwen3-VL at 4B and 4-bit;
+Qwen's own release notes for the family describe improved multi-target grounding over
+Qwen2.5-VL, which is what a feature whose output is a mask rectangle needs most. Anything
+mlx-vlm can load and that answers with boxes on a 0-1000 relative scale will work, but
+note that the coordinate dialect is not a setting: see
 [Using a different tool](#using-a-different-tool).
 
 **What it costs while it is loaded.** The weights sit beside the image model's in the
@@ -320,12 +320,14 @@ and a conversion setting here would turn a wrongly-scaled box into a plausible-l
 one. Keeping a single reader keeps a bad box visibly bad.
 
 The `local` backend is the one exception, and it is not really one: it converts Qwen's
-absolute pixels to fractions itself, but by dividing by a frame it computed and resized
-the image to, not by a scale anyone configured. A backend that knows its own model's
-convention is a driver; a menu of coordinate systems would be a dial. That is also why
-pointing `MFLUXIBLE_VLM_LOCAL_MODEL` at a model that answers in some other dialect will
-produce dropped regions rather than wrong ones — the fractions land outside `[0,1]` and
-are discarded, which is the visible failure rather than the silent one.
+0-1000 relative coordinates to fractions itself, but by dividing by the fixed scale that
+convention uses, not by a setting anyone configured. A backend that knows its own
+model's convention is a driver; a menu of coordinate systems would be a dial. That is
+also why pointing `MFLUXIBLE_VLM_LOCAL_MODEL` at a model that answers in some other
+dialect (Qwen2.5-VL's absolute pixels, for instance) risks a plausible-looking wrong box
+rather than a visibly dropped one — both dialects put values in a similar numeric range,
+so the same failure a conversion *setting* would risk here is exactly what overriding to
+a different dialect reintroduces.
 
 The template is split with `shlex` and run **without a shell**, so quoting behaves as you
 would expect while `;` and `|` are ordinary argument characters. Splitting happens before

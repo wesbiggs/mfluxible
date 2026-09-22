@@ -13,7 +13,7 @@ Object detection no longer needs a sidecar. A vision model can now run inside th
 process, and that is the new default.
 
 - **`MFLUXIBLE_VLM_BACKEND` picks which side detects**, defaulting to `local`: an MLX
-  vision model (Qwen2.5-VL 3B 4-bit) loaded into the server process on the first
+  vision model (Qwen3-VL 4B 4-bit) loaded into the server process on the first
   detection that asks for one. `MFLUXIBLE_VLM_BACKEND=worker` keeps the existing
   sidecar, which is still how you reach `claude -p` or any other command line. Install
   the local backend with `uv pip install 'mfluxible[vlm]'`.
@@ -35,8 +35,8 @@ process, and that is the new default.
   on one device is not something this server has been safe under.
 
 - **`MFLUXIBLE_VLM_LOCAL_MODEL`** sets which model the local backend loads. The default
-  is chosen for localization rather than description — larger checkpoints write better
-  prompts and place worse boxes, which is the wrong trade for a mask rectangle.
+  is Qwen3-VL, whose release notes describe improved multi-target grounding over
+  Qwen2.5-VL — the property a feature whose output is a mask rectangle needs most.
 
 - **`MFLUXIBLE_VLM_LOAD_TIMEOUT`** (default 900s) is what the *first* local detection
   waits, since it downloads a few gigabytes. `MFLUXIBLE_VLM_TIMEOUT` (180s) still applies

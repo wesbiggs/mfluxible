@@ -48,14 +48,13 @@ from mfluxible.vlm_reply import MAX_REGIONS, clean_payload, extract_json
 
 log = logging.getLogger("mfluxible.vlm_local")
 
-# Qwen2.5-VL at 3B and 4-bit: ~2.9GB on disk, and the size the community consistently
-# reports as the one whose *grounding* holds up -- the 7B is the better describer and
-# the worse localizer, which is the wrong way round for a feature whose output is a
-# mask rectangle. A box in the wrong place is this feature's defining failure (see the
-# measurements in CLAUDE.md's MCP section), so localization is what the default
-# optimizes for. Override with MFLUXIBLE_VLM_LOCAL_MODEL; anything mlx-vlm can load
-# and that answers in the dialect below will work.
-DEFAULT_MODEL = "mlx-community/Qwen2.5-VL-3B-Instruct-4bit"
+# Qwen3-VL at 4B and 4-bit: ~2.9GB on disk (measured), about the same footprint as the
+# 3B Qwen2.5-VL checkpoint this replaced. Qwen's own release notes for the family
+# (QwenLM/Qwen3-VL, cookbooks/2d_grounding.ipynb) advertise improved multi-target
+# grounding over Qwen2.5-VL, which is the property this feature's output -- a mask
+# rectangle -- depends on. Override with MFLUXIBLE_VLM_LOCAL_MODEL; anything mlx-vlm can
+# load and that answers in the dialect below will work.
+DEFAULT_MODEL = "mlx-community/Qwen3-VL-4B-Instruct-4bit"
 MODEL = os.environ.get("MFLUXIBLE_VLM_LOCAL_MODEL", "").strip() or DEFAULT_MODEL
 
 # Enough for a one-paragraph prompt plus eight boxes, and no more. This is the only
@@ -65,18 +64,29 @@ MODEL = os.environ.get("MFLUXIBLE_VLM_LOCAL_MODEL", "").strip() or DEFAULT_MODEL
 # A token cap is the one lever that decides when this returns.
 MAX_TOKENS = 1024
 
-# Qwen's own defaults, used only when the loaded processor doesn't carry its own (see
-# _frame_for). `factor` is patch_size * merge_size; the pixel figures are areas, not
-# edges, which the "shortest_edge"/"longest_edge" spelling in some processor configs
-# actively disguises.
-DEFAULT_FACTOR = 28
-DEFAULT_MIN_PIXELS = 56 * 56
-DEFAULT_MAX_PIXELS = 1280 * 28 * 28
+# DEFAULT_MODEL's own shipped values, used only when the loaded processor doesn't carry
+# its own (see _budget) -- read from its actual preprocessor_config.json rather than
+# assumed: `patch_size` 16, `merge_size` 2 (factor 32, against Qwen2.5-VL's 14 * 2), and
+# a `size` dict of {"shortest_edge": 65536, "longest_edge": 16777216}. The pixel figures
+# are areas, not edges, which that "shortest_edge"/"longest_edge" spelling actively
+# disguises -- _budget reads the same dict the same way.
+DEFAULT_FACTOR = 32
+DEFAULT_MIN_PIXELS = 256 * 256
+DEFAULT_MAX_PIXELS = 4096 * 4096
 
-# The dialect this backend adapts from. Qwen2.5-VL is trained to emit absolute pixel
-# coordinates under this key -- which is itself a change from Qwen2-VL's 0-1000
-# normalized scheme, i.e. one model family broke its own convention between versions.
-# That is the entire case for the output contract in vlm_reply.py being fixed.
+# The dialect this backend adapts from. Qwen3-VL emits coordinates under this key as
+# integers on a fixed 0-1000 scale, relative to the *whole* image regardless of how the
+# processor resizes it internally -- confirmed against Qwen's own cookbook rather than
+# assumed: "Qwen3-VL's default coordinate system has been changed from the absolute
+# coordinates used in Qwen2.5-VL to relative coordinates ranging from 0 to 1000. (You
+# don't need to calculate the resized_w)" (QwenLM/Qwen3-VL, cookbooks/2d_grounding.ipynb).
+# That parenthetical is the whole reason to_fractions no longer takes a frame: the value
+# is already scale-invariant, where Qwen2.5-VL's absolute pixels needed dividing by the
+# exact frame the processor was shown. Qwen2-VL used this same 0-1000 scheme before
+# Qwen2.5-VL broke it, so this is a reversion within the family, not a first occurrence
+# -- which is the whole case for the output contract in vlm_reply.py being fixed rather
+# than a per-tool setting: whichever way a model's own convention next moves, only this
+# one place has to move with it.
 BOX_KEY = "bbox_2d"
 
 PROMPT = """Reply with ONLY a JSON object of this shape:
@@ -85,7 +95,7 @@ PROMPT = """Reply with ONLY a JSON object of this shape:
 
 "prompt" is a text-to-image prompt that would plausibly regenerate this picture. Describe the whole frame the way a prompt is written -- subject, pose, composition, setting, lighting, colour, style and medium -- not the way a caption describes a photograph. Do not open with "an image of" or "a picture showing". One paragraph, no line breaks.
 
-"regions" lists the distinct objects a person might want to replace using an inpainting model. Each bbox_2d is [left, top, right, bottom] in absolute pixels of this image, with 0,0 at the TOP-LEFT.
+"regions" lists the distinct objects a person might want to replace using an inpainting model. Each bbox_2d is [left, top, right, bottom] as integers from 0 to 1000, relative to this image's full width and height, with 0,0 at the TOP-LEFT.
 
 Measure each box against the object's actual extent. Do not round to a coarse grid, and do not box the semantic region an object sits in -- box the object itself, tightly. A box centred on the wrong thing, or half again too large, is the failure to avoid. Prefer whole objects someone might swap out over parts of them, most prominent first, at most {max_regions}."""
 
@@ -102,14 +112,16 @@ def smart_resize(
     Returns (height, width), both multiples of `factor`, with the aspect ratio held as
     closely as that allows and the area inside [min_pixels, max_pixels].
 
-    **Why this is here rather than left to the processor.** The model answers in pixels
-    of the frame it was shown, and the processor -- not the caller -- decides what that
-    frame is. Asking it afterwards would mean reaching into a transformers internal that
-    is free to move. Instead `detect_sync` resizes the image to this function's output
-    *before* handing it over, which makes the processor's own call a no-op: an image
-    already a multiple of `factor` and already inside the budget is its own fixed point.
-    The frame the model sees is then a number this module computed, and dividing by it
-    is arithmetic rather than a guess.
+    **Why this is here rather than left to the processor.** The processor -- not the
+    caller -- decides what frame the vision encoder actually sees, and asking it
+    afterwards would mean reaching into a transformers internal that is free to move.
+    Instead `detect_sync` resizes the image to this function's output *before* handing
+    it over, which makes the processor's own call a no-op: an image already a multiple
+    of `factor` and already inside the budget is its own fixed point. Qwen3-VL's own
+    coordinates are relative to the whole image regardless of that resize (see BOX_KEY),
+    so unlike Qwen2.5-VL's absolute pixels, nothing downstream divides by this frame
+    any more -- what pre-resizing still buys is not sending an oversized image through a
+    resize the processor would otherwise repeat internally.
     """
     h_bar = max(factor, round(height / factor) * factor)
     w_bar = max(factor, round(width / factor) * factor)
@@ -127,16 +139,16 @@ def smart_resize(
 def _budget(processor) -> tuple[int, int, int]:
     """(factor, min_pixels, max_pixels) read off the loaded processor, not assumed.
 
-    This is the one place a wrong number would be *silently* wrong rather than visibly
-    wrong. If the frame this module computes is larger than the processor's own budget,
-    the processor shrinks the image again, the model answers in that smaller frame, and
-    dividing by the larger one yields fractions that are too small -- but still inside
-    [0,1], so vlm_reply's range check passes them through. Every box would come back
-    correctly shaped and systematically too close to the top-left corner.
-
-    Hence reading the model's own configuration rather than hardcoding Qwen's published
-    defaults: a quantized repack that lowered max_pixels to fit a smaller machine is an
-    ordinary thing to publish, and it would produce exactly that failure.
+    Matters less than it used to. Under Qwen2.5-VL's absolute pixels, a wrong budget
+    here meant a *silently* mis-scaled box: to_fractions divided by the frame this
+    function chose, so a budget that undershot the processor's own left every box
+    correctly shaped and systematically too close to the top-left corner. Qwen3-VL's
+    0-1000 coordinates are relative to the whole image regardless of frame (see
+    BOX_KEY), so to_fractions no longer reads this at all -- what is left is resize
+    accuracy. Reading the processor's own configuration rather than hardcoding a
+    published default is what keeps `smart_resize`'s output the fixed point the
+    processor actually expects; a repack shipping a different budget would otherwise get
+    resized twice, once here and again inside the processor, for no benefit.
     """
     image_processor = getattr(processor, "image_processor", processor)
 
@@ -160,16 +172,24 @@ def _budget(processor) -> tuple[int, int, int]:
     return factor, min_pixels, max_pixels
 
 
-def to_fractions(parsed: dict | list, width: int, height: int) -> dict | list:
-    """Qwen's pixel boxes rewritten as the fractions vlm_reply.py accepts.
+FRAME_SPAN = 1000.0  # Qwen3-VL's fixed coordinate scale -- see BOX_KEY's comment.
 
-    A driver, not a dial: `width`/`height` are the frame this module resized the image
-    to and handed the model, not a setting anyone chose. CLAUDE.md's rule forbids a
-    *configurable* conversion -- the kind where an operator picks "0-1000" from a menu
-    and a wrongly-scaled box comes back looking plausible. A backend that knows its own
-    model's convention and divides by a frame it computed itself is the opposite of
-    that, and it is why this lives beside the prompt that asks for those pixels rather
-    than anywhere a second backend could reach it.
+
+def to_fractions(parsed: dict | list) -> dict | list:
+    """Qwen3-VL's 0-1000 boxes rewritten as the fractions vlm_reply.py accepts.
+
+    A driver, not a dial: FRAME_SPAN is a constant this model's training fixed, not a
+    setting anyone chose. CLAUDE.md's rule forbids a *configurable* conversion -- the
+    kind where an operator picks "0-1000" from a menu and a wrongly-scaled box comes
+    back looking plausible. A backend that knows its own model's convention and divides
+    by the number that convention fixed is the opposite of that, and it is why this
+    lives beside the prompt that asks for those coordinates rather than anywhere a
+    second backend could reach it.
+
+    Unlike Qwen2.5-VL's absolute pixels, this needs no frame from the caller: Qwen3-VL's
+    values are already relative to the whole image regardless of how it was resized
+    (see BOX_KEY), so dividing by 1000 is the entire conversion and is exact no matter
+    what size `detect_sync` handed the model.
 
     Entries are rewritten in place of `bbox_2d`, under the `box` key the shared cleaner
     reads. Anything unparseable is left alone rather than repaired, so it fails that
@@ -194,7 +214,7 @@ def to_fractions(parsed: dict | list, width: int, height: int) -> dict | list:
             x0, y0, x1, y1 = (float(v) for v in box)
         except (TypeError, ValueError):
             continue
-        item["box"] = [x0 / width, y0 / height, x1 / width, y1 / height]
+        item["box"] = [x0 / FRAME_SPAN, y0 / FRAME_SPAN, x1 / FRAME_SPAN, y1 / FRAME_SPAN]
     return parsed
 
 
@@ -332,9 +352,10 @@ class LocalDetector:
             log.warning("the local vision model's reply held no JSON object: %r", generated)
             return {"error": "the model's reply held no JSON object."}
         # Convert first, validate second. The range check in clean_payload is what
-        # catches a frame this module got wrong, so it has to run on the fractions
-        # rather than on the pixels -- see _budget for the failure it is guarding.
-        return clean_payload(to_fractions(parsed, width=width, height=height))
+        # catches a reply that was never measured against this image at all -- a box
+        # outside [0,1] after dividing by FRAME_SPAN -- so it has to run on the
+        # fractions rather than on the raw 0-1000 values.
+        return clean_payload(to_fractions(parsed))
 
 
 def detector_from_env() -> LocalDetector | None:

@@ -679,25 +679,37 @@ two lifecycles to keep in step, to save a PNG write against a multi-second infer
 Note also what did *not* change: server.py still contains no detection logic and no new
 `except`. It starts a task and waits on a Job, the same as it waited on a worker.
 
-**Qwen's pixels become fractions in `vlm_local.py`, and that is a driver rather than a
-dial.** The rule below -- no coordinate conversion setting, because a wrongly-scaled box
-comes back looking plausible -- bans a menu an operator picks from, not a backend that
-knows its own model's convention. The mechanism is what makes it safe: `smart_resize` is
-Qwen's own sizing algorithm reimplemented here, the image is resized *to its output*
-before the model sees it, and that makes the processor's own call a no-op, so the frame
-the model answered in is a number this module computed rather than one it hoped for.
-Dividing by it is arithmetic. `_budget` reads `min_pixels`/`max_pixels` off the loaded
-processor instead of hardcoding Qwen's published defaults, and that is the one place a
-wrong number would be *silently* wrong: a repack with a lower budget would have the
-processor shrink the image again, and quotients against the larger frame land inside
-[0,1] -- correctly shaped boxes, all of them too close to the top-left. Every other
-mistake leaves [0,1] and is dropped by `vlm_reply.clean_regions`, which is why the
-conversion itself validates nothing.
+**Qwen's coordinates become fractions in `vlm_local.py`, and that is a driver rather
+than a dial.** The rule below -- no coordinate conversion setting, because a
+wrongly-scaled box comes back looking plausible -- bans a menu an operator picks from,
+not a backend that knows its own model's convention. Qwen3-VL (the default since it
+replaced Qwen2.5-VL as `DEFAULT_MODEL`) emits coordinates as integers on a fixed 0-1000
+scale, relative to the whole image regardless of how it was resized -- confirmed against
+Qwen's own cookbook rather than assumed, quoted in full in `vlm_local.py`'s `BOX_KEY`
+comment: "you don't need to calculate the resized_w." That is a reversion to the scheme
+Qwen2-VL used before Qwen2.5-VL's absolute pixels replaced it for one release, and it is
+why `to_fractions` no longer takes a `width`/`height` at all -- the whole conversion is
+dividing by 1000, and it needs no frame from the caller the way the pixel dialect did.
 
-The aspect ratio drifts 2-3% on an ordinary photograph because Qwen floors each axis onto
-the 28-grid independently. That costs nothing in coordinates -- the resize maps the whole
-width onto the whole width, so fractions are exact regardless -- and is worth not
-re-deriving, because it looks like a bug and is upstream's algorithm.
+`smart_resize` (Qwen's own sizing algorithm, reimplemented here) and `_budget` (which
+reads `min_pixels`/`max_pixels` off the loaded processor instead of hardcoding a
+default) still run before every detection, but what they buy changed with the dialect.
+Under Qwen2.5-VL's absolute pixels, a wrong budget meant a *silently* mis-scaled box --
+the pixel values were divided by the very frame `smart_resize` computed, so a budget
+that undershot the processor's own left every box correctly shaped and systematically
+too close to the top-left corner. Under Qwen3-VL's frame-independent coordinates that
+risk is gone: `to_fractions` never reads the frame, so a wrong budget now only costs
+resizing the image once here and again inside the processor, not a wrong answer.
+Pre-resizing survives purely for that efficiency -- an oversized photo no longer needs
+its frame computed *correctly* to be interpreted correctly, only computed at all, to
+avoid the redundant work.
+
+The aspect ratio still drifts 2-3% on an ordinary photograph, because Qwen floors each
+axis onto its patch grid independently. That costs nothing in coordinates for the same
+reason it always didn't: the resize (ours or the processor's own) stretches width onto
+width and height onto height rather than cropping, so a fraction along either axis
+survives untouched regardless of which frame the model actually saw -- worth not
+re-deriving, because the drift looks like a bug here and is upstream's algorithm.
 
 **`mfluxible/vlm_reply.py` is a module rather than a few functions in `vlm.py`**, because
 `vlm.py` imports `engine.py` for `_oriented` and therefore MLX. The worker is the backend
