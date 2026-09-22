@@ -8,6 +8,7 @@ fractions everything downstream assumes.
 """
 
 import pytest
+from PIL import Image
 
 from mfluxible.vlm_local import (
     DEFAULT_FACTOR,
@@ -246,6 +247,42 @@ def test_both_of_mlx_vlms_return_shapes_are_read():
 
     assert _generated_text("plain") == "plain"
     assert _generated_text(_Result()) == "boxed"
+
+
+# --- a reply that never resolves to JSON --------------------------------------------
+
+
+def test_an_unparseable_reply_is_logged_for_diagnosis(monkeypatch, tmp_path, caplog):
+    """`detect_sync` hands the harness only the curated message -- the raw reply is the
+    one piece of evidence that would tell an operator whether the model refused, added
+    a preamble, or simply ran on past MAX_TOKENS, so it has to reach the server log even
+    though it can never reach a response body. Before this, the failure was a black box:
+    reproducing it required patching `_generated_text` by hand to see what the model
+    actually said.
+    """
+    import mlx_vlm
+    import mlx_vlm.prompt_utils as prompt_utils
+
+    image_path = tmp_path / "in.png"
+    Image.new("RGB", (64, 64)).save(image_path)
+
+    detector = LocalDetector()
+    detector._model = object()
+    detector._processor = object()
+    detector._config = {"model_type": "qwen2_5_vl"}
+
+    monkeypatch.setattr(prompt_utils, "apply_chat_template", lambda *a, **k: "prompt")
+
+    class _Result:
+        text = "I'm not able to help with that request."
+
+    monkeypatch.setattr(mlx_vlm, "generate", lambda *a, **k: _Result())
+
+    with caplog.at_level("WARNING", logger="mfluxible.vlm_local"):
+        result = detector.detect_sync(image_path)
+
+    assert result == {"error": "the model's reply held no JSON object."}
+    assert _Result.text in caplog.text
 
 
 # --- failing without mlx-vlm installed ---------------------------------------------

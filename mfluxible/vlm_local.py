@@ -322,8 +322,14 @@ class LocalDetector:
             except OSError:  # pragma: no cover -- best effort, as in engine.py
                 pass
 
-        parsed = extract_json(_generated_text(output))
+        generated = _generated_text(output)
+        parsed = extract_json(generated)
         if parsed is None:
+            # The curated message is all the harness gets -- the reply itself may quote
+            # the prompt back or run on past MAX_TOKENS, and either way it's the one
+            # piece of evidence that explains *this* failure rather than the class of
+            # it, so it goes to stderr rather than nowhere.
+            log.warning("the local vision model's reply held no JSON object: %r", generated)
             return {"error": "the model's reply held no JSON object."}
         # Convert first, validate second. The range check in clean_payload is what
         # catches a frame this module got wrong, so it has to run on the fractions
