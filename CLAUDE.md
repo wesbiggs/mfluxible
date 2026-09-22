@@ -3,7 +3,7 @@
 ## Layout
 
 `mfluxible/` (server.py, engine.py, models.py, schemas.py, chat_stub.py, schedulers.py,
-auth.py, vlm.py, vlm_worker.py, config.py, cli.py) is the model + HTTP API, and is the
+auth.py, vlm.py, vlm_local.py, vlm_reply.py, vlm_worker.py, config.py, cli.py) is the model + HTTP API, and is the
 package published as **`mfluxible`**. `clients/` (stream_client.py, stream_client.js,
 harness.html, mfluxible_mcp/, requirements.txt) is everything that *consumes* it over
 HTTP -- note that word, because `vlm_worker.py` also talks to the API over HTTP and is
@@ -623,7 +623,100 @@ All of the above is one version's behavior and will move; the endpoint is writte
 against what 1.18.0 actually sends, and re-reading those two files is the way to check
 it rather than inferring from a failing generation.
 
-## The VLM mailbox, and why the thing that spends money is a sidecar
+## Two detection backends, and the sidecar argument only reaches one of them
+
+`mfluxible/vlm.py` holds one pending job; something fills it. Which something is
+`MFLUXIBLE_VLM_BACKEND`, and the two options are not competing implementations of one
+idea -- they answer different needs, and conflating them is how the default ended up
+wrong for two releases.
+
+- **`local`** (the default): `mfluxible/vlm_local.py`, an MLX vision model loaded into
+  the server process on the first detection that asks for one.
+- **`worker`**: `mfluxible/vlm_worker.py`, the sidecar, which runs an arbitrary command
+  line -- `claude -p` by default.
+
+**The sidecar's justification is two arguments that coincide for `claude -p` and come
+apart everywhere else.** They read as one, which is why the sidecar looked mandatory:
+
+- **Consent and blast radius.** An arbitrary command with filesystem access that makes
+  outbound calls and spends an account must not sit behind an HTTP endpoint. Behind one,
+  `POST /.../detect` would be comfortably the most dangerous route in this repo and one
+  path away from `tests/test_proxy_config.py`'s worst case -- a path drifting into
+  `@public` would stop being an ungated GPU and start being remote command execution.
+- **Residency.** A loaded model holds unified memory and an MLX buffer cache for the
+  life of the process.
+
+`claude -p` triggers the first and not the second: it loads nothing and exits. A local
+MLX model triggers the second and not the first: it runs no command, holds no key and
+spends nothing. They are almost perfectly complementary, so "separate process" survives
+as the answer for the CLI and stops being one for a model -- where it was buying nothing
+but a second thing to start and a feature that silently does nothing when you forget.
+
+**So the local backend is allowed inside the server, and the cost it pays instead is
+memory.** That is not a generic worry here, it is the documented one: see the MLX buffer
+cache section below, where identical work went from 7s to 105s because the footprint
+passed the machine's headroom. Hence three properties, each load-bearing:
+
+- **Lazy.** Nothing is downloaded or loaded until the first detection. A server whose
+  users never press the button is byte-for-byte the server it was before, which is what
+  makes shipping this on by default defensible at all.
+- **`MfluxEngine.run_exclusive`, not a second thread.** Detection runs on the same MLX
+  worker thread under the same lock as generation. A detection therefore waits behind a
+  running generation and vice versa. That is the trade, not a limitation to route around:
+  two MLX consumers interleaving on one device is exactly the unsynchronized overlap the
+  single-lock invariant below exists to forbid.
+- **Two timeouts.** `MFLUXIBLE_VLM_LOAD_TIMEOUT` (900s) for a cold first detection that
+  is downloading gigabytes, `MFLUXIBLE_VLM_TIMEOUT` (180s) once warm. One generous
+  number would make a wedged detection take fifteen minutes to fail; one tight number
+  makes a slow connection look like a broken server.
+
+**The mailbox is the meeting point, and keeping it for both is what makes `local` a
+backend rather than a parallel universe.** The local path has the bytes in memory and
+could skip the stash entirely -- it doesn't, because the Job carries a path, superseding
+closes the previous stream, the dimension guards compare the same numbers, and
+`_vlm_sse` cannot tell which side answered. One of those paths having no file would mean
+two lifecycles to keep in step, to save a PNG write against a multi-second inference.
+Note also what did *not* change: server.py still contains no detection logic and no new
+`except`. It starts a task and waits on a Job, the same as it waited on a worker.
+
+**Qwen's coordinates become fractions in `vlm_local.py`, and that is a driver rather
+than a dial.** The rule below -- no coordinate conversion setting, because a
+wrongly-scaled box comes back looking plausible -- bans a menu an operator picks from,
+not a backend that knows its own model's convention. Qwen3-VL (the default since it
+replaced Qwen2.5-VL as `DEFAULT_MODEL`) emits coordinates as integers on a fixed 0-1000
+scale, relative to the whole image regardless of how it was resized -- confirmed against
+Qwen's own cookbook rather than assumed, quoted in full in `vlm_local.py`'s `BOX_KEY`
+comment: "you don't need to calculate the resized_w." That is a reversion to the scheme
+Qwen2-VL used before Qwen2.5-VL's absolute pixels replaced it for one release, and it is
+why `to_fractions` no longer takes a `width`/`height` at all -- the whole conversion is
+dividing by 1000, and it needs no frame from the caller the way the pixel dialect did.
+
+`smart_resize` (Qwen's own sizing algorithm, reimplemented here) and `_budget` (which
+reads `min_pixels`/`max_pixels` off the loaded processor instead of hardcoding a
+default) still run before every detection, but what they buy changed with the dialect.
+Under Qwen2.5-VL's absolute pixels, a wrong budget meant a *silently* mis-scaled box --
+the pixel values were divided by the very frame `smart_resize` computed, so a budget
+that undershot the processor's own left every box correctly shaped and systematically
+too close to the top-left corner. Under Qwen3-VL's frame-independent coordinates that
+risk is gone: `to_fractions` never reads the frame, so a wrong budget now only costs
+resizing the image once here and again inside the processor, not a wrong answer.
+Pre-resizing survives purely for that efficiency -- an oversized photo no longer needs
+its frame computed *correctly* to be interpreted correctly, only computed at all, to
+avoid the redundant work.
+
+The aspect ratio still drifts 2-3% on an ordinary photograph, because Qwen floors each
+axis onto its patch grid independently. That costs nothing in coordinates for the same
+reason it always didn't: the resize (ours or the processor's own) stretches width onto
+width and height onto height rather than cropping, so a fraction along either axis
+survives untouched regardless of which frame the model actually saw -- worth not
+re-deriving, because the drift looks like a bug here and is upstream's algorithm.
+
+**`mfluxible/vlm_reply.py` is a module rather than a few functions in `vlm.py`**, because
+`vlm.py` imports `engine.py` for `_oriented` and therefore MLX. The worker is the backend
+whose whole point is needing none of that, and making it import a GPU framework to parse
+a JSON array would be a cost paid by the cheap one.
+
+The rest of this section is about the `worker` backend, and is unchanged.
 
 `mfluxible/vlm.py` holds one pending job and copies a JSON array between two HTTP
 requests. It loads no model, holds no key and makes no outbound call -- the harness

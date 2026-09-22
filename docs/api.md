@@ -32,7 +32,7 @@ Returns:
     "supports_fractional_start": true,
     "supports_mask": true
   },
-  "vlm": {"enabled": false, "worker_attached": false},
+  "vlm": {"enabled": false, "worker_attached": false, "model_loaded": false},
   "memory": {"active_bytes": 10307921920, "cache_bytes": 1073741824, "peak_bytes": 12884901888}
 }
 ```
@@ -43,7 +43,11 @@ Returns:
 
 Treat any of those `supports_*` keys being **absent** as "unknown, let the server decide" rather than as `false` — that is what a server predating the key means, and it is how the bundled harness and MCP tool read them. Note also that `supports_negative_prompt` is necessary but not sufficient: a negative prompt also needs classifier-free guidance switched on, so on a model whose `default_guidance` is `1.0` (Krea-2) sending one without raising `guidance` is still a 400. See [Models](server.md#models).
 
-`vlm` describes the VLM mailbox (see [`POST /mfluxible/v1/vlm/describe`](#post-mfluxiblev1vlmdescribe)). `enabled` is whether `MFLUXIBLE_VLM_DIR` was set; `worker_attached` is whether a detection worker has long-polled recently. The harness draws its **Find objects** button off `enabled` and warns off `worker_attached`, so a server without the feature shows no control that could only fail. Absent means the same as `enabled: false` here — unlike the `supports_*` keys above, the safe reading for a missing block is off, since offering the button to a server that would 404 is worse than not offering it.
+`vlm` describes object detection (see [`POST /mfluxible/v1/vlm/describe`](#post-mfluxiblev1vlmdescribe)). `enabled` is whether `MFLUXIBLE_VLM_DIR` was set. `worker_attached` is whether a detection worker has long-polled recently. `model_loaded` is whether the local model has been loaded yet, so a client can warn that the next detection includes a multi-gigabyte download. The harness draws its **Find objects** button off `enabled` and picks its waiting message off the rest.
+
+`backend` is `"local"` (a vision model inside the server process) or `"worker"` (a sidecar claiming jobs) — see [Object detection](server.md#object-detection). **It is only present when `enabled` is `true`**: with the feature off nothing answers a detection, so naming the backend that would have is a fact about a code path the server will never take. Read `enabled` first and the absence is unambiguous. When it is `"local"`, `worker_attached` is always `false` — the field means what it says and there is no worker — so a client that wants to say "nothing is listening" should check `backend` before it believes that.
+
+The whole block being absent means the same as `enabled: false` — unlike the `supports_*` keys above, the safe reading for a missing block is off, since offering the button to a server that would 404 is worse than not offering it.
 
 `memory` reports MLX's own byte counters for the server process. `active_bytes` is memory backing live arrays — near zero until the first generation, since weights are quantized lazily and only materialize when something first forces evaluation. `cache_bytes` is buffers MLX has freed but retains for reuse: reclaimable, but it counts toward the process's memory footprint just the same, so on a memory-tight machine it is worth watching between generations. `peak_bytes` is the high-water mark of active memory. All three are plain counters, so polling `/health` mid-generation is cheap and does not disturb the run.
 
@@ -194,23 +198,29 @@ A bad body is a 400 before the stream starts, the same as a generation. The resp
 `text/event-stream` framed identically — one JSON object per `data:` line:
 
 ```
-data: {"type": "pending", "job_id": "75d3…", "width": 768, "height": 768, "worker_attached": true}
+data: {"type": "pending", "job_id": "75d3…", "width": 768, "height": 768, "backend": "local", "worker_attached": false, "model_loaded": true}
 
 data: {"type": "result", "prompt": "a single red apple on oak, soft window light", "regions": [{"label": "red apple", "box": [0.305, 0.344, 0.712, 0.736]}], "width": 768, "height": 768}
 ```
 
 `pending` arrives immediately, so a client can render a waiting state with the real
-dimensions and say up front whether anything is listening. Then exactly one of:
+dimensions and say up front whether anything is listening. `backend`, `worker_attached`
+and `model_loaded` carry the same meanings they do on [`/health`](#get-health), and are
+repeated here so a client that never polled `/health` can still tell "no worker is
+running" apart from "the model is downloading" — two waits that look identical and want
+very different messages. Then exactly one of:
 
 | Event | Meaning |
 | --- | --- |
 | `result` | The tool answered. `prompt` is a text-to-image prompt for the whole frame, `regions` is what could be masked; **either may be absent or empty**, so check both. |
-| `error` | `message` says why — no worker claimed the job, the worker failed, or a newer detection superseded this one. |
+| `error` | `message` says why — nothing claimed the job, the detection failed, or a newer detection superseded this one. |
 
 `box` is `[x0, y0, x1, y1]` as **fractions of the frame**, `0,0` at the top-left — the
 same order and units as `mask_boxes` in the MCP tool, so a region can be used as a mask
 rectangle with no conversion. Fractions rather than pixels because nothing guarantees
-the worker read the same-sized copy the caller is looking at.
+the detector read the same-sized copy the caller is looking at — which is literal under
+the local backend, where the image is resized onto the model's own patch grid before it
+is shown, and the boxes it answers with are divided back out by that frame.
 
 `width`/`height` are the frame the image was measured in, **with EXIF orientation
 applied** — the frame mflux rotates an input image into before encoding, and therefore

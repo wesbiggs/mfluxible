@@ -4,6 +4,7 @@ One process runs one model, chosen at startup with MFLUXIBLE_MODEL (see models.p
 for the table). Weights are only fetched for the model actually selected.
 """
 
+import asyncio
 import base64
 import json
 import logging
@@ -29,7 +30,8 @@ from mfluxible.schemas import (
     VlmRequest,
     VlmResult,
 )
-from mfluxible.vlm import mailbox_from_env
+from mfluxible.vlm import BACKEND_WORKER, backend_from_env, mailbox_from_env
+from mfluxible.vlm_local import detector_from_env
 
 # Nothing configures logging here, so this lands on stderr via logging.lastResort --
 # the terminal running uvicorn -- the same way engine.py's does.
@@ -63,10 +65,27 @@ BASIC_AUTH = credentials_from_env()
 # Claude account of whoever runs the worker.
 MAILBOX = mailbox_from_env()
 
-# How long the harness's stream waits for a worker's answer. Generous: a cold
-# `claude -p` start plus the model's own thinking measured ~11s against a 768x768
-# image, but the worker is a subprocess on a machine that may also be mid-generation.
+# Which side runs a detection -- see vlm.py. Raises here, at import, on a value that is
+# neither backend, rather than quietly defaulting: the whole point of naming one is that
+# the operator knows which model answers.
+VLM_BACKEND = backend_from_env()
+
+# The in-process model when that is the backend, else None. Constructing it loads
+# nothing; the weights arrive on the first detection that needs them.
+DETECTOR = detector_from_env()
+
+# How long the harness's stream waits for an answer. Generous: a cold `claude -p` start
+# plus the model's own thinking measured ~11s against a 768x768 image, and the local
+# backend has to wait out any generation holding the engine lock before it even begins.
 VLM_TIMEOUT_S = float(os.environ.get("MFLUXIBLE_VLM_TIMEOUT", "180"))
+
+# What the first local detection waits instead, because it includes downloading a few
+# gigabytes of weights. Splitting the two rather than raising VLM_TIMEOUT for everyone
+# is the point: a warm detection that has stopped responding should still fail in three
+# minutes, and a cold one that is merely on a slow connection should not fail at all.
+# The harness is told which of the two it is waiting on (see the `pending` event), so a
+# long first run reads as a download rather than as a hang.
+VLM_LOAD_TIMEOUT_S = float(os.environ.get("MFLUXIBLE_VLM_LOAD_TIMEOUT", "900"))
 
 # How long a worker's long-poll hangs before returning empty. Short enough that
 # stopping the worker doesn't leave a request pinned for minutes, long enough that
@@ -168,6 +187,38 @@ async def harness():
     return FileResponse(HARNESS_PATH, media_type="text/html")
 
 
+def _vlm_health() -> dict:
+    """The `vlm` block on /health.
+
+    **`backend` is absent when the feature is off**, rather than reporting whichever
+    value the setting happens to hold. With no directory named, nothing answers a
+    detection and the routes 404, so naming the backend that *would* have answered is a
+    fact about a code path this server will never take -- and `enabled: false` beside a
+    backend name reads like a half-configured feature, which is the one thing it is not.
+    Its absence means "no backend is in play" rather than "an older server", because the
+    key it sits beside already answers that: a client reads `enabled` first.
+
+    `worker_attached` and `model_loaded` stay in both cases, because `false` is what
+    they actually are -- nothing has polled, nothing is loaded -- rather than an answer
+    about a road not taken.
+    """
+    return {
+        "enabled": MAILBOX is not None,
+        # Which backend answers, so a client knows whether `worker_attached` is a fact
+        # about this server or a fact about a process that isn't involved.
+        **({"backend": VLM_BACKEND} if MAILBOX is not None else {}),
+        # Left literal under the local backend, where it is simply False: reporting True
+        # because "something is attached" would make the one field whose name says
+        # "worker" stop meaning it. A client that predates `backend` shows a spurious
+        # "start the worker" note and detects successfully anyway, which is the harmless
+        # direction for this to be wrong in.
+        "worker_attached": MAILBOX is not None and MAILBOX.worker_attached(),
+        # Whether the first detection will include a download. Only meaningful for the
+        # local backend; False and static for the worker.
+        "model_loaded": DETECTOR is not None and DETECTOR.loaded,
+    }
+
+
 @app.get("/health")
 async def health():
     # MLX's own accounting, in bytes. `active` is memory currently backing live
@@ -214,10 +265,7 @@ async def health():
         # could only fail -- the same "ask before you offer it" rule the model block
         # above exists for. No path here: the directory is the server's business, and
         # /health is the one endpoint the bundled Caddyfile leaves open.
-        "vlm": {
-            "enabled": MAILBOX is not None,
-            "worker_attached": MAILBOX is not None and MAILBOX.worker_attached(),
-        },
+        "vlm": _vlm_health(),
         "memory": {
             "active_bytes": mx.get_active_memory(),
             "cache_bytes": mx.get_cache_memory(),
@@ -273,17 +321,58 @@ async def generate(req: GenerateRequest):
 # Object detection mailbox
 # ---------------------------------------------------------------------------
 #
-# Three endpoints, two clients: the harness submits an image and holds a stream,
-# mfluxible/vlm_worker.py claims the job and posts regions back. The server does no
-# detection -- see vlm.py's docstring for why that stays out of here.
+# The harness submits an image and holds a stream; something answers. Which something
+# is MFLUXIBLE_VLM_BACKEND (see vlm.py), and the mailbox is deliberately the meeting
+# point for both: under `worker` a sidecar claims the job through the two endpoints
+# below, and under `local` a task started here fills the same slot from
+# mfluxible/vlm_local.py. `_vlm_sse` cannot tell the difference and does not need to.
+#
+# Note what did *not* change when the local backend arrived: the server still contains
+# no detection logic and no `except` clause. It starts a task and waits on a Job, the
+# same as it waited on a worker.
 
 _VLM_OFF = {"type": "error", "message": "object detection is not enabled on this server."}
 
+# A different 404, for a worker polling a server that is answering its own detections.
+# Worth distinguishing: "switched off" tells its operator to set MFLUXIBLE_VLM_DIR,
+# which here is already set and would not help. A sidecar quietly long-polling a server
+# that will never hand it a job is the failure this sentence exists to name.
+_VLM_NOT_WORKER = {
+    "type": "error",
+    "message": (
+        "this server runs detections in-process (MFLUXIBLE_VLM_BACKEND=local); "
+        "it hands out no jobs. Set MFLUXIBLE_VLM_BACKEND=worker to use this sidecar."
+    ),
+}
 
-def _vlm_disabled() -> JSONResponse:
+
+def _vlm_disabled(content: dict = _VLM_OFF) -> JSONResponse:
     # 404 rather than 501: with MFLUXIBLE_VLM_DIR unset these routes are not a
     # feature this server has, and /health already says so before anything calls them.
-    return JSONResponse(status_code=404, content=_VLM_OFF)
+    return JSONResponse(status_code=404, content=content)
+
+
+_LOCAL_DETECTIONS: set[asyncio.Task] = set()
+
+
+def _start_local_detection(job) -> None:
+    """Answer `job` from the in-process model, off the request's own coroutine.
+
+    `run_exclusive` puts the work on the engine's MLX thread under its lock, so this
+    queues behind any running generation -- which is why it cannot be awaited inline:
+    the harness's stream has a `pending` event to send first, and it is the thing that
+    tells the user a download may be about to happen.
+    """
+
+    async def run() -> None:
+        MAILBOX.complete(job.id, await engine.run_exclusive(DETECTOR.detect_sync, job.path))
+
+    task = asyncio.create_task(run())
+    # The event loop holds only a weak reference to a running task, so without a strong
+    # one here a detection can be collected mid-flight and the stream waits out its
+    # whole timeout for an answer nothing is still computing.
+    _LOCAL_DETECTIONS.add(task)
+    task.add_done_callback(_LOCAL_DETECTIONS.discard)
 
 
 def _decoded_image(b64_data: str) -> bytes | None:
@@ -299,15 +388,23 @@ def _decoded_image(b64_data: str) -> bytes | None:
 async def _vlm_sse(job):
     # Sent before anything blocks, so the harness can render "waiting" with the real
     # dimensions and say up front whether a worker is even listening.
+    # True when nothing further has to be fetched before work can start: the worker
+    # backend is never waiting on weights, and the local one stops being so once its
+    # first detection has loaded them.
+    warm = DETECTOR is None or DETECTOR.loaded
     yield "data: " + json.dumps({
         "type": "pending",
         "job_id": job.id,
         "width": job.width,
         "height": job.height,
+        "backend": VLM_BACKEND,
         "worker_attached": MAILBOX.worker_attached(),
+        "model_loaded": warm,
     }) + "\n\n"
 
-    result = await MAILBOX.wait(job, VLM_TIMEOUT_S)
+    # A cold local backend is about to download a few gigabytes, which is not a thing
+    # to fail after three minutes of. See VLM_LOAD_TIMEOUT_S.
+    result = await MAILBOX.wait(job, VLM_TIMEOUT_S if warm else VLM_LOAD_TIMEOUT_S)
     if result.get("error"):
         yield "data: " + json.dumps({"type": "error", "message": result["error"]}) + "\n\n"
         return
@@ -342,6 +439,12 @@ async def vlm_describe(req: VlmRequest):
     # Same shape as a generation: validate fully, *then* start the stream, so a bad
     # request is a 400 rather than a 200 with an error torn into the body.
     job = MAILBOX.submit(raw)
+    if DETECTOR is not None:
+        # Claimed by this process. Marking it means a timeout reports "took too long"
+        # rather than "nothing claimed the job", which under this backend would be
+        # actively misleading -- the thing that claims jobs here is this line.
+        job.claimed = True
+        _start_local_detection(job)
     return StreamingResponse(_vlm_sse(job), media_type="text/event-stream")
 
 
@@ -360,6 +463,8 @@ async def vlm_next():
     """
     if MAILBOX is None:
         return _vlm_disabled()
+    if VLM_BACKEND != BACKEND_WORKER:
+        return _vlm_disabled(_VLM_NOT_WORKER)
 
     job = await MAILBOX.claim(VLM_POLL_S)
     if job is None:
@@ -376,6 +481,8 @@ async def vlm_next():
 async def vlm_complete(job_id: str, result: VlmResult):
     if MAILBOX is None:
         return _vlm_disabled()
+    if VLM_BACKEND != BACKEND_WORKER:
+        return _vlm_disabled(_VLM_NOT_WORKER)
 
     delivered = MAILBOX.complete(job_id, result.model_dump())
     if not delivered:

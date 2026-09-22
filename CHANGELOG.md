@@ -7,6 +7,51 @@ still change in a minor release, and any such change is listed here.
 The server (`mfluxible`) and the MCP client (`mfluxible-mcp`) are released together from
 this repository and always share a version number.
 
+## Unreleased
+
+Object detection no longer needs a sidecar. A vision model can now run inside the server
+process, and that is the new default.
+
+- **`MFLUXIBLE_VLM_BACKEND` picks which side detects**, defaulting to `local`: an MLX
+  vision model (Qwen3-VL 4B 4-bit) loaded into the server process on the first
+  detection that asks for one. `MFLUXIBLE_VLM_BACKEND=worker` keeps the existing
+  sidecar, which is still how you reach `claude -p` or any other command line. Install
+  the local backend with `uv pip install 'mfluxible[vlm]'`.
+
+  **This changes the default behaviour of an existing deployment.** A server started
+  with `MFLUXIBLE_VLM_DIR` set and a worker running will now answer its own detections
+  and hand that worker nothing — it tells the worker so, rather than leaving it polling.
+  Set `MFLUXIBLE_VLM_BACKEND=worker` to keep what you had.
+
+  The two are not competing implementations. The sidecar exists because it runs an
+  arbitrary configured command with filesystem access, which must not sit behind an HTTP
+  endpoint; a local MLX model runs no command and spends nothing, so that argument never
+  applied to it and the extra process bought nothing. What a local model costs instead is
+  memory, which is why it is lazy: nothing is downloaded or loaded until the first
+  detection, and a server whose users never press the button is unchanged.
+
+- **Detections share the generation lock and the MLX worker thread.** A detection waits
+  behind a running generation and vice versa. Deliberate: two MLX consumers interleaving
+  on one device is not something this server has been safe under.
+
+- **`MFLUXIBLE_VLM_LOCAL_MODEL`** sets which model the local backend loads. The default
+  is Qwen3-VL, whose release notes describe improved multi-target grounding over
+  Qwen2.5-VL — the property a feature whose output is a mask rectangle needs most.
+
+- **`MFLUXIBLE_VLM_LOAD_TIMEOUT`** (default 900s) is what the *first* local detection
+  waits, since it downloads a few gigabytes. `MFLUXIBLE_VLM_TIMEOUT` (180s) still applies
+  once the model is warm. Splitting them keeps a slow connection from looking like a
+  broken server without making a wedged detection take fifteen minutes to fail.
+
+- **`/health`'s `vlm` block gained `backend` and `model_loaded`**, and the `pending` SSE
+  event carries both too. `worker_attached` keeps meaning exactly what it says, so it is
+  `false` under the local backend; a client that predates `backend` shows a spurious
+  "start the worker" note and detects successfully anyway. See
+  [docs/api.md](docs/api.md#get-health).
+
+- **The reply contract moved to `mfluxible/vlm_reply.py`**, shared by both backends so
+  they cannot drift on what a region looks like. No change to the shape itself.
+
 ## 0.9.1 — 2026-09-17
 
 Both directories mfluxible keeps files in now follow the XDG Base Directory spec's

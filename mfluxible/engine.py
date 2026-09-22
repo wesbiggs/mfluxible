@@ -487,6 +487,28 @@ class MfluxEngine:
         """
         await asyncio.get_running_loop().run_in_executor(self._executor, self._load_sync)
 
+    async def run_exclusive(self, fn, *args):
+        """Run `fn(*args)` on the MLX worker thread with the generation lock held.
+
+        The door the in-process detection backend comes in through (see
+        mfluxible/vlm_local.py). Both halves matter and for different reasons: the
+        *thread* because every MLX call in this process has to share one -- the module
+        docstring says why -- and the *lock* because a second framework allocating
+        Metal buffers while `generate_image()` is mid-loop is precisely the
+        unsynchronized overlap this engine has never been safe under.
+
+        So a detection waits behind a running generation, and a generation waits behind
+        a running detection. That is the intended cost rather than a limitation to route
+        around: the alternative is two MLX consumers interleaving on one device, which
+        nothing here has verified and the callback lists alone would not survive.
+
+        Not for generations. `generate_stream` takes the same lock itself, around a
+        submission it has to interleave with an event queue, and calling this from
+        inside it would deadlock on the second acquire.
+        """
+        async with self._lock:
+            return await asyncio.get_running_loop().run_in_executor(self._executor, fn, *args)
+
     def shutdown(self) -> None:
         self._executor.shutdown(wait=False)
 

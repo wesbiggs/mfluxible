@@ -9,6 +9,7 @@ import base64
 import io
 import json
 import pathlib
+import sys
 
 import pytest
 from fastapi.testclient import TestClient
@@ -37,10 +38,18 @@ def mailbox(tmp_path):
 
 @pytest.fixture
 def vlm_client(monkeypatch, mailbox):
-    """The real app with the mailbox switched on, and both waits shortened so a test
-    that exercises a timeout finishes in milliseconds rather than three minutes."""
+    """The real app on the *worker* backend, with the mailbox switched on and both waits
+    shortened so a test that exercises a timeout finishes in milliseconds rather than
+    three minutes.
+
+    The backend is pinned rather than inherited: it defaults to `local` now, and leaving
+    it there would have every test in this file quietly asking an absent vision model to
+    answer jobs that were written for a sidecar. `local_client` further down is the
+    fixture for the other one.
+    """
     import mfluxible.server as server_module
     from mfluxible.engine import MfluxEngine
+    from mfluxible.vlm import BACKEND_WORKER
 
     monkeypatch.setattr(
         server_module,
@@ -48,6 +57,8 @@ def vlm_client(monkeypatch, mailbox):
         MfluxEngine(model=TOY_MODEL_SPEC, quantize=None, model_cache_dir=None),
     )
     monkeypatch.setattr(server_module, "MAILBOX", mailbox)
+    monkeypatch.setattr(server_module, "VLM_BACKEND", BACKEND_WORKER)
+    monkeypatch.setattr(server_module, "DETECTOR", None)
     monkeypatch.setattr(server_module, "VLM_TIMEOUT_S", 0.25)
     monkeypatch.setattr(server_module, "VLM_POLL_S", 0.25)
     with TestClient(server_module.app) as test_client:
@@ -161,7 +172,56 @@ def test_health_reports_the_feature_off_by_default(client):
     """The plain `client` fixture has no mailbox, which is how a server runs unless
     MFLUXIBLE_VLM_DIR names a directory. harness.html draws its button off this."""
     body = client.get("/health").json()
-    assert body["vlm"] == {"enabled": False, "worker_attached": False}
+    assert body["vlm"]["enabled"] is False
+    assert body["vlm"]["worker_attached"] is False
+    # Nothing is loaded until a detection asks for it, and with the feature off nothing
+    # ever will.
+    assert body["vlm"]["model_loaded"] is False
+    # And `backend` is absent rather than reporting the value the setting happens to
+    # hold: nothing answers a detection here, so naming the backend that would have is
+    # a claim about a code path this server never takes.
+    assert "backend" not in body["vlm"]
+
+
+def test_nothing_is_loaded_when_the_feature_is_off(monkeypatch, client):
+    """The guarantee the local backend's default rests on.
+
+    It is on unless `MFLUXIBLE_VLM_DIR` names a directory, so "off means nothing is
+    downloaded, imported or held" has to be true structurally rather than by inspection.
+    `DETECTOR` is still constructed with the feature off -- it is a name and three Nones,
+    and the backend is a property of the configuration rather than of the mailbox -- so
+    the thing worth pinning is that no request can reach the weights through it.
+
+    What would break this is a reordering in `vlm_describe`: the `MAILBOX is None` guard
+    is the first statement in it, and moving the detection kick-off above that guard
+    would start downloading three gigabytes on a server whose operator never switched
+    the feature on. Wiring both entry points is what makes that a failure here rather
+    than a surprise in someone's cache directory.
+    """
+    import mfluxible.server as server_module
+    from mfluxible.vlm_local import LocalDetector
+
+    tripped = []
+    for name in ("load_sync", "detect_sync"):
+        original = getattr(LocalDetector, name)
+
+        def wired(self, *args, _name=name, _original=original, **kwargs):
+            tripped.append(_name)
+            return _original(self, *args, **kwargs)
+
+        monkeypatch.setattr(LocalDetector, name, wired)
+    monkeypatch.setattr(server_module, "DETECTOR", LocalDetector())
+
+    assert server_module.MAILBOX is None
+    client.post("/mfluxible/v1/vlm/describe", json={"image": _b64(_png())})
+    client.get("/mfluxible/v1/vlm/next")
+    client.post("/mfluxible/v1/vlm/abc", json={"regions": []})
+    client.get("/health")
+
+    assert tripped == []
+    # And the import that pulls transformers and opencv behind it never happened either,
+    # which is what lets `mlx-vlm` be an extra rather than a dependency.
+    assert "mlx_vlm" not in sys.modules
 
 
 def test_the_endpoints_are_absent_when_the_feature_is_off(client):
@@ -174,6 +234,10 @@ def test_health_reports_the_feature_on_when_configured(vlm_client):
     body = vlm_client.get("/health").json()
     assert body["vlm"]["enabled"] is True
     assert body["vlm"]["worker_attached"] is False
+    # The other side of the rule above: switched on, something really does answer a
+    # detection, so the block names which. Both directions are pinned because the
+    # conditional key is the sort of thing a later tidy-up makes unconditional again.
+    assert body["vlm"]["backend"] == "worker"
 
 
 def test_a_worker_polling_shows_up_as_attached(vlm_client):
@@ -243,28 +307,30 @@ def test_regions_round_trip_through_the_schema(vlm_client, mailbox):
     assert (job.result["width"], job.result["height"]) == (64, 48)
 
 
-# --- the worker's own parsing ----------------------------------------------------
+# --- the shared reply contract ----------------------------------------------------
 #
-# The subprocess can't run in CI, but everything either side of it can: what a reply
-# has to look like to become a chip, and what gets dropped rather than repaired.
+# Neither backend can run in CI -- one is a subprocess, the other wants a few gigabytes
+# of weights -- but everything either side of them can: what a reply has to look like to
+# become a chip, and what gets dropped rather than repaired. This lives in
+# mfluxible/vlm_reply.py precisely so both backends are held to it by these same tests.
 
 
-def test_the_worker_reads_an_array_out_of_a_fenced_reply():
-    from mfluxible.vlm_worker import _extract_json
+def test_a_reply_is_read_out_of_a_fenced_block():
+    from mfluxible.vlm_reply import extract_json
 
     fenced = 'Here you go:\n```json\n[{"label": "apple", "box": [0.1, 0.2, 0.3, 0.4]}]\n```\nHope that helps.'
-    assert _extract_json(fenced) == [{"label": "apple", "box": [0.1, 0.2, 0.3, 0.4]}]
-    assert _extract_json('[{"label": "bare", "box": [0, 0, 1, 1]}]') is not None
-    assert _extract_json("I could not find any objects.") is None
+    assert extract_json(fenced) == [{"label": "apple", "box": [0.1, 0.2, 0.3, 0.4]}]
+    assert extract_json('[{"label": "bare", "box": [0, 0, 1, 1]}]') is not None
+    assert extract_json("I could not find any objects.") is None
 
 
-def test_the_worker_drops_unusable_boxes_rather_than_coercing_them():
+def test_unusable_boxes_are_dropped_rather_than_coerced():
     """A box outside the frame, or inverted, means the reply wasn't measured against
     the image it was asked about. Clamping it would put a rectangle nobody chose into
     a list the user is about to click."""
-    from mfluxible.vlm_worker import _clean
+    from mfluxible.vlm_reply import clean_regions
 
-    cleaned = _clean([
+    cleaned = clean_regions([
         {"label": "good", "box": [0.1, 0.1, 0.9, 0.9]},
         {"label": "out of frame", "box": [0.1, 0.1, 1.4, 0.9]},
         {"label": "inverted", "box": [0.9, 0.1, 0.2, 0.9]},
@@ -285,11 +351,11 @@ def test_the_worker_names_a_missing_cli_rather_than_raising():
     assert "no longer on disk" in result["error"]
 
 
-def test_the_worker_caps_the_number_of_regions():
-    from mfluxible.vlm_worker import _clean
+def test_the_number_of_regions_is_capped():
+    from mfluxible.vlm_reply import clean_regions
 
     many = [{"label": f"o{i}", "box": [0.0, 0.0, 0.5, 0.5]} for i in range(20)]
-    assert len(_clean(many)) == 8
+    assert len(clean_regions(many)) == 8
 
 
 # --- the detection command is a template, not a hardcoded CLI ----------------------
@@ -385,9 +451,9 @@ def test_any_command_printing_the_agreed_json_is_enough(tmp_path, monkeypatch):
 
 
 def test_an_object_reply_carries_both_a_prompt_and_regions():
-    from mfluxible.vlm_worker import _clean_payload
+    from mfluxible.vlm_reply import clean_payload
 
-    payload = _clean_payload({
+    payload = clean_payload({
         "prompt": "  a single red apple on oak, soft window light  ",
         "regions": [{"label": "apple", "box": [0.1, 0.2, 0.6, 0.7]}],
     })
@@ -398,19 +464,19 @@ def test_an_object_reply_carries_both_a_prompt_and_regions():
 def test_a_missing_or_blank_prompt_stays_none_rather_than_empty():
     """The harness tells "no prompt offered" apart from "an empty one": the first hides
     the affordance, the second would put a blank string into the prompt box."""
-    from mfluxible.vlm_worker import _clean_payload
+    from mfluxible.vlm_reply import clean_payload
 
-    assert _clean_payload({"regions": []})["prompt"] is None
-    assert _clean_payload({"prompt": "   ", "regions": []})["prompt"] is None
-    assert _clean_payload({"prompt": 42, "regions": []})["prompt"] is None
+    assert clean_payload({"regions": []})["prompt"] is None
+    assert clean_payload({"prompt": "   ", "regions": []})["prompt"] is None
+    assert clean_payload({"prompt": 42, "regions": []})["prompt"] is None
 
 
 def test_a_prompt_only_reply_is_valid():
     """A tool that captions but doesn't localize is still useful -- the prompt fills the
     box even though there is nothing to click."""
-    from mfluxible.vlm_worker import _clean_payload
+    from mfluxible.vlm_reply import clean_payload
 
-    payload = _clean_payload({"prompt": "a misty harbour at dawn"})
+    payload = clean_payload({"prompt": "a misty harbour at dawn"})
     assert payload["prompt"] == "a misty harbour at dawn"
     assert payload["regions"] == []
 
@@ -419,22 +485,22 @@ def test_an_array_of_objects_is_not_mistaken_for_one_object():
     """The outermost bracket decides the shape. Checking for "{...}" first would slice
     from the array's first element to the last "}" inside it -- which parses cleanly and
     silently returns one region where the reply listed several."""
-    from mfluxible.vlm_worker import _extract_json
+    from mfluxible.vlm_reply import extract_json  # noqa: F401
 
     reply = '[{"label": "a", "box": [0,0,1,1]}, {"label": "b", "box": [0,0,1,1]}]'
-    parsed = _extract_json(reply)
+    parsed = extract_json(reply)
     assert isinstance(parsed, list)
     assert len(parsed) == 2
 
-    obj = _extract_json('{"prompt": "x", "regions": [{"label": "a", "box": [0,0,1,1]}]}')
+    obj = extract_json('{"prompt": "x", "regions": [{"label": "a", "box": [0,0,1,1]}]}')
     assert isinstance(obj, dict)
     assert obj["prompt"] == "x"
 
 
 def test_the_prompt_is_capped():
-    from mfluxible.vlm_worker import _clean_payload
+    from mfluxible.vlm_reply import clean_payload
 
-    assert len(_clean_payload({"prompt": "x" * 5000})["prompt"]) == 2000
+    assert len(clean_payload({"prompt": "x" * 5000})["prompt"]) == 2000
 
 
 def test_the_result_event_carries_the_prompt(vlm_client, mailbox):
@@ -464,3 +530,163 @@ def test_a_fresh_mailbox_is_never_attached_however_young_the_clock_is(monkeypatc
     # And it still flips to True once something really has polled.
     box._worker_seen = 4.0
     assert box.worker_attached() is True
+
+
+# --- the in-process backend, over HTTP ----------------------------------------------
+#
+# The model itself can't run in CI, but the wiring around it is the part that decides
+# whether a detection ever reaches it: who claims the job, which timeout applies, and
+# what a sidecar polling the wrong server is told. A stand-in detector covers all three
+# without a byte of weights, because `engine.run_exclusive` doesn't care what it runs.
+
+
+class _StandInDetector:
+    """Shaped like LocalDetector, answering from a canned reply."""
+
+    def __init__(self, result=None, loaded=True):
+        self.result = result if result is not None else {"prompt": "a teal square", "regions": []}
+        self.loaded = loaded
+        self.seen = []
+
+    def detect_sync(self, path):
+        self.seen.append(path)
+        return self.result
+
+
+@pytest.fixture
+def local_client(monkeypatch, mailbox):
+    """The app with the in-process backend selected and a stand-in for the model."""
+    import mfluxible.server as server_module
+    from mfluxible.engine import MfluxEngine
+    from mfluxible.vlm import BACKEND_LOCAL
+
+    detector = _StandInDetector()
+    monkeypatch.setattr(
+        server_module,
+        "engine",
+        MfluxEngine(model=TOY_MODEL_SPEC, quantize=None, model_cache_dir=None),
+    )
+    monkeypatch.setattr(server_module, "MAILBOX", mailbox)
+    monkeypatch.setattr(server_module, "DETECTOR", detector)
+    monkeypatch.setattr(server_module, "VLM_BACKEND", BACKEND_LOCAL)
+    monkeypatch.setattr(server_module, "VLM_TIMEOUT_S", 5.0)
+    monkeypatch.setattr(server_module, "VLM_LOAD_TIMEOUT_S", 5.0)
+    with TestClient(server_module.app) as test_client:
+        yield test_client, detector
+
+
+def _events(resp) -> list[dict]:
+    return [
+        json.loads(line[len("data: ") :])
+        for line in resp.text.splitlines()
+        if line.startswith("data: ")
+    ]
+
+
+def test_the_local_backend_answers_its_own_job(local_client):
+    """End to end with no worker anywhere: the same mailbox, filled from inside."""
+    client, detector = local_client
+    resp = client.post("/mfluxible/v1/vlm/describe", json={"image": _b64(_png())})
+    assert resp.status_code == 200
+
+    events = _events(resp)
+    assert [e["type"] for e in events] == ["pending", "result"]
+    assert events[0]["backend"] == "local"
+    assert events[1]["prompt"] == "a teal square"
+    # And it was handed the stashed file, not the raw bytes.
+    assert len(detector.seen) == 1 and detector.seen[0].exists()
+
+
+def test_the_local_backend_reports_a_detection_failure_as_an_error_event(local_client):
+    """detect_sync returns its reasons rather than raising -- server.py has nowhere to
+    catch one, by design -- so an error body has to survive the trip as an event."""
+    client, detector = local_client
+    detector.result = {"error": "the detection failed -- see the server log for the reason."}
+
+    events = _events(client.post("/mfluxible/v1/vlm/describe", json={"image": _b64(_png())}))
+    assert events[-1]["type"] == "error"
+    assert "see the server log" in events[-1]["message"]
+
+
+def test_a_local_job_is_claimed_so_a_timeout_names_the_right_thing(local_client, monkeypatch):
+    """"nothing claimed the job" is the worker backend's message and would be a lie
+    here: the thing that claims jobs under this backend is the request handler."""
+    import mfluxible.server as server_module
+
+    client, detector = local_client
+    monkeypatch.setattr(server_module, "VLM_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(server_module, "VLM_LOAD_TIMEOUT_S", 0.2)
+
+    def never(path):
+        import time as _time
+
+        _time.sleep(5)
+        return {"regions": []}
+
+    detector.detect_sync = never
+    events = _events(client.post("/mfluxible/v1/vlm/describe", json={"image": _b64(_png())}))
+    assert events[-1]["type"] == "error"
+    assert "took too long" in events[-1]["message"]
+
+
+def test_a_cold_model_waits_on_the_load_timeout_rather_than_the_detection_one(
+    local_client, monkeypatch
+):
+    """A first detection downloads a few gigabytes. Failing that after three minutes
+    would make a slow connection look like a broken server, which is why the two
+    timeouts are separate rather than one generous number."""
+    import mfluxible.server as server_module
+
+    client, detector = local_client
+    detector.loaded = False
+    waited = []
+
+    original = server_module.MAILBOX.wait
+
+    async def record(job, timeout):
+        waited.append(timeout)
+        return await original(job, timeout)
+
+    monkeypatch.setattr(server_module.MAILBOX, "wait", record)
+    monkeypatch.setattr(server_module, "VLM_TIMEOUT_S", 1.0)
+    monkeypatch.setattr(server_module, "VLM_LOAD_TIMEOUT_S", 99.0)
+
+    events = _events(client.post("/mfluxible/v1/vlm/describe", json={"image": _b64(_png())}))
+    assert waited == [99.0]
+    assert events[0]["model_loaded"] is False
+
+
+def test_health_says_which_backend_answers(local_client):
+    client, _ = local_client
+    vlm = client.get("/health").json()["vlm"]
+    assert vlm == {
+        "enabled": True,
+        "backend": "local",
+        "worker_attached": False,
+        "model_loaded": True,
+    }
+
+
+def test_a_worker_polling_a_local_server_is_told_why_it_gets_nothing(local_client):
+    """The 404 a worker already handles says "set MFLUXIBLE_VLM_DIR", which here is
+    already set and would not help. A sidecar long-polling a server that will never hand
+    it a job is exactly the silent nothing this message exists to break."""
+    client, _ = local_client
+
+    for resp in (
+        client.get("/mfluxible/v1/vlm/next"),
+        client.post("/mfluxible/v1/vlm/anything", json={"regions": []}),
+    ):
+        assert resp.status_code == 404
+        assert "in-process" in resp.json()["message"]
+        assert "MFLUXIBLE_VLM_BACKEND=worker" in resp.json()["message"]
+
+
+def test_the_worker_backend_still_hands_out_jobs(vlm_client, mailbox):
+    """The other half of the gate above: selecting the worker leaves the two endpoints
+    exactly as they were, which is what keeps the sidecar a supported option rather than
+    a deprecated one."""
+    mailbox.submit(_png())
+    resp = vlm_client.get("/mfluxible/v1/vlm/next")
+    assert resp.status_code == 200
+    assert "image_path" in resp.json()
