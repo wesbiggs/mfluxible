@@ -74,6 +74,7 @@ Each client keeps its own MCP registry, and none of them share one — registeri
 | [Claude Code](#claude-code) | `~/.claude.json`, via `claude mcp add` | default (45) | yes, in the tool result |
 | [Claude Desktop](#claude-desktop) | `claude_desktop_config.json` | default (45) | yes, in the main transcript |
 | [oMLX](#omlx) | `~/.omlx/mcp.json` | **20** — its chat UI aborts at 30s | no, not as of 0.6.4 |
+| [LM Studio Bionic](#lm-studio-bionic) | its settings UI | default (45) | only via its own `attachFile` tool, when the model uses it |
 
 ### Claude Code
 
@@ -150,6 +151,20 @@ Three things differ from the Claude hosts:
 Tools are namespaced by server, so the model sees `mfluxible__generate_image`. After editing `mcp.json`, restart oMLX or toggle MCP off and on in Settings: the `env` block is applied when the subprocess is spawned, so a reconnect is what picks it up.
 
 As of 0.6.4 the admin chat doesn't display images returned by an MCP tool at all — tool results are kept out of the transcript, and an image block loses its media type on the way through, reaching the model as bare base64. The full-resolution PNG still lands in `MFLUXIBLE_MCP_SAVE_DIR` and the caption names that path, so the model can at least tell you where it is. [jundot/omlx#3596](https://github.com/jundot/omlx/pull/3596) proposes rendering them; [#3575](https://github.com/jundot/omlx/issues/3575) tracks feeding them to a vision model.
+
+### LM Studio Bionic
+
+[Bionic](https://lmstudio.ai/docs/bionic) is LM Studio's agent app. Tested against 1.1.5 on macOS. Add the server in its MCP settings as a stdio server with command `/opt/homebrew/bin/uvx` and one argument, `mfluxible-mcp`. Use an absolute path here too (`which uvx`), for the reason given under [Claude Desktop](#claude-desktop): an app launched from the Dock gets launchd's `PATH`, not your shell's. Bionic stores the entry in `~/.lmstudio/apps/bionic/.internal/ng-mcp.json`. That file is internal to the app, so change it through the UI rather than by editing it. Bionic's per-call timeout defaults to 300s, so the default `MFLUXIBLE_MCP_WAIT_SECONDS` works as-is, and the `check_image` handoff was exercised in testing.
+
+**The image you see did not come from this tool's result.** Bionic does not render the `ImageContent` block itself. It keeps an attached copy and tells the model the copy exists. What does render is a chain the model has to put together itself, all of it traced in a working session:
+
+1. The model reads the full-resolution PNG's path out of the caption.
+2. It calls Bionic's built-in `requestReadonlyAccess` on that path, which shows you an "Allow LM Studio to view this file?" prompt.
+3. It optionally calls `viewImages` to look at the image.
+4. It calls Bionic's `attachFile`, which returns a markdown image with a `bionic-attached://<id>.jpg` URL.
+5. It copies that markdown into its reply exactly.
+
+Step 5 is where it breaks, and whether it does depends on the model. In the same session, one generation rendered and another didn't: the model only *mentioned* the markdown rather than writing it into its reply, so the chat showed it as text. This path also only works because the caption names the saved file. `MFLUXIBLE_MCP_SAVE_DIR` is what makes the image displayable here at all, not just recoverable. If the picture doesn't appear, ask the model to attach the saved file, or open it from that directory.
 
 ### Other clients
 
