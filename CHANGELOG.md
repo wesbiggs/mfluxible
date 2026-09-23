@@ -7,7 +7,7 @@ still change in a minor release, and any such change is listed here.
 The server (`mfluxible`) and the MCP client (`mfluxible-mcp`) are released together from
 this repository and always share a version number.
 
-## Unreleased
+## 0.9.2 — 2026-09-23
 
 Object detection no longer needs a sidecar. A vision model can now run inside the server
 process, and that is the new default.
@@ -51,6 +51,23 @@ process, and that is the new default.
 
 - **The reply contract moved to `mfluxible/vlm_reply.py`**, shared by both backends so
   they cannot drift on what a region looks like. No change to the shape itself.
+
+### Browser harness
+
+- **The detect button is now "Describe"**, since the reply fills the prompt box as well as
+  offering regions to mask.
+- **The input image takes the stage when there is no result to show.** Dropping a new
+  image no longer leaves the previous run's result on screen next to a form that holds
+  something else. A finished result carries a compare handle that wipes back to the input
+  it was made from.
+- **Live previews show at full size** instead of a 340px thumbnail, and a shimmer marks a
+  run in progress. The server already sent every preview at the requested resolution.
+- **The output pane blanks at the output's dimensions when a run starts**, so the layout
+  doesn't jump from blank to preview to result.
+
+### Documentation
+
+- LM Studio is documented as a tested MCP client in [docs/mcp.md](docs/mcp.md).
 
 ## 0.9.1 — 2026-09-17
 

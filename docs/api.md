@@ -17,7 +17,7 @@ Returns:
 ```json
 {
   "status": "ok",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "model_loaded": true,
   "available": ["z-image-turbo", "z-image", "flux-schnell", "flux-dev", "krea-dev", "qwen-image", "krea-2", "krea-2-raw", "ernie-image-turbo", "ernie-image", "flux2-klein-4b", "flux2-klein-9b", "flux2-klein-9b-kv", "flux2-klein-base-4b", "flux2-klein-base-9b"],
   "model": {

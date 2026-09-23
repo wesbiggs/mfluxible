@@ -23,7 +23,7 @@ reports it.
 
 from mfluxible import config as _config
 
-__version__ = "0.9.1"
+__version__ = "0.9.2"
 
 # The path actually loaded, or None when no config file was found. Read by cli.py to
 # report it on startup. Deliberately *not* on /health: that endpoint is left open by
