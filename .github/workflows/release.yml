@@ -44,12 +44,12 @@ jobs:
               sys.exit('harness.html is missing from the wheel')
           "
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-mfluxible
           path: dist/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-mfluxible-mcp
           path: dist-mcp/
@@ -67,7 +67,7 @@ jobs:
     permissions:
       id-token: write # the OIDC token Trusted Publishing exchanges; no API token in secrets
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: dist-mfluxible
           path: dist/
@@ -82,7 +82,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: dist-mfluxible-mcp
           path: dist/
@@ -97,7 +97,7 @@ jobs:
       contents: write # creating the release is the one thing here that writes
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: dist-*
           path: artifacts/
