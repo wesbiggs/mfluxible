@@ -90,8 +90,10 @@ data: {"type": "thinking", "step": 2, "total_steps": 9, "step_ms": 190, "elapsed
 
 ...
 
-data: {"type": "image", "mime_type": "image/png", "data": "<base64 png>", "seed": 123, "generation_time": 14.2}
+data: {"type": "image", "mime_type": "image/png", "data": "<base64 png>", "seed": 123, "image_id": "<32 hex chars>", "generation_time": 14.2}
 ```
+
+`image_id` is issued per generation (unlike `seed`, which two runs can share). The server keeps its last two finished images under it so the [chat stub](#post-v1chatcompletions) can re-attach one that a chat client stripped from a tool result; the MCP tool prints it in its caption for that purpose.
 
 The `start` event's `start_step` is the number of leading denoising steps this generation skips, and it is `0` for everything except image-to-image — so the first `thinking` event is always step `start_step + 1`, and `total_steps - start_step` steps actually run. Progress is therefore `(step - start_step) / (total_steps - start_step)`, which reduces to `step / total_steps` when nothing is skipped. `effective_image_strength` is the `image_strength` bucket the request landed in (`start_step / total_steps`), or `null` when no `image` was sent — see [Image-to-image](#image-to-image) for why the value you sent and the value that took effect aren't always the same. Both fields are display/progress information: `effective_image_strength` is the exact *lower edge* of its bucket as a fraction, but as a float it lands a hair under it, so feeding it back into a later request can floor to the next bucket down. Under [`fractional_start`](#fractional-start) there are no buckets and it reports the strength that actually took effect.
 
@@ -357,10 +359,11 @@ Not a chat model — a stub that exists so a frontend requiring an actual "chat 
 It plays exactly one deterministic turn of OpenAI's function-calling protocol:
 
 - A request whose last message is a plain user turn, with a `generate_image` function offered in `tools` → responds with a `tool_calls` message invoking it, `{"prompt": "<the user's message>"}` as the arguments.
-- A request whose last message is a `tool` result (i.e. the caller already ran `generate_image` and is asking for a closing reply) → responds with a short fixed acknowledgment, `finish_reason: "stop"`.
+- A request whose last message is a `tool` result (i.e. the caller already ran `generate_image` and is asking for a closing reply) → responds with the result's own content: any image parts inlined as markdown `![Image](data:image/…)` followed by its text. If the client stripped the image (skinnyai replaces it with `[image content not shown]`), the stub reads `image_id <id>` out of the caption and inlines that image from the server's last two finished generations, downscaled to a 768px JPEG so a chat history can carry it; the full-resolution file is still the one at the caption's path (for the MCP tool, the caption with model, size, seed and the saved file's path), or a short fixed acknowledgment if it has none, `finish_reason: "stop"`.
+- A request whose last message is a `tool` result saying the image is still generating (the MCP tool's `Call check_image with handle "…"` text), with a `check_image` tool also offered → responds with a `check_image` tool call carrying that handle, so a generation longer than the MCP tool's wait window is polled until the image arrives. Without `check_image` offered, it acknowledges as above.
 - A request with no `generate_image` tool offered at all → responds with fixed text explaining why (most likely cause in Open WebUI: Capabilities or Builtin Tools → Image Generation isn't enabled for this model).
 
-It only ever recognizes a tool literally named `generate_image` — the name [Open WebUI's own builtin tool uses](https://github.com/open-webui/open-webui/blob/main/backend/open_webui/tools/builtin.py) — offered in that specific request's `tools` list; it never guesses at one that wasn't offered. There's no general conversation, no other tools, no multi-turn reasoning — if that's what's needed, point the chat connection at a real model instead.
+It only ever recognizes a tool named `generate_image` (or namespaced as `<server>__generate_image`, which is how MCP-aware chat clients such as skinnyai offer a server's tools; the name echoed back in the tool call is the one that was offered) — the name [Open WebUI's own builtin tool uses](https://github.com/open-webui/open-webui/blob/main/backend/open_webui/tools/builtin.py) — offered in that specific request's `tools` list; it never guesses at one that wasn't offered. There's no general conversation, no other tools, no multi-turn reasoning — if that's what's needed, point the chat connection at a real model instead.
 
 Both streaming and non-streaming (`stream: true`/`false`) are supported, in OpenAI's own chat-completion / chat-completion-chunk shapes. `model` in the request isn't validated against anything — unlike the image endpoints, there's no real model here to be inconsistent with.
 

@@ -105,3 +105,150 @@ def test_streaming_first_turn_ends_with_tool_calls_and_done(client):
     fn = tool_call_chunks[0]["choices"][0]["delta"]["tool_calls"][0]["function"]
     assert fn["name"] == "generate_image"
     assert json.loads(fn["arguments"]) == {"prompt": "a puffin"}
+
+
+def test_a_namespaced_tool_name_is_matched_and_echoed_back(client):
+    tool = {**GENERATE_IMAGE_TOOL, "function": {**GENERATE_IMAGE_TOOL["function"], "name": "mfluxible__generate_image"}}
+    other = {"type": "function", "function": {"name": "web_search", "parameters": {}}}
+    resp = client.post(
+        "/v1/chat/completions",
+        json={"model": "m", "messages": [{"role": "user", "content": "a puffin"}], "tools": [other, tool]},
+    )
+    message = resp.json()["choices"][0]["message"]
+    assert message["tool_calls"][0]["function"]["name"] == "mfluxible__generate_image"
+
+
+def test_a_tool_merely_containing_the_name_is_not_matched(client):
+    tool = {**GENERATE_IMAGE_TOOL, "function": {**GENERATE_IMAGE_TOOL["function"], "name": "my_generate_image"}}
+    resp = client.post(
+        "/v1/chat/completions",
+        json={"model": "m", "messages": [{"role": "user", "content": "x"}], "tools": [tool]},
+    )
+    assert "tool_calls" not in resp.json()["choices"][0]["message"]
+
+
+def _tool(name):
+    return {"type": "function", "function": {"name": name, "parameters": {}}}
+
+
+def test_the_handle_pattern_matches_the_mcp_tools_real_wording():
+    # Built by the real MCP tool so a reword there fails here instead of silently
+    # going back to acknowledging an image that isn't ready.
+    import time
+
+    from mfluxible.chat_stub import _PENDING_HANDLE
+    from mfluxible_mcp import server as mcp_server
+
+    job = mcp_server._Job(handle="abc123", width=64, height=64, steps=None, model="", started=time.monotonic())
+    text = mcp_server._result(job)[0].text
+    assert _PENDING_HANDLE.search(text).group(1) == "abc123"
+
+
+def test_a_pending_handle_triggers_a_check_image_call(client):
+    text = 'Still generating (step 3/9). Call check_image with handle "abc123" to collect it -- blah.'
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "m",
+            "messages": [{"role": "user", "content": "x"}, {"role": "tool", "tool_call_id": "c", "content": text}],
+            "tools": [_tool("mfluxible__generate_image"), _tool("mfluxible__check_image")],
+        },
+    )
+    choice = resp.json()["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    fn = choice["message"]["tool_calls"][0]["function"]
+    assert fn["name"] == "mfluxible__check_image"
+    assert json.loads(fn["arguments"]) == {"handle": "abc123"}
+
+
+def test_a_pending_handle_without_check_image_offered_still_acknowledges(client):
+    text = 'Still generating (step 3/9). Call check_image with handle "abc123" to collect it.'
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "m",
+            "messages": [{"role": "tool", "tool_call_id": "c", "content": text}],
+            "tools": [GENERATE_IMAGE_TOOL],
+        },
+    )
+    assert resp.json()["choices"][0]["finish_reason"] == "stop"
+
+
+def test_a_finished_image_result_still_acknowledges(client):
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "m",
+            "messages": [{"role": "tool", "tool_call_id": "c", "content": "Generated 768x768 in 40s"}],
+            "tools": [_tool("mfluxible__check_image")],
+        },
+    )
+    assert resp.json()["choices"][0]["finish_reason"] == "stop"
+
+
+def test_the_closing_reply_passes_along_the_tool_results_caption(client):
+    caption = "Z-Image-Turbo, 768x768, 9 steps, seed 1, 40.0s. Full-resolution PNG saved to /x/y.png"
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "m",
+            "messages": [{"role": "tool", "tool_call_id": "c", "content": [{"type": "text", "text": caption}]}],
+            "tools": [_tool("mfluxible__check_image")],
+        },
+    )
+    assert resp.json()["choices"][0]["message"]["content"] == caption
+
+
+def test_the_closing_reply_embeds_the_result_image_as_markdown(client):
+    parts = [
+        {"type": "image", "data": "QUJD", "mimeType": "image/jpeg"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,REVG"}},
+        {"type": "image_url", "image_url": {"url": "https://example.com/x.png"}},
+        {"type": "text", "text": "caption"},
+    ]
+    resp = client.post(
+        "/v1/chat/completions",
+        json={"model": "m", "messages": [{"role": "tool", "tool_call_id": "c", "content": parts}], "tools": []},
+    )
+    assert resp.json()["choices"][0]["message"]["content"] == (
+        "![Image](data:image/jpeg;base64,QUJD)\n\n![Image](data:image/png;base64,REVG)\n\ncaption"
+    )
+
+
+ID = "ab" * 16
+
+
+def test_a_stripped_image_is_recovered_from_the_engine_by_the_captions_image_id():
+    import base64
+    import io
+
+    from PIL import Image
+
+    from mfluxible.chat_stub import non_streaming_response
+    from mfluxible.schemas import ChatCompletionRequest
+
+    buf = io.BytesIO()
+    Image.new("RGB", (2000, 1000), (200, 10, 10)).save(buf, "PNG")
+    png_b64 = base64.b64encode(buf.getvalue()).decode()
+    seen = []
+
+    def lookup(seed):
+        seen.append(seed)
+        return png_b64 if seed == ID else None
+
+    def reply(text):
+        req = ChatCompletionRequest(
+            model="m",
+            messages=[{"role": "tool", "tool_call_id": "c", "content": [{"type": "text", "text": text}]}],
+        )
+        return non_streaming_response(req, lookup)["choices"][0]["message"]["content"]
+
+    caption = f"Z-Image-Turbo, 768x768, 9 steps, seed 1, image_id {ID}, 40.0s. Full-resolution PNG saved to /x/y.png"
+    content = reply(caption)
+    assert content.startswith("![Image](data:image/jpeg;base64,") and content.endswith(caption)
+    jpeg = base64.b64decode(content.split("base64,")[1].split(")")[0])
+    assert max(Image.open(io.BytesIO(jpeg)).size) <= 768
+
+    # A seed the engine no longer holds degrades to the caption alone.
+    assert reply(caption.replace(ID, "0" * 32)) == caption.replace(ID, "0" * 32)
+

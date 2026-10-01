@@ -596,8 +596,8 @@ async def openai_chat_completions(req: ChatCompletionRequest):
     # with; see chat_stub.py for what this is actually for and why it's deliberately
     # not a real chat model.
     if req.stream:
-        return StreamingResponse(chat_stub.stream_response_lines(req), media_type="text/event-stream")
-    return chat_stub.non_streaming_response(req)
+        return StreamingResponse(chat_stub.stream_response_lines(req, engine.recent_image), media_type="text/event-stream")
+    return chat_stub.non_streaming_response(req, engine.recent_image)
 
 
 # Not CORS, and not reachable through the CORS middleware above: Starlette only
