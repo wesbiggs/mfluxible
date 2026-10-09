@@ -21,6 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from mfluxible import __version__, chat_stub
 from mfluxible.auth import BasicAuthMiddleware, credentials_from_env, resolve_bind_host, startup_warning
+from mfluxible.config import as_float, as_int
 from mfluxible.engine import MfluxEngine
 from mfluxible.models import CFG_GUIDANCE_FLOOR, MODELS
 from mfluxible.schemas import (
@@ -41,14 +42,14 @@ log = logging.getLogger("mfluxible.server")
 MODEL = os.environ.get("MFLUXIBLE_MODEL", "z-image-turbo")
 
 _raw_quantize = os.environ.get("MFLUXIBLE_QUANTIZE", "8")
-QUANTIZE = None if _raw_quantize.strip().lower() == "none" else int(_raw_quantize)
+QUANTIZE = None if _raw_quantize.strip().lower() == "none" else as_int("MFLUXIBLE_QUANTIZE", _raw_quantize)
 
 _raw_lora_paths = os.environ.get("MFLUXIBLE_LORA_PATHS", "").strip()
 LORA_PATHS = [p.strip() for p in _raw_lora_paths.split(",") if p.strip()] or None
 
 _raw_lora_scales = os.environ.get("MFLUXIBLE_LORA_SCALES", "").strip()
 if LORA_PATHS and _raw_lora_scales:
-    LORA_SCALES = [float(s.strip()) for s in _raw_lora_scales.split(",")]
+    LORA_SCALES = [as_float("MFLUXIBLE_LORA_SCALES", s.strip()) for s in _raw_lora_scales.split(",")]
     if len(LORA_SCALES) != len(LORA_PATHS):
         raise ValueError(
             f"MFLUXIBLE_LORA_SCALES has {len(LORA_SCALES)} entries but "
@@ -78,7 +79,7 @@ DETECTOR = detector_from_env()
 # How long the harness's stream waits for an answer. Generous: a cold `claude -p` start
 # plus the model's own thinking measured ~11s against a 768x768 image, and the local
 # backend has to wait out any generation holding the engine lock before it even begins.
-VLM_TIMEOUT_S = float(os.environ.get("MFLUXIBLE_VLM_TIMEOUT", "180"))
+VLM_TIMEOUT_S = as_float("MFLUXIBLE_VLM_TIMEOUT", os.environ.get("MFLUXIBLE_VLM_TIMEOUT", "180"))
 
 # What the first local detection waits instead, because it includes downloading a few
 # gigabytes of weights. Splitting the two rather than raising VLM_TIMEOUT for everyone
@@ -86,7 +87,7 @@ VLM_TIMEOUT_S = float(os.environ.get("MFLUXIBLE_VLM_TIMEOUT", "180"))
 # minutes, and a cold one that is merely on a slow connection should not fail at all.
 # The harness is told which of the two it is waiting on (see the `pending` event), so a
 # long first run reads as a download rather than as a hang.
-VLM_LOAD_TIMEOUT_S = float(os.environ.get("MFLUXIBLE_VLM_LOAD_TIMEOUT", "900"))
+VLM_LOAD_TIMEOUT_S = as_float("MFLUXIBLE_VLM_LOAD_TIMEOUT", os.environ.get("MFLUXIBLE_VLM_LOAD_TIMEOUT", "900"))
 
 # How long a worker's long-poll hangs before returning empty. Short enough that
 # stopping the worker doesn't leave a request pinned for minutes, long enough that

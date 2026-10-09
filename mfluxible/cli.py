@@ -22,6 +22,7 @@ import os
 import sys
 
 from mfluxible import CONFIG_PATH, __version__
+from mfluxible.config import as_int
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8420
@@ -46,7 +47,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--port",
         type=int,
-        default=int(os.environ.get("MFLUXIBLE_PORT") or DEFAULT_PORT),
+        default=as_int("MFLUXIBLE_PORT", os.environ.get("MFLUXIBLE_PORT") or str(DEFAULT_PORT)),
         help=f"port to bind (default: {DEFAULT_PORT})",
     )
     parser.add_argument(

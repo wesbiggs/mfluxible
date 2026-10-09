@@ -42,7 +42,7 @@ from mflux.models.common.latent_creator.latent_creator import LatentCreator
 from mflux.models.common.vae.vae_util import VAEUtil
 from mflux.utils.image_util import ImageUtil
 
-from mfluxible.config import cache_home
+from mfluxible.config import as_int, cache_home
 from mfluxible.models import CFG_GUIDANCE_FLOOR, ModelSpec, resolve
 from mfluxible.schedulers import MaskJob, clear_mask_job, scheduler_path, set_mask_job, start_fraction
 from mfluxible.schemas import GenerateRequest
@@ -107,7 +107,11 @@ DEFAULT_MASKED_IMAGE_STRENGTH = 0.0
 # measurable in exchange -- 1GB is ample for reuse within a single generation.
 # Set to "none" for MLX's own (effectively uncapped) default.
 _raw_mlx_cache_limit = os.environ.get("MFLUXIBLE_MLX_CACHE_LIMIT_MB", "1024").strip()
-MLX_CACHE_LIMIT_BYTES = None if _raw_mlx_cache_limit.lower() == "none" else int(_raw_mlx_cache_limit) * 1024 * 1024
+MLX_CACHE_LIMIT_BYTES = (
+    None
+    if _raw_mlx_cache_limit.lower() == "none"
+    else as_int("MFLUXIBLE_MLX_CACHE_LIMIT_MB", _raw_mlx_cache_limit) * 1024 * 1024
+)
 
 # Wiring memory tells the OS it may not page these buffers out at all, which is a
 # stronger guarantee than merely fitting: it protects the weights from being
@@ -116,7 +120,9 @@ MLX_CACHE_LIMIT_BYTES = None if _raw_mlx_cache_limit.lower() == "none" else int(
 # (mx.device_info()["max_recommended_working_set_size"]) -- wiring too much
 # starves the rest of the system. Unset leaves the OS default in place.
 _raw_mlx_wired_limit = os.environ.get("MFLUXIBLE_MLX_WIRED_LIMIT_MB", "").strip()
-MLX_WIRED_LIMIT_BYTES = int(_raw_mlx_wired_limit) * 1024 * 1024 if _raw_mlx_wired_limit else None
+MLX_WIRED_LIMIT_BYTES = (
+    as_int("MFLUXIBLE_MLX_WIRED_LIMIT_MB", _raw_mlx_wired_limit) * 1024 * 1024 if _raw_mlx_wired_limit else None
+)
 
 # The server always sends full-resolution images -- both step previews and the
 # final image -- at their true requested width/height. Deciding whether/how to

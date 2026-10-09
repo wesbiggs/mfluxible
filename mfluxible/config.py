@@ -143,6 +143,29 @@ class ConfigError(Exception):
     """
 
 
+def as_int(name: str, raw: str) -> int:
+    """`raw` as an int, or a ConfigError that names the variable.
+
+    The settings are read at import, so a bare `int("abc")` surfaces as
+    `ValueError: invalid literal for int()` from somewhere in server.py -- true, and no
+    help to whoever has to work out which of two dozen variables held it. The read itself
+    stays at the call site, spelled out in full, so that the scan in test_config.py can
+    still see which variables the package reads; only the parse is shared.
+    """
+    try:
+        return int(raw)
+    except ValueError:
+        raise ConfigError(f"{name}={raw!r} is not a whole number") from None
+
+
+def as_float(name: str, raw: str) -> float:
+    """`raw` as a float, or a ConfigError that names the variable. See as_int."""
+    try:
+        return float(raw)
+    except ValueError:
+        raise ConfigError(f"{name}={raw!r} is not a number") from None
+
+
 def config_flag(argv: list[str] | None = None) -> str | None:
     """The value of a `--config` flag on the command line, or None.
 

@@ -363,3 +363,15 @@ def test_the_two_distributions_ship_the_same_version():
     import mfluxible_mcp
 
     assert mfluxible_mcp.__version__ == __version__
+
+
+def test_a_malformed_number_names_the_variable_that_held_it():
+    import pytest
+
+    from mfluxible.config import ConfigError, as_float, as_int
+
+    with pytest.raises(ConfigError, match="MFLUXIBLE_QUANTIZE='abc'"):
+        as_int("MFLUXIBLE_QUANTIZE", "abc")
+    with pytest.raises(ConfigError, match="MFLUXIBLE_VLM_TIMEOUT='soon'"):
+        as_float("MFLUXIBLE_VLM_TIMEOUT", "soon")
+    assert as_int("X", "8") == 8 and as_float("X", "1.5") == 1.5
