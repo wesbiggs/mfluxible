@@ -161,6 +161,28 @@ def _composite_through_mask(generated: Image.Image, image_path: str, mask_b64: s
     return Image.composite(generated.convert("RGB"), original, mask)
 
 
+@contextlib.contextmanager
+def _staged_input_image(b64_data: str | None):
+    """The client's input image written to a temp file, yielding its path (None if there
+    is no image), and removed on exit.
+
+    mflux's image_path wants an actual file on disk, not bytes or a PIL.Image (see
+    imaging.decode_input_image), so there is no way to hand it a decoded image directly.
+    Written up front, before the generation lock is taken, since encoding a few hundred
+    KB doesn't need it.
+    """
+    if b64_data is None:
+        yield None
+        return
+    fd, path = tempfile.mkstemp(suffix=".input-image")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(decode_input_image(b64_data))
+        yield path
+    finally:
+        os.unlink(path)
+
+
 def _finish_image(image, mask_b64: str | None, feather: int, input_path: str | None) -> str:
     """The generated image as the base64 PNG the `image` event carries, composited back
     through `mask_b64` first when there is one. Pure Pillow; see the caller for why it
@@ -563,21 +585,56 @@ class MfluxEngine:
         if problem is not None:
             raise ValueError(problem)
 
-    def _generation_kwargs(self, req: GenerateRequest) -> dict:
-        """Per-request knobs that only some models can act on.
+    def _generation_kwargs(self, req: GenerateRequest, image_path: str | None) -> dict:
+        """Everything `generate_image()` is called with beyond seed, prompt, steps and size.
 
         Guidance and negative prompts are passed only where they do something. Every
         variant *accepts* both arguments, but on a guidance-distilled model (Z-Image
         Turbo, FLUX.1-schnell) the value has no path to the output, and mflux's own
         CLIs warn rather than pretend otherwise -- so rather than accept a value and
         silently drop it, request_problem above rejects the field outright.
+
+        `image_path` is the staged input image (see _staged_input_image), or None for a
+        text-to-image request.
         """
         kwargs = {}
         if self.spec.supports_guidance:
             kwargs["guidance"] = req.guidance if req.guidance is not None else self.spec.default_guidance
         if self.spec.supports_negative_prompt and req.negative_prompt is not None:
             kwargs["negative_prompt"] = req.negative_prompt
+        if image_path is not None:
+            kwargs["image_path"] = image_path
+            if req.image_strength is not None:
+                kwargs["image_strength"] = req.image_strength
+            else:
+                # Which default applies is the mask's call rather than the field's --
+                # see DEFAULT_MASKED_IMAGE_STRENGTH for why they differ.
+                kwargs["image_strength"] = (
+                    DEFAULT_MASKED_IMAGE_STRENGTH if req.mask is not None else DEFAULT_IMAGE_STRENGTH
+                )
+            # A dotted path mflux imports, chosen from a fixed table and never built
+            # from request data -- see SCHEDULER_PATH's comment. None for an ordinary
+            # img2img request, which leaves the variant whatever scheduler it picks
+            # for itself.
+            path = scheduler_path(masked=req.mask is not None, fractional=req.fractional_start)
+            if path is not None:
+                kwargs["scheduler"] = path
         return kwargs
+
+    @contextlib.asynccontextmanager
+    async def _registered(self, callback):
+        """`callback` subscribed to the model's before_loop/in_loop/interrupt hooks, and
+        unsubscribed on the way out. mflux has no unregister(), so the lists are mutated
+        directly (see CLAUDE.md on why that is tolerable only under the generation lock).
+        """
+        callbacks = self.model.callbacks
+        for hook in (callbacks.before_loop, callbacks.in_loop, callbacks.interrupt):
+            hook.append(callback)
+        try:
+            yield
+        finally:
+            for hook in (callbacks.before_loop, callbacks.in_loop, callbacks.interrupt):
+                hook.remove(callback)
 
     async def generate_stream(self, req: GenerateRequest):
         """Yields event dicts: {"type": "start"|"thinking"|"image"|"error", ...}."""
@@ -594,7 +651,6 @@ class MfluxEngine:
 
         seed = req.seed if req.seed is not None else random.randint(0, 2**32 - 1)
         steps = req.steps if req.steps is not None else self.spec.default_steps
-        kwargs = self._generation_kwargs(req)
         callback = _StreamCallback(
             self,
             req.preview_every,
@@ -603,42 +659,15 @@ class MfluxEngine:
             mask=(req.mask, req.mask_feather) if req.mask is not None else None,
         )
 
-        # mflux's image_path wants an actual file on disk, not bytes or a PIL.Image (see
-        # decode_input_image) -- written up front, outside the lock, since encoding a
-        # few hundred KB doesn't need it. Removed in the outer finally below, which only
-        # runs once the generation thread is confirmed done with it (see that finally's
-        # own comment on why it must wait for `task`).
-        tmp_image_path: str | None = None
-        if req.image is not None:
-            image_bytes = decode_input_image(req.image)
-            fd, tmp_image_path = tempfile.mkstemp(suffix=".input-image")
-            os.close(fd)
-            with open(tmp_image_path, "wb") as f:
-                f.write(image_bytes)
-            kwargs["image_path"] = tmp_image_path
-            if req.image_strength is not None:
-                kwargs["image_strength"] = req.image_strength
-            else:
-                # Which default applies is the mask's call rather than the field's --
-                # see DEFAULT_MASKED_IMAGE_STRENGTH for why they differ.
-                kwargs["image_strength"] = (
-                    DEFAULT_MASKED_IMAGE_STRENGTH if req.mask is not None else DEFAULT_IMAGE_STRENGTH
-                )
-            # A dotted path mflux imports, chosen from a fixed table and never built
-            # from request data -- see SCHEDULER_PATH's comment. None for an ordinary
-            # img2img request, which leaves the variant whatever scheduler it picks
-            # for itself.
-            path = scheduler_path(masked=req.mask is not None, fractional=req.fractional_start)
-            if path is not None:
-                kwargs["scheduler"] = path
+        # The staged file is removed when this `with` exits, which is only after the
+        # generation thread is confirmed done with it (see the inner finally's comment on
+        # why it must wait for `task`).
+        with _staged_input_image(req.image) as image_path:
+            kwargs = self._generation_kwargs(req, image_path)
 
-        try:
             # Only one generation at a time: MLX/Metal + the shared callback list on
             # self.model aren't set up for concurrent generate_image() calls.
-            async with self._lock:
-                self.model.callbacks.before_loop.append(callback)
-                self.model.callbacks.in_loop.append(callback)
-                self.model.callbacks.interrupt.append(callback)
+            async with self._lock, self._registered(callback):
 
                 def run():
                     try:
@@ -679,7 +708,7 @@ class MfluxEngine:
                     # behind a detection would be the wrong coupling.
                     final_b64 = await loop.run_in_executor(
                         None, _finish_image, image, req.mask if req.mask_composite else None,
-                        req.mask_feather, tmp_image_path,
+                        req.mask_feather, image_path,
                     )
                     yield {
                         "type": "image",
@@ -717,9 +746,3 @@ class MfluxEngine:
                     if not task.done():
                         with contextlib.suppress(Exception):
                             await task
-                    self.model.callbacks.before_loop.remove(callback)
-                    self.model.callbacks.in_loop.remove(callback)
-                    self.model.callbacks.interrupt.remove(callback)
-        finally:
-            if tmp_image_path is not None:
-                os.unlink(tmp_image_path)
