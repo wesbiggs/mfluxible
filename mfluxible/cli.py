@@ -75,7 +75,7 @@ def main(argv: list[str] | None = None) -> None:
 
     # stderr, not stdout, and not /health: which file configured this process is
     # useful to whoever started it and is a filesystem path, which is the one thing
-    # /health is careful not to disclose (see CLAUDE.md, "Two auth schemes").
+    # /health is careful not to disclose (see design/errors-and-auth.md, "Two auth schemes").
     if CONFIG_PATH is not None:
         print(f"mfluxible {__version__}: configuration from {CONFIG_PATH}", file=sys.stderr)
     else:

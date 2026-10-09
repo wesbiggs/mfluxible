@@ -45,3 +45,16 @@ def test_the_documented_health_sample_reports_the_current_version():
     from mfluxible import __version__
 
     assert _health_sample()["version"] == __version__
+
+
+def test_claude_md_and_the_design_notes_point_at_each_other():
+    """CLAUDE.md is the short form and design/ holds the reasoning it summarizes. A rule
+    that names a file that was renamed, or a design file nothing links to, is a rule
+    whose evidence nobody will find -- and nothing else would notice."""
+    root = pathlib.Path(__file__).resolve().parents[1]
+    claude = (root / "CLAUDE.md").read_text()
+    linked = set(re.findall(r"design/([a-z0-9-]+\.md)", claude))
+    present = {p.name for p in (root / "design").glob("*.md")}
+    assert linked, "CLAUDE.md links to no design notes"
+    assert linked <= present, f"CLAUDE.md names design files that do not exist: {sorted(linked - present)}"
+    assert present <= linked, f"design files CLAUDE.md never mentions: {sorted(present - linked)}"

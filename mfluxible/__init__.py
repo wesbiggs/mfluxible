@@ -28,5 +28,5 @@ __version__ = "0.9.2"
 # The path actually loaded, or None when no config file was found. Read by cli.py to
 # report it on startup. Deliberately *not* on /health: that endpoint is left open by
 # Caddyfile.example specifically because it discloses no filesystem paths, and this
-# would be one (see CLAUDE.md, "Two auth schemes").
+# would be one (see design/errors-and-auth.md, "Two auth schemes").
 CONFIG_PATH = _config.apply()
