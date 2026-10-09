@@ -696,3 +696,21 @@ def test_the_body_limit_is_checked_after_authentication(client, monkeypatch):
     monkeypatch.setattr(runtime_module, "BASIC_AUTH", ("u", "p"))
     resp = client.post("/mfluxible/v1/images/generations", json={"prompt": "x" * 100})
     assert resp.status_code == 401
+
+
+def test_no_route_module_can_carry_an_exception_into_a_response():
+    """CLAUDE.md's invariant, made structural: nothing under routes/ (or server.py) binds
+    a caught exception to a name, so there is nothing for a response body to be built
+    from. Reading the source is the only way to check "no path from an exception to a
+    response" without auditing every message that might ever flow through a shared catch.
+    """
+    import ast
+    import pathlib
+
+    import mfluxible
+
+    root = pathlib.Path(mfluxible.__file__).parent
+    for path in [root / "server.py", *sorted((root / "routes").glob("*.py"))]:
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.ExceptHandler):
+                assert node.name is None, f"{path.name}:{node.lineno} binds the exception it catches"

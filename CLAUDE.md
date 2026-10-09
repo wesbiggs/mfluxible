@@ -159,7 +159,8 @@ the sections below say why the non-obvious parts are the way they are.
 
 ## No path from an exception to a response body, in either direction
 
-`mfluxible/server.py` contains no `except` clause at all, and that is the point rather
+`mfluxible/server.py` and everything under `mfluxible/routes/` bind no exception to a name
+(the one `except` there, in `routes/vlm.py`, discards it -- the same shape as auth.py's), and that is the point rather
 than a coincidence. Validation is `MfluxEngine.request_problem`, which *returns* the
 reason a request can't be honoured; a finished generation is `_collect_final_image`,
 which *returns* the `image` or `error` event; a bad OpenAI `size` is
@@ -180,7 +181,7 @@ every message that might ever flow through a shared catch.
 
 So: `check_request` still exists, wrapping `request_problem` for in-process callers
 (`generate_stream`, and the tests) that have no response to put a string in -- but if
-you find yourself adding `except ... : str(exc)` back into server.py to "simplify" the
+you find yourself adding `except ... : str(exc)` back into the routes to "simplify" the
 pairs of returns, that is the leak coming back. The engine end of it is
 `generate_stream`'s `except Exception`, which logs the traceback to
 `mfluxible.engine` (stderr, so the terminal running uvicorn) and emits a fixed
