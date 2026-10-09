@@ -288,6 +288,15 @@ def _encode_final_png_with_metadata(image) -> bytes:
         os.unlink(tmp_path)
 
 
+def _finish_image(image, mask_b64: str | None, feather: int, input_path: str | None) -> str:
+    """The generated image as the base64 PNG the `image` event carries, composited back
+    through `mask_b64` first when there is one. Pure Pillow; see the caller for why it
+    is off the event loop."""
+    if mask_b64 is not None:
+        image.image = _composite_through_mask(image.image, input_path, mask_b64, feather)
+    return base64.b64encode(_encode_final_png_with_metadata(image)).decode("ascii")
+
+
 class _StreamCallback:
     """One-shot InLoopCallback: registered for a single generation, then discarded."""
 
@@ -788,18 +797,21 @@ class MfluxEngine:
                         yield item
 
                     image = await task
-                    if req.mask is not None and req.mask_composite:
-                        # On the event loop rather than the worker thread on purpose:
-                        # this is Pillow, not MLX, so it is not bound by this engine's
-                        # single-thread rule, and it runs after the generation has
-                        # released its hold on the model.
-                        image.image = _composite_through_mask(
-                            image.image, tmp_image_path, req.mask, req.mask_feather
-                        )
+                    # Pillow and PNG encoding, not MLX, so this is not bound by the
+                    # single-thread rule -- but it is hundreds of milliseconds at 2048px
+                    # (a LANCZOS resize, a blur, a PNG encode and a temp-file round trip),
+                    # and run inline it stalls every other request on the loop, /health
+                    # and other clients' streams included. The default executor, not
+                    # self._executor: that one is the MLX thread, and queueing this
+                    # behind a detection would be the wrong coupling.
+                    final_b64 = await loop.run_in_executor(
+                        None, _finish_image, image, req.mask if req.mask_composite else None,
+                        req.mask_feather, tmp_image_path,
+                    )
                     yield {
                         "type": "image",
                         "mime_type": "image/png",
-                        "data": base64.b64encode(_encode_final_png_with_metadata(image)).decode("ascii"),
+                        "data": final_b64,
                         "seed": seed,
                         "generation_time": image.generation_time,
                     }
