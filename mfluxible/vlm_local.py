@@ -43,7 +43,7 @@ from pathlib import Path
 from PIL import Image
 
 from mfluxible.engine import _oriented
-from mfluxible.vlm import BACKEND_LOCAL, backend_from_env
+from mfluxible.vlm import BACKEND_LOCAL, DETECT_TMP_PREFIX, backend_from_env
 from mfluxible.vlm_reply import MAX_REGIONS, clean_payload, extract_json
 
 log = logging.getLogger("mfluxible.vlm_local")
@@ -318,7 +318,7 @@ class LocalDetector:
         # documents and the one least likely to move under it. Written beside the stash
         # so it shares that directory's permissions, and removed on every path out --
         # the mailbox's own pruning is an hourly sweep, not a cleanup for this.
-        handle, tmp_path = tempfile.mkstemp(suffix=".png", dir=str(Path(image_path).parent))
+        handle, tmp_path = tempfile.mkstemp(prefix=DETECT_TMP_PREFIX, suffix=".png", dir=str(Path(image_path).parent))
         os.close(handle)
         try:
             framed.save(tmp_path, format="PNG")

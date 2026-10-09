@@ -34,6 +34,7 @@ import asyncio
 import io
 import logging
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -75,6 +76,16 @@ class Job:
     # Set once, by complete(): {"regions": [...]} or {"error": "<curated reason>"}.
     result: dict | None = None
     done: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+# The only names this module ever writes into its directory: a job's image
+# (`<uuid hex>.<ext>`, see submit) and the in-process detector's resized copy
+# (`detect-*.png`, see vlm_local). _prune deletes by this pattern and nothing else,
+# because MFLUXIBLE_VLM_DIR is an operator-supplied path and nothing stops it naming a
+# directory that already holds other files -- an age-based sweep of "everything here"
+# would delete them.
+STASH_NAME = re.compile(r"^(?:[0-9a-f]{32}\.(?:png|jpg|webp|gif)|detect-.+\.png)$")
+DETECT_TMP_PREFIX = "detect-"
 
 
 def _suffix_for(fmt: str | None) -> str:
@@ -198,14 +209,15 @@ class VlmMailbox:
     # -- housekeeping ----------------------------------------------------------
 
     def _prune(self) -> None:
-        """Delete stashed images older than STASH_TTL_S. Best-effort: a file that
+        """Delete stashed images older than STASH_TTL_S -- only files this module could
+        have written (see STASH_NAME), never anything else in the directory. Best-effort: a file that
         cannot be removed is logged and left, never raised -- this runs inside a
         request and losing a detection over a stale temp file would be worse than
         the file surviving."""
         live = self._pending.path if self._pending is not None else None
         cutoff = time.time() - STASH_TTL_S
         for entry in self.dir.glob("*"):
-            if entry == live or not entry.is_file():
+            if entry == live or not STASH_NAME.match(entry.name) or not entry.is_file():
                 continue
             try:
                 if entry.stat().st_mtime < cutoff:

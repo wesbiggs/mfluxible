@@ -156,7 +156,7 @@ def test_pruning_keeps_the_live_job_and_drops_stale_files(mailbox):
     import os
     import time
 
-    stale = mailbox.dir / "old.png"
+    stale = mailbox.dir / ("0" * 32 + ".png")
     stale.write_bytes(_png())
     os.utime(stale, (time.time() - 7200, time.time() - 7200))
 
@@ -690,3 +690,30 @@ def test_the_worker_backend_still_hands_out_jobs(vlm_client, mailbox):
     resp = vlm_client.get("/mfluxible/v1/vlm/next")
     assert resp.status_code == 200
     assert "image_path" in resp.json()
+
+
+def test_pruning_deletes_only_files_the_mailbox_could_have_written(tmp_path):
+    # MFLUXIBLE_VLM_DIR is operator-supplied and may name a directory that already holds
+    # other things; an age-based sweep must not take them with it.
+    import os
+
+    from mfluxible.vlm import STASH_TTL_S, VlmMailbox
+
+    mailbox = VlmMailbox(tmp_path)
+    stale = {
+        "a" * 32 + ".png": True,
+        "b" * 32 + ".jpg": True,
+        "detect-xyz.png": True,
+        "holiday.png": False,
+        "notes.txt": False,
+        "a" * 32 + ".txt": False,
+    }
+    old = os.stat(tmp_path).st_mtime - STASH_TTL_S - 10
+    for name in stale:
+        (tmp_path / name).write_bytes(b"x")
+        os.utime(tmp_path / name, (old, old))
+
+    mailbox._prune()
+
+    for name, should_go in stale.items():
+        assert (not (tmp_path / name).exists()) == should_go, name
