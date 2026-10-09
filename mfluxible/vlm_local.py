@@ -42,7 +42,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from mfluxible.engine import _oriented
+from mfluxible.imaging import oriented
 from mfluxible.vlm import BACKEND_LOCAL, DETECT_TMP_PREFIX, backend_from_env
 from mfluxible.vlm_reply import MAX_REGIONS, clean_payload, extract_json
 
@@ -299,9 +299,9 @@ class LocalDetector:
         try:
             raw = Path(image_path).read_bytes()
             # The same orientation the mask will be drawn against. vlm.py measures the
-            # job's dimensions through engine.py's _oriented for this reason, and a box
+            # job's dimensions through imaging.oriented for this reason, and a box
             # chosen in the unrotated frame and applied in the rotated one is transposed.
-            image = _oriented(raw).convert("RGB")
+            image = oriented(raw).convert("RGB")
         except (OSError, ValueError):
             return {"error": "that image could not be read."}
 

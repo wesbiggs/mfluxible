@@ -200,15 +200,15 @@ def test_orientation_is_applied_so_a_mask_is_measured_in_the_frame_it_is_applied
 
 
 def test_the_client_and_the_server_orient_an_image_identically():
-    """mcp_server._oriented and engine._oriented are separate implementations of one
+    """mcp_server._oriented and imaging.oriented are separate implementations of one
     rule, and the size check that spans them only works while they agree. They are in
     different dependency sets -- the MCP client must never import the server -- so this
     is the only place the two can be held together."""
-    from mfluxible import engine
+    from mfluxible import imaging
 
     for orientation in (1, 3, 6, 8):
         raw = _jpeg_with_orientation((40, 20), orientation)
-        assert mcp_server._oriented(raw).size == engine._oriented(raw).size, orientation
+        assert mcp_server._oriented(raw).size == imaging.oriented(raw).size, orientation
 
 
 # --------------------------------------------------------------------------

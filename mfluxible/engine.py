@@ -26,7 +26,6 @@ import base64
 import concurrent.futures
 import contextlib
 import hashlib
-import io
 import logging
 import os
 import random
@@ -36,13 +35,22 @@ from pathlib import Path
 
 import mlx.core as mx
 import numpy as np
-from PIL import Image, ImageFilter, ImageOps
+from PIL import Image
 
 from mflux.models.common.latent_creator.latent_creator import LatentCreator
 from mflux.models.common.vae.vae_util import VAEUtil
 from mflux.utils.image_util import ImageUtil
 
 from mfluxible.config import as_int, cache_home
+from mfluxible.imaging import (
+    decode_input_image,
+    decode_mask,
+    encode_final_png_with_metadata,
+    input_image_problem,
+    input_mask_problem,
+    oriented,
+    pil_to_b64_png,
+)
 from mfluxible.models import CFG_GUIDANCE_FLOOR, ModelSpec, resolve
 from mfluxible.schedulers import MaskJob, clear_mask_job, scheduler_path, set_mask_job, start_fraction
 from mfluxible.schemas import GenerateRequest
@@ -130,84 +138,6 @@ MLX_WIRED_LIMIT_BYTES = (
 # length) is a client concern; see stream_client.py / stream_client.js.
 
 
-def _pil_to_b64_png(img: Image.Image) -> str:
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode("ascii")
-
-
-def _input_image_problem(b64_data: str) -> str | None:
-    """Why a client-supplied base64 input image can't be used, or None if it can.
-
-    Called from request_problem so a garbled `image` field gets the same clean 400 a bad
-    guidance/negative_prompt request gets rather than surfacing as an opaque error
-    mid-stream.
-
-    Returns the reason rather than raising it, and returns a sentence written here
-    rather than the underlying exception's own text -- both for the reasons in
-    MfluxEngine.request_problem's docstring. The real exception goes to the log instead,
-    where it is worth having and harmless: Pillow's carries a repr of the in-memory
-    buffer (address included) and base64's describes this decode call, so neither told a
-    client anything it could act on anyway.
-    """
-    try:
-        raw = base64.b64decode(b64_data, validate=True)
-    except Exception:
-        log.warning("rejecting input image: not valid base64", exc_info=True)
-        return "image is not valid base64."
-    try:
-        with Image.open(io.BytesIO(raw)) as img:
-            img.verify()
-    except Exception:
-        log.warning("rejecting input image: not a decodable image", exc_info=True)
-        return "image could not be decoded as an image."
-    return None
-
-
-def _decode_input_image(b64_data: str) -> bytes:
-    """The actual bytes to write to disk (see mflux's own image_path parameter -- it
-    wants a file path, not bytes or a PIL.Image, so there's no way to hand it a decoded
-    image directly).
-
-    No validation of its own: generate_stream, its only caller, runs check_request first
-    -- so _input_image_problem has already vetted this exact string, and a second round
-    of Pillow work per generation would buy nothing.
-    """
-    return base64.b64decode(b64_data, validate=True)
-
-
-def _oriented(raw: bytes) -> Image.Image:
-    """An image decoded with its EXIF Orientation applied, the way mflux's own
-    ImageUtil.load_image does it.
-
-    Used for the mask as well as for measuring the input, and that is the point: mflux
-    rotates the input image before encoding it, so a mask compared or composited
-    against the unrotated bytes would be measured in one frame and applied in another.
-    A mask straight out of a canvas carries no EXIF and this is a no-op for it.
-    """
-    with Image.open(io.BytesIO(raw)) as img:
-        return ImageOps.exif_transpose(img)
-
-
-def _decode_mask(b64_data: str, feather: int = 0) -> Image.Image:
-    """The client's mask as a single-channel image: white where the model may change
-    the image, black where the input must survive.
-
-    Read as luminance, so an RGB mask works and an alpha channel is ignored. That is
-    worth stating because OpenAI's own edits endpoint uses the opposite convention --
-    transparent means "edit here" -- so a mask drawn for that API would come out
-    inverted here rather than failing. See docs/api.md.
-
-    Feathering is applied at the mask's own resolution, before any resampling, which
-    is why mask_feather is documented in input-image pixels: request_problem has
-    already established that the mask and the input image are the same size.
-    """
-    mask = _oriented(base64.b64decode(b64_data, validate=True)).convert("L")
-    if feather > 0:
-        mask = mask.filter(ImageFilter.GaussianBlur(feather))
-    return mask
-
-
 def _composite_through_mask(generated: Image.Image, image_path: str, mask_b64: str, feather: int) -> Image.Image:
     """The generated image pasted back over the input, through the mask.
 
@@ -227,65 +157,8 @@ def _composite_through_mask(generated: Image.Image, image_path: str, mask_b64: s
     original = ImageUtil.scale_to_dimensions(
         image=ImageUtil.load_image(image_path).convert("RGB"), target_width=width, target_height=height
     )
-    mask = _decode_mask(mask_b64, feather).resize((width, height), Image.LANCZOS)
+    mask = decode_mask(mask_b64, feather).resize((width, height), Image.LANCZOS)
     return Image.composite(generated.convert("RGB"), original, mask)
-
-
-def _input_mask_problem(mask_b64: str, image_b64: str) -> str | None:
-    """Why a client-supplied mask can't be used, or None if it can. Same contract as
-    _input_image_problem: a reason written here, never an exception's own text.
-
-    The size check is strict on purpose. mflux scales the *input image* to
-    width/height with a plain resize and no aspect-ratio handling, and a mask that
-    doesn't match would be stretched the same way -- silently selecting a different
-    region than the one the user painted. Every other failure mode here is loud, so
-    this one is too.
-    """
-    try:
-        raw = base64.b64decode(mask_b64, validate=True)
-    except Exception:
-        log.warning("rejecting mask: not valid base64", exc_info=True)
-        return "mask is not valid base64."
-    try:
-        with Image.open(io.BytesIO(raw)) as img:
-            img.verify()
-    except Exception:
-        log.warning("rejecting mask: not a decodable image", exc_info=True)
-        return "mask could not be decoded as an image."
-
-    mask_img = _oriented(raw)
-    mask_size = mask_img.size
-    # Before feathering, which can only spread white that is already there: an
-    # all-black mask asks for nothing to change, which is a request nobody means to
-    # make and which would otherwise spend a full generation reproducing the input.
-    empty = mask_img.convert("L").getextrema()[1] == 0
-    image_size = _oriented(base64.b64decode(image_b64, validate=True)).size
-    if mask_size != image_size:
-        return (
-            f"mask is {mask_size[0]}x{mask_size[1]} but image is {image_size[0]}x{image_size[1]}; "
-            "they must be the same size, or the mask selects a different region than it looks like."
-        )
-    if empty:
-        return "mask is entirely black, which selects no region to regenerate; omit it or paint some white."
-    return None
-
-
-def _encode_final_png_with_metadata(image) -> bytes:
-    # `image` (mflux's GeneratedImage, not the bare PIL image) already carries
-    # everything -- prompt, seed, steps, model, quantize, LoRA config,
-    # generation time -- that its own .save() embeds as EXIF UserComment, XMP,
-    # and IPTC (see mflux.utils.image_util.ImageUtil.save_image and
-    # mflux.utils.metadata_builder.MetadataBuilder). Reused as-is rather than
-    # hand-rolling a second metadata format; .save() is file-path-based (it
-    # re-opens and re-saves), so this round-trips through a temp file.
-    fd, tmp_path = tempfile.mkstemp(suffix=".png")
-    os.close(fd)
-    try:
-        image.save(tmp_path, overwrite=True)
-        with open(tmp_path, "rb") as f:
-            return f.read()
-    finally:
-        os.unlink(tmp_path)
 
 
 def _finish_image(image, mask_b64: str | None, feather: int, input_path: str | None) -> str:
@@ -294,7 +167,7 @@ def _finish_image(image, mask_b64: str | None, feather: int, input_path: str | N
     is off the event loop."""
     if mask_b64 is not None:
         image.image = _composite_through_mask(image.image, input_path, mask_b64, feather)
-    return base64.b64encode(_encode_final_png_with_metadata(image)).decode("ascii")
+    return base64.b64encode(encode_final_png_with_metadata(image)).decode("ascii")
 
 
 class _StreamCallback:
@@ -553,7 +426,7 @@ class MfluxEngine:
             quantization=model.bits,
             generation_time=0,
         )
-        return _pil_to_b64_png(wrapped.image)
+        return pil_to_b64_png(wrapped.image)
 
     def _build_mask_job(
         self, *, mask_b64: str, feather: int, image_path: str, seed: int, width: int, height: int
@@ -589,7 +462,7 @@ class MfluxEngine:
         # BOX, not LANCZOS: this is an area average down to the latent grid, and a
         # windowed filter would ring past [0, 1] at a hard mask edge -- overshoot that
         # becomes "more than the original" or "less than nothing" in the blend.
-        mask = _decode_mask(mask_b64, feather).resize((lat_w, lat_h), Image.BOX)
+        mask = decode_mask(mask_b64, feather).resize((lat_w, lat_h), Image.BOX)
         keep = 1.0 - np.asarray(mask, dtype=np.float32) / 255.0
         keep = mx.repeat(mx.array(keep).reshape(1, 1, lat_h, lat_w), channels, axis=1)
         keep = self._latent_creator.pack_latents(keep, height, width)
@@ -635,14 +508,14 @@ class MfluxEngine:
         if req.image is not None:
             if req.image_strength is not None and not (0.0 <= req.image_strength <= 1.0):
                 return "image_strength must be between 0.0 and 1.0."
-            problem = _input_image_problem(req.image)
+            problem = input_image_problem(req.image)
             if problem is not None:
                 return problem
             if req.mask is not None:
                 # After the image, not before: the size check needs an image it can
                 # open, and running it on one already known to be undecodable would
                 # report the wrong field.
-                problem = _input_mask_problem(req.mask, req.image)
+                problem = input_mask_problem(req.mask, req.image)
                 if problem is not None:
                     return problem
         else:
@@ -731,13 +604,13 @@ class MfluxEngine:
         )
 
         # mflux's image_path wants an actual file on disk, not bytes or a PIL.Image (see
-        # _decode_input_image) -- written up front, outside the lock, since encoding a
+        # decode_input_image) -- written up front, outside the lock, since encoding a
         # few hundred KB doesn't need it. Removed in the outer finally below, which only
         # runs once the generation thread is confirmed done with it (see that finally's
         # own comment on why it must wait for `task`).
         tmp_image_path: str | None = None
         if req.image is not None:
-            image_bytes = _decode_input_image(req.image)
+            image_bytes = decode_input_image(req.image)
             fd, tmp_image_path = tempfile.mkstemp(suffix=".input-image")
             os.close(fd)
             with open(tmp_image_path, "wb") as f:

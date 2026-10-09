@@ -6,11 +6,12 @@ reach the other, so this module is the one thing both of them already talk to --
 the harness POSTs an image and waits, a worker claims the job, and the regions it
 posts back come out of the harness's open stream.
 
-The server does no detection of its own. It never loads a model, never holds an
-API key and never makes an outbound call: it writes a file, holds one slot in
-memory and copies a JSON array from one HTTP request to another. Everything that
-spends a Claude account lives in `mfluxible/vlm_worker.py`, deliberately -- see
-the note in CLAUDE.md for why that is a client rather than a server feature.
+The server runs no *command* and holds no key: this module writes a file, holds one slot
+in memory and copies a JSON array from one HTTP request to another. Who fills the slot is
+MFLUXIBLE_VLM_BACKEND (see the bottom of this file): a sidecar, `mfluxible/vlm_worker.py`,
+which is where anything that spends a Claude account lives -- deliberately a separate
+process, see the note in CLAUDE.md -- or a vision model loaded into this process by
+`vlm_local.py`, which runs no command and spends nothing.
 
 **One slot, not a queue.** MfluxEngine already serializes generations behind a
 single lock and runs one model in one process, so a second detection racing the
@@ -46,10 +47,10 @@ from PIL import Image, UnidentifiedImageError
 # mflux rotates an input image before encoding it, so a box measured against the
 # unrotated bytes would be applied in a different frame to the one it was chosen in.
 # The worker sees what this reports, and the mask is built against the same numbers.
-from mfluxible.engine import _oriented
+from mfluxible.imaging import oriented
 from mfluxible.vlm_reply import clean_payload
 
-log = logging.getLogger("mfluxible.regions")
+log = logging.getLogger("mfluxible.vlm")
 
 # Pillow's own guard against a decompression bomb is a warning, not a refusal, and
 # the thing being protected here is a file written to disk before anything looks at
@@ -137,20 +138,26 @@ class VlmMailbox:
             return "that doesn't decode as an image."
         return None
 
-    def submit(self, raw: bytes) -> Job:
-        """Stash `raw` and make it the pending job, superseding any other."""
+    def submit(self, raw: bytes, *, claimed: bool = False) -> Job:
+        """Stash `raw` and make it the pending job, superseding any other.
+
+        `claimed=True` is for a caller that answers the job itself (the in-process
+        backend): no worker will long-poll for it, and a timeout should say the answerer
+        took too long rather than that nothing picked the job up."""
         self._prune()
         with Image.open(io.BytesIO(raw)) as img:
             fmt = img.format
-        oriented = _oriented(raw)
-        width, height = oriented.size
+        frame = oriented(raw)
+        width, height = frame.size
 
         job_id = uuid.uuid4().hex
         path = self.dir / f"{job_id}{_suffix_for(fmt)}"
         path.write_bytes(raw)
 
         previous = self._pending
-        job = Job(id=job_id, path=path, width=width, height=height, created=time.monotonic())
+        job = Job(
+            id=job_id, path=path, width=width, height=height, created=time.monotonic(), claimed=claimed
+        )
         self._pending = job
         self._arrived.set()
 

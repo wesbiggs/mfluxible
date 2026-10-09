@@ -87,59 +87,55 @@ class ModelSpec:
         return self.default_scheduler == "linear"
 
 
-def _load_z_image(model_config_name: str):
-    def loader():
-        from mflux.models.common.config.model_config import ModelConfig
-        from mflux.models.z_image.latent_creator import ZImageLatentCreator
-        from mflux.models.z_image.variants.z_image import ZImage
+def _loader(variant: str, latent_creator: str):
+    """A `ModelSpec.load` for a variant class and latent creator named by dotted path
+    (`module.path:Name`), plus the `ModelConfig` classmethod called on it.
 
-        return ZImage, getattr(ModelConfig, model_config_name)(), ZImageLatentCreator
+    Returns a function taking the ModelConfig name, so each family is spelled once:
+    `_load_z_image = _loader(...)`, then `_load_z_image("z_image_turbo")`. The imports are
+    done by name *inside* the returned loader rather than at module scope, for the reason
+    in the module docstring -- naming a model must not import mflux's model for it.
+    """
 
-    return loader
+    def with_config(model_config_name: str):
+        def loader():
+            from importlib import import_module
 
+            from mflux.models.common.config.model_config import ModelConfig
 
-def _load_flux(model_config_name: str):
-    def loader():
-        from mflux.models.common.config.model_config import ModelConfig
-        from mflux.models.flux.latent_creator.flux_latent_creator import FluxLatentCreator
-        from mflux.models.flux.variants.txt2img.flux import Flux1
+            def resolve_name(spec: str):
+                module, name = spec.split(":")
+                return getattr(import_module(module), name)
 
-        return Flux1, getattr(ModelConfig, model_config_name)(), FluxLatentCreator
+            return (
+                resolve_name(variant),
+                getattr(ModelConfig, model_config_name)(),
+                resolve_name(latent_creator),
+            )
 
-    return loader
+        return loader
 
-
-def _load_flux2(model_config_name: str):
-    def loader():
-        from mflux.models.common.config.model_config import ModelConfig
-        from mflux.models.flux2.latent_creator.flux2_latent_creator import Flux2LatentCreator
-        from mflux.models.flux2.variants.txt2img.flux2_klein import Flux2Klein
-
-        return Flux2Klein, getattr(ModelConfig, model_config_name)(), Flux2LatentCreator
-
-    return loader
+    return with_config
 
 
-def _load_krea2(model_config_name: str):
-    def loader():
-        from mflux.models.common.config.model_config import ModelConfig
-        from mflux.models.krea2.latent_creator import Krea2LatentCreator
-        from mflux.models.krea2.variants.txt2img.krea2 import Krea2
-
-        return Krea2, getattr(ModelConfig, model_config_name)(), Krea2LatentCreator
-
-    return loader
-
-
-def _load_ernie(model_config_name: str):
-    def loader():
-        from mflux.models.common.config.model_config import ModelConfig
-        from mflux.models.ernie_image.latent_creator import ErnieLatentCreator
-        from mflux.models.ernie_image.variants.txt2img.ernie_image import ErnieImage
-
-        return ErnieImage, getattr(ModelConfig, model_config_name)(), ErnieLatentCreator
-
-    return loader
+_load_z_image = _loader(
+    "mflux.models.z_image.variants.z_image:ZImage", "mflux.models.z_image.latent_creator:ZImageLatentCreator"
+)
+_load_flux = _loader(
+    "mflux.models.flux.variants.txt2img.flux:Flux1",
+    "mflux.models.flux.latent_creator.flux_latent_creator:FluxLatentCreator",
+)
+_load_flux2 = _loader(
+    "mflux.models.flux2.variants.txt2img.flux2_klein:Flux2Klein",
+    "mflux.models.flux2.latent_creator.flux2_latent_creator:Flux2LatentCreator",
+)
+_load_krea2 = _loader(
+    "mflux.models.krea2.variants.txt2img.krea2:Krea2", "mflux.models.krea2.latent_creator:Krea2LatentCreator"
+)
+_load_ernie = _loader(
+    "mflux.models.ernie_image.variants.txt2img.ernie_image:ErnieImage",
+    "mflux.models.ernie_image.latent_creator:ErnieLatentCreator",
+)
 
 
 def _load_qwen_image():

@@ -100,3 +100,12 @@ def test_krea_2_is_the_documented_exception_on_the_cfg_floor():
         if spec.supports_negative_prompt and spec.default_guidance <= CFG_GUIDANCE_FLOOR
     }
     assert on_the_floor == {"krea-2", "krea-2-raw"}
+
+
+def test_every_spec_resolves_its_mflux_classes_without_loading_weights():
+    # load() only imports and builds a ModelConfig; weights arrive in the variant's
+    # constructor. So this runs in CI and catches a dotted path that mflux renamed.
+    for spec in MODELS:
+        variant, model_config, latent_creator = spec.load()
+        assert isinstance(variant, type) and isinstance(latent_creator, type), spec.key
+        assert model_config is not None, spec.key

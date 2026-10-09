@@ -449,12 +449,11 @@ async def vlm_describe(req: VlmRequest):
 
     # Same shape as a generation: validate fully, *then* start the stream, so a bad
     # request is a 400 rather than a 200 with an error torn into the body.
-    job = MAILBOX.submit(raw)
+    # Under the in-process backend this process is what claims the job, so say so up
+    # front: a timeout then reports "took too long" rather than "nothing claimed the
+    # job", which here would be actively misleading.
+    job = MAILBOX.submit(raw, claimed=DETECTOR is not None)
     if DETECTOR is not None:
-        # Claimed by this process. Marking it means a timeout reports "took too long"
-        # rather than "nothing claimed the job", which under this backend would be
-        # actively misleading -- the thing that claims jobs here is this line.
-        job.claimed = True
         _start_local_detection(job)
     return StreamingResponse(_vlm_sse(job), media_type="text/event-stream")
 

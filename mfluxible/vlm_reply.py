@@ -5,11 +5,12 @@ There are two now -- the in-process model in `vlm_local.py` and the subprocess i
 field, because the harness cannot tell which one served it and neither can a test.
 So the reading lives here rather than in either of them.
 
-It is a module of its own rather than a few functions in `vlm.py` for one reason:
-`vlm.py` imports `engine.py` for `_oriented`, which imports MLX. The worker is a
-subprocess whose whole point is that it needs none of that, and making it import a
-GPU framework to parse a JSON array would be a silent cost paid by the backend
-that was supposed to be the cheap one.
+It is a module of its own so that the worker -- a subprocess whose whole point is that it
+needs no GPU framework -- can parse a reply without importing the server. (It used to be
+the only reason `vlm.py` could not hold this: that module imported engine.py, and so MLX,
+for the image-orientation helper. That helper now lives in `imaging.py` and `vlm.py` no
+longer imports MLX; the split stays because the worker still must not import `vlm.py`'s
+mailbox, and because both backends reach this through one narrow door.)
 
 **The output contract is fixed, and it is the thing a backend adapts *to*.** Boxes
 are fractions of the frame from 0 to 1 with 0,0 at the top-left, x first. A backend
