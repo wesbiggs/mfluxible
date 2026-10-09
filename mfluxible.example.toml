@@ -28,6 +28,10 @@
 # Defaults under $XDG_CACHE_HOME, so it lands beside huggingface_hub's own cache.
 # model_dir = "~/.cache/mfluxible"
 
+# Directory served read-only at /mfluxible/v1/output/<name>, so the chat endpoint can link
+# an image by URL. Set it to wherever the MCP tool saves (MFLUXIBLE_MCP_SAVE_DIR).
+# output_dir = "~/Pictures/mfluxible"
+
 # LoRAs are baked in at load time, so they are a startup choice rather than a
 # per-request one. Scales must line up one-to-one with the paths.
 # lora_paths = ["/path/to/style.safetensors"]

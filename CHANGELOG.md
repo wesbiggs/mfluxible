@@ -7,6 +7,16 @@ still change in a minor release, and any such change is listed here.
 The server (`mfluxible`) and the MCP client (`mfluxible-mcp`) are released together from
 this repository and always share a version number.
 
+## Unreleased
+
+- **`GET /mfluxible/v1/output/{name}`** serves a finished image from `MFLUXIBLE_OUTPUT_DIR`
+  (default `~/Pictures/mfluxible`, the MCP tool's own save directory), read-only and by bare
+  filename only. The chat endpoint now answers a tool result with `![Image](<that url>)`
+  instead of embedding the image, because chat clients strip or flatten tool-result images
+  unreliably. Point `MFLUXIBLE_OUTPUT_DIR` at `MFLUXIBLE_MCP_SAVE_DIR` if you moved either.
+- The chat stub also follows namespaced MCP tool names and polls `check_image` for
+  generations that outlast the MCP tool's wait window.
+
 ## 0.9.2 — 2026-09-23
 
 Object detection no longer needs a sidecar. A vision model can now run inside the server

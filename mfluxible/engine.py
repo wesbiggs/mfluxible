@@ -32,7 +32,6 @@ import os
 import random
 import tempfile
 import time
-import uuid
 from pathlib import Path
 
 import mlx.core as mx
@@ -415,12 +414,6 @@ class MfluxEngine:
         self.model = None
         self._latent_creator = None
         self._lock = asyncio.Lock()
-        # The last few finished images by `image_id`, base64 PNG, for the chat stub: a
-        # chat client's tool result may arrive with the image stripped, and the stub is
-        # in this process. Two entries, not a cache -- each is megabytes held next to
-        # the weights -- and keyed by an id issued per generation rather than by seed
-        # (two runs can share one) or by a path read off disk from request data.
-        self._recent_images: dict[str, str] = {}
         # Single worker: all MLX work (load + every generate call) must run on this
         # same OS thread -- see the module docstring for why.
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx-worker")
@@ -698,10 +691,6 @@ class MfluxEngine:
             kwargs["negative_prompt"] = req.negative_prompt
         return kwargs
 
-    def recent_image(self, image_id: str) -> str | None:
-        """Base64 PNG of a recently finished generation, or None."""
-        return self._recent_images.get(image_id)
-
     async def generate_stream(self, req: GenerateRequest):
         """Yields event dicts: {"type": "start"|"thinking"|"image"|"error", ...}."""
         if self.model is None:
@@ -801,17 +790,11 @@ class MfluxEngine:
                         image.image = _composite_through_mask(
                             image.image, tmp_image_path, req.mask, req.mask_feather
                         )
-                    final_b64 = base64.b64encode(_encode_final_png_with_metadata(image)).decode("ascii")
-                    image_id = uuid.uuid4().hex
-                    self._recent_images[image_id] = final_b64
-                    while len(self._recent_images) > 2:
-                        del self._recent_images[next(iter(self._recent_images))]
                     yield {
                         "type": "image",
                         "mime_type": "image/png",
-                        "data": final_b64,
+                        "data": base64.b64encode(_encode_final_png_with_metadata(image)).decode("ascii"),
                         "seed": seed,
-                        "image_id": image_id,
                         "generation_time": image.generation_time,
                     }
                 except Exception:

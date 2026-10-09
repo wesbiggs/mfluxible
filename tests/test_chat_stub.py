@@ -199,56 +199,68 @@ def test_the_closing_reply_passes_along_the_tool_results_caption(client):
     assert resp.json()["choices"][0]["message"]["content"] == caption
 
 
-def test_the_closing_reply_embeds_the_result_image_as_markdown(client):
-    parts = [
-        {"type": "image", "data": "QUJD", "mimeType": "image/jpeg"},
-        {"type": "image_url", "image_url": {"url": "data:image/png;base64,REVG"}},
-        {"type": "image_url", "image_url": {"url": "https://example.com/x.png"}},
-        {"type": "text", "text": "caption"},
-    ]
+def test_the_closing_reply_links_an_image_the_server_serves(client, monkeypatch, tmp_path):
+    import mfluxible.server as server_module
+
+    monkeypatch.setattr(server_module, "OUTPUT_DIR", tmp_path)
+    (tmp_path / "20261001-1.png").write_bytes(b"png")
+    caption = f"seed 1, 40.0s. Full-resolution PNG saved to {tmp_path}/20261001-1.png (shown as JPEG)"
     resp = client.post(
         "/v1/chat/completions",
-        json={"model": "m", "messages": [{"role": "tool", "tool_call_id": "c", "content": parts}], "tools": []},
+        json={"model": "m", "messages": [{"role": "tool", "tool_call_id": "c", "content": caption}], "tools": []},
     )
-    assert resp.json()["choices"][0]["message"]["content"] == (
-        "![Image](data:image/jpeg;base64,QUJD)\n\n![Image](data:image/png;base64,REVG)\n\ncaption"
+    content = resp.json()["choices"][0]["message"]["content"]
+    assert content == f"![Image](http://testserver/mfluxible/v1/output/20261001-1.png)\n\n{caption}"
+    assert client.get("/mfluxible/v1/output/20261001-1.png").content == b"png"
+
+
+def test_a_caption_naming_a_file_the_server_does_not_serve_gets_no_link(client, monkeypatch, tmp_path):
+    import mfluxible.server as server_module
+
+    monkeypatch.setattr(server_module, "OUTPUT_DIR", tmp_path)
+    caption = "seed 1. Full-resolution PNG saved to /Users/me/elsewhere/a.png (x)"
+    resp = client.post(
+        "/v1/chat/completions",
+        json={"model": "m", "messages": [{"role": "tool", "tool_call_id": "c", "content": caption}], "tools": []},
     )
+    assert resp.json()["choices"][0]["message"]["content"] == caption
 
 
-ID = "ab" * 16
-
-
-def test_a_stripped_image_is_recovered_from_the_engine_by_the_captions_image_id():
-    import base64
-    import io
-
-    from PIL import Image
-
+def test_the_link_names_only_the_files_basename():
     from mfluxible.chat_stub import non_streaming_response
     from mfluxible.schemas import ChatCompletionRequest
 
-    buf = io.BytesIO()
-    Image.new("RGB", (2000, 1000), (200, 10, 10)).save(buf, "PNG")
-    png_b64 = base64.b64encode(buf.getvalue()).decode()
     seen = []
 
-    def lookup(seed):
-        seen.append(seed)
-        return png_b64 if seed == ID else None
+    def image_url(name):
+        seen.append(name)
+        return f"http://h/mfluxible/v1/output/{name}"
 
-    def reply(text):
-        req = ChatCompletionRequest(
-            model="m",
-            messages=[{"role": "tool", "tool_call_id": "c", "content": [{"type": "text", "text": text}]}],
-        )
-        return non_streaming_response(req, lookup)["choices"][0]["message"]["content"]
+    caption = "seed 1. Full-resolution PNG saved to /etc/../Users/me/Pictures/mfluxible/20261001-1.png (x)"
+    req = ChatCompletionRequest(model="m", messages=[{"role": "tool", "tool_call_id": "c", "content": caption}])
+    content = non_streaming_response(req, image_url)["choices"][0]["message"]["content"]
+    assert seen == ["20261001-1.png"]
+    assert content == f"![Image](http://h/mfluxible/v1/output/20261001-1.png)\n\n{caption}"
 
-    caption = f"Z-Image-Turbo, 768x768, 9 steps, seed 1, image_id {ID}, 40.0s. Full-resolution PNG saved to /x/y.png"
-    content = reply(caption)
-    assert content.startswith("![Image](data:image/jpeg;base64,") and content.endswith(caption)
-    jpeg = base64.b64decode(content.split("base64,")[1].split(")")[0])
-    assert max(Image.open(io.BytesIO(jpeg)).size) <= 768
 
-    # A seed the engine no longer holds degrades to the caption alone.
-    assert reply(caption.replace(ID, "0" * 32)) == caption.replace(ID, "0" * 32)
+def test_the_failure_caption_is_not_mistaken_for_a_saved_file():
+    from mfluxible.chat_stub import non_streaming_response
+    from mfluxible.schemas import ChatCompletionRequest
 
+    seen = []
+    caption = (
+        "seed 1. Full-resolution PNG could not be saved to /out "
+        "([Errno 13] Permission denied: '/out/20261001-1.png')"
+    )
+    req = ChatCompletionRequest(model="m", messages=[{"role": "tool", "tool_call_id": "c", "content": caption}])
+    content = non_streaming_response(req, lambda name: seen.append(name))["choices"][0]["message"]["content"]
+    assert seen == [] and content == caption
+
+
+def test_the_server_and_the_mcp_tool_default_to_the_same_directory():
+    # Two distributions, two settings, one directory: the chat stub links a file the MCP
+    # tool saved, so the defaults drifting apart breaks the link with no error anywhere.
+    import mfluxible.server as server_module
+    from mfluxible_mcp import server as mcp_server
+
+    assert server_module.OUTPUT_DIR == mcp_server.SAVE_DIR

@@ -90,10 +90,8 @@ data: {"type": "thinking", "step": 2, "total_steps": 9, "step_ms": 190, "elapsed
 
 ...
 
-data: {"type": "image", "mime_type": "image/png", "data": "<base64 png>", "seed": 123, "image_id": "<32 hex chars>", "generation_time": 14.2}
+data: {"type": "image", "mime_type": "image/png", "data": "<base64 png>", "seed": 123, "generation_time": 14.2}
 ```
-
-`image_id` is issued per generation (unlike `seed`, which two runs can share). The server keeps its last two finished images under it so the [chat stub](#post-v1chatcompletions) can re-attach one that a chat client stripped from a tool result; the MCP tool prints it in its caption for that purpose.
 
 The `start` event's `start_step` is the number of leading denoising steps this generation skips, and it is `0` for everything except image-to-image — so the first `thinking` event is always step `start_step + 1`, and `total_steps - start_step` steps actually run. Progress is therefore `(step - start_step) / (total_steps - start_step)`, which reduces to `step / total_steps` when nothing is skipped. `effective_image_strength` is the `image_strength` bucket the request landed in (`start_step / total_steps`), or `null` when no `image` was sent — see [Image-to-image](#image-to-image) for why the value you sent and the value that took effect aren't always the same. Both fields are display/progress information: `effective_image_strength` is the exact *lower edge* of its bucket as a fraction, but as a float it lands a hair under it, so feeding it back into a later request can floor to the next bucket down. Under [`fractional_start`](#fractional-start) there are no buckets and it reports the strength that actually took effect.
 
@@ -352,6 +350,10 @@ For frontends that discover models rather than taking a free-text name — [list
 
 Any other `id` is a 404 with OpenAI's own `model_not_found` error code, the same way `api.openai.com` responds to an unknown model.
 
+## `GET /mfluxible/v1/output/{name}`
+
+Serves one finished image from the server's output directory (`MFLUXIBLE_OUTPUT_DIR`, default `~/Pictures/mfluxible`, which is also where the MCP tool saves). Read-only, and it only ever names a file *directly* in that directory: `name` must be a bare filename with a `.png`, `.jpg`, `.jpeg` or `.webp` suffix and no leading dot, and a symlink pointing outside the directory is not followed. Anything else, including a missing file, is a `404` with the same body, so the response does not say which. It is covered by [authentication](#authentication) like every other endpoint, so a client that renders the chat endpoint's image link must be able to send the same credentials.
+
 ## `POST /v1/chat/completions`
 
 Not a chat model — a stub that exists so a frontend requiring an actual "chat model" behind its Native/agentic tool-calling mode (Open WebUI is the motivating case) can point that connection at mfluxible too, instead of running a separate LLM (Ollama, `llama-server`, ...) just to decide "yes, call the image tool" on every message. See [`mfluxible/chat_stub.py`](../mfluxible/chat_stub.py) for the full rationale; the short version is there's no reasoning to replace, so there's nothing an LLM gets right that a hardcoded rule doesn't get right for free, at zero extra memory (it's pure Python in the same process as the diffusion model — no weights, no inference).
@@ -359,7 +361,7 @@ Not a chat model — a stub that exists so a frontend requiring an actual "chat 
 It plays exactly one deterministic turn of OpenAI's function-calling protocol:
 
 - A request whose last message is a plain user turn, with a `generate_image` function offered in `tools` → responds with a `tool_calls` message invoking it, `{"prompt": "<the user's message>"}` as the arguments.
-- A request whose last message is a `tool` result (i.e. the caller already ran `generate_image` and is asking for a closing reply) → responds with the result's own content: any image parts inlined as markdown `![Image](data:image/…)` followed by its text. If the client stripped the image (skinnyai replaces it with `[image content not shown]`), the stub reads `image_id <id>` out of the caption and inlines that image from the server's last two finished generations, downscaled to a 768px JPEG so a chat history can carry it; the full-resolution file is still the one at the caption's path (for the MCP tool, the caption with model, size, seed and the saved file's path), or a short fixed acknowledgment if it has none, `finish_reason: "stop"`.
+- A request whose last message is a `tool` result (i.e. the caller already ran `generate_image` and is asking for a closing reply) → responds with the result's own text (for the MCP tool, a caption with model, size, seed and `Full-resolution PNG saved to <path>`), preceded by `![Image](<url>)` when that file is one the server serves (see [`GET /mfluxible/v1/output/{name}`](#get-mfluxiblev1outputname)). Only the file's *name* is taken from the caption; it is looked up in the server's output directory, and no link is added if it isn't there. The URL is built from the request's own host, so behind a proxy it is whatever address the client reached the server at. With no result text at all it is a short fixed acknowledgment. `finish_reason: "stop"`.
 - A request whose last message is a `tool` result saying the image is still generating (the MCP tool's `Call check_image with handle "…"` text), with a `check_image` tool also offered → responds with a `check_image` tool call carrying that handle, so a generation longer than the MCP tool's wait window is polled until the image arrives. Without `check_image` offered, it acknowledges as above.
 - A request with no `generate_image` tool offered at all → responds with fixed text explaining why (most likely cause in Open WebUI: Capabilities or Builtin Tools → Image Generation isn't enabled for this model).
 

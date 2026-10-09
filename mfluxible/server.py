@@ -12,9 +12,10 @@ import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import quote
 
 import mlx.core as mx
-from fastapi import FastAPI, File, Form, Response, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
@@ -589,15 +590,51 @@ async def openai_retrieve_model(model_id: str):
     return _openai_model_object()
 
 
+# Where finished images live, served read-only at /mfluxible/v1/output/<name>. The default
+# is the MCP tool's own save directory (MFLUXIBLE_MCP_SAVE_DIR in clients/mfluxible_mcp),
+# which is a separate setting in a separate distribution -- point the two at the same
+# place if you move either. This server writes nothing there; it only serves what is in it.
+OUTPUT_DIR = Path(os.environ.get("MFLUXIBLE_OUTPUT_DIR", "~/Pictures/mfluxible")).expanduser()
+OUTPUT_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
+
+
+def _output_file(name: str) -> Path | None:
+    """`name` inside OUTPUT_DIR if it is an image file directly in it, else None.
+
+    Names only, never paths: anything with a separator, a leading dot or a non-image
+    suffix is refused outright, and the resolved file must still sit in the directory
+    (a symlink out of it is not served). This is an unauthenticated-by-itself read of
+    the host's disk, so what it is allowed to name is kept as small as possible."""
+    if not name or name != Path(name).name or name.startswith(".") or Path(name).suffix.lower() not in OUTPUT_SUFFIXES:
+        return None
+    path = (OUTPUT_DIR / name).resolve()
+    if path.parent != OUTPUT_DIR.resolve() or not path.is_file():
+        return None
+    return path
+
+
+@app.get("/mfluxible/v1/output/{name}")
+async def output_image(name: str):
+    path = _output_file(name)
+    if path is None:
+        raise HTTPException(status_code=404, detail="no such image")
+    return FileResponse(path)
+
+
 @app.post("/v1/chat/completions")
-async def openai_chat_completions(req: ChatCompletionRequest):
+async def openai_chat_completions(req: ChatCompletionRequest, request: Request):
     # No model to validate `req.model` against the way the other endpoints do -- this
     # isn't the diffusion model responding, so there's nothing to check compatibility
     # with; see chat_stub.py for what this is actually for and why it's deliberately
     # not a real chat model.
+    base = str(request.base_url).rstrip("/")
+
+    def image_url(name: str) -> str | None:
+        return f"{base}/mfluxible/v1/output/{quote(name)}" if _output_file(name) else None
+
     if req.stream:
-        return StreamingResponse(chat_stub.stream_response_lines(req, engine.recent_image), media_type="text/event-stream")
-    return chat_stub.non_streaming_response(req, engine.recent_image)
+        return StreamingResponse(chat_stub.stream_response_lines(req, image_url), media_type="text/event-stream")
+    return chat_stub.non_streaming_response(req, image_url)
 
 
 # Not CORS, and not reachable through the CORS middleware above: Starlette only

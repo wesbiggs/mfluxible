@@ -34,6 +34,7 @@ worker is co-configured with it and runs on the same machine — see
 | `MFLUXIBLE_MODEL` | `model` | `z-image-turbo` | Which model to run — any of the fifteen in [Models](#models) |
 | `MFLUXIBLE_QUANTIZE` | `quantize` | `8` | Quantization bits; try `4` for less memory, `none` for full precision |
 | `MFLUXIBLE_MODEL_DIR` | `model_dir` | `$XDG_CACHE_HOME/mfluxible` | Where quantized weights are cached (see [Model cache](#model-cache)) |
+| `MFLUXIBLE_OUTPUT_DIR` | `output_dir` | `~/Pictures/mfluxible` | Directory of finished images served read-only at `GET /mfluxible/v1/output/<name>`; set it to the MCP tool's `MFLUXIBLE_MCP_SAVE_DIR` (see [`POST /v1/chat/completions`](api.md#post-v1chatcompletions)) |
 | `MFLUXIBLE_MLX_CACHE_LIMIT_MB` | `mlx_cache_limit_mb` | `1024` | Cap on MLX's reusable buffer cache; `none` for MLX's own default (see [Memory](#memory)) |
 | `MFLUXIBLE_MLX_WIRED_LIMIT_MB` | `mlx_wired_limit_mb` | unset | Wire this much memory so the OS cannot page the weights out (see [Memory](#memory)) |
 | `MFLUXIBLE_LORA_PATHS` | `lora_paths` | unset | Local LoRA `.safetensors` files to bake in (see [LoRAs](#loras)) |

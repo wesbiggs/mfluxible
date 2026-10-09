@@ -394,10 +394,6 @@ def _build_content(job: _Job, event: dict) -> list[TextContent | ImageContent]:
     caption = (
         f"{job.model + ', ' if job.model else ''}"
         f"{job.width}x{job.height}, {job.total_steps or job.steps} steps, seed {event['seed']}, "
-        # Absent from a server that predates it. A chat frontend that strips the image
-        # from a tool result still passes this text along, and the server's chat stub
-        # uses the id to put the image back (see chat_stub.py).
-        f"{'image_id ' + event['image_id'] + ', ' if event.get('image_id') else ''}"
         f"{event['generation_time']:.1f}s. {saved}"
     )
     if note:

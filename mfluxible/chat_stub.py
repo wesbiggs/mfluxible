@@ -26,38 +26,28 @@ that's what's needed, point the chat connection at a real model instead -- this 
 only for a connection whose sole purpose is triggering mfluxible's own image tool.
 """
 
-import base64
-import io
 import json
 import re
 import time
 import uuid
+from pathlib import PurePath
 from typing import Any, Callable
-
-from PIL import Image
 
 from mfluxible.schemas import ChatCompletionRequest, ChatMessage
 
 GENERATE_IMAGE_TOOL_NAME = "generate_image"
 CHECK_IMAGE_TOOL_NAME = "check_image"
 
+# The MCP tool's caption ends "... PNG saved to <path>". Only the file's *name* is taken
+# from it -- the server looks that up in its own output directory (server.py), so a
+# caption naming /etc/passwd yields a name that isn't there rather than a read. Anchored
+# on "PNG saved to" so the failure caption ("PNG could not be saved to <dir> (...)")
+# is not mistaken for a success.
+_SAVED_AS = re.compile(r"PNG saved to (.+?\.(?:png|jpe?g|webp))", re.I | re.S)
+
 # The MCP tool's "still generating" text (clients/mfluxible_mcp/server.py, `_result`)
 # is the only channel a handle travels on, so this is a coupling to that sentence's
 # wording -- pinned by a test that builds the text from the real format.
-_IMAGE_ID = re.compile(r"\bimage_id ([0-9a-f]{32})\b")
-EMBED_MAX_SIDE = 768  # a chat transcript carries this every turn; the file on disk is full size
-
-
-def _embeddable(png_b64: str) -> str:
-    """A downscaled JPEG data URL of `png_b64`, small enough to live in a chat history."""
-    with Image.open(io.BytesIO(base64.b64decode(png_b64))) as im:
-        im = im.convert("RGB")
-        im.thumbnail((EMBED_MAX_SIDE, EMBED_MAX_SIDE))
-        out = io.BytesIO()
-        im.save(out, "JPEG", quality=85)
-    return "data:image/jpeg;base64," + base64.b64encode(out.getvalue()).decode("ascii")
-
-
 _PENDING_HANDLE = re.compile(r'Still generating.*?check_image with handle "([^"]+)"', re.S)
 
 _NO_TOOL_OFFERED_TEXT = (
@@ -76,28 +66,6 @@ def _extract_text(content: str | list[Any] | None) -> str:
             part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"
         )
     return ""
-
-
-def _extract_image_urls(content: str | list[Any] | None) -> list[str]:
-    """`data:` URLs for any images in a tool result's content parts.
-
-    Two shapes, because the result has been through whatever the caller does to an MCP
-    `ImageContent`: OpenAI's `image_url` part (a url, or {"url": ...}), and MCP's own
-    `image` part (base64 `data` plus `mimeType`/`mime_type`). Only `data:` URLs are
-    passed through -- a remote URL in a tool result is not something to echo back."""
-    urls: list[str] = []
-    for part in content if isinstance(content, list) else []:
-        if not isinstance(part, dict):
-            continue
-        if part.get("type") == "image_url":
-            ref = part.get("image_url")
-            url = ref.get("url") if isinstance(ref, dict) else ref
-            if isinstance(url, str) and url.startswith("data:image/"):
-                urls.append(url)
-        elif part.get("type") == "image" and isinstance(part.get("data"), str):
-            mime = part.get("mimeType") or part.get("mime_type") or "image/png"
-            urls.append(f"data:{mime};base64,{part['data']}")
-    return urls
 
 
 def _find_offered_tool_name(tools: list[dict[str, Any]] | None, wanted: str) -> str | None:
@@ -133,7 +101,7 @@ def _tool_call_message(name: str, arguments: dict[str, Any]) -> dict:
 
 
 def build_response_message(
-    req: ChatCompletionRequest, image_lookup: Callable[[str], str | None] | None = None
+    req: ChatCompletionRequest, image_url: Callable[[str], str | None] | None = None
 ) -> tuple[dict, str]:
     """Returns (message, finish_reason): a tool call inviting the caller to run
     generate_image with the last user message as its prompt, or a plain closing reply
@@ -150,21 +118,13 @@ def build_response_message(
         check_name = _find_offered_tool_name(req.tools, CHECK_IMAGE_TOOL_NAME) if match else None
         if match and check_name:
             return _tool_call_message(check_name, {"handle": match.group(1)}), "tool_calls"
-        # Inline any image the result carried as markdown, then the MCP tool's caption
-        # (where the file went). A client that doesn't render markdown images shows the
-        # data URL as text, and one whose tool results are text-only never sends the
-        # image at all, in which case the caption alone is what's left.
+        # Link the saved image as markdown, then the MCP tool's caption. The image
+        # itself reaches a chat client unreliably (stripped, or flattened into text as
+        # base64), whereas the file it was saved to is served by this server.
         result_text = _extract_text(last.content).strip()
-        urls = _extract_image_urls(last.content)
-        if not urls and image_lookup is not None:
-            # skinnyai, for one, swaps the image for "[image content not shown]" before
-            # the result reaches here. The caption still carries the `image_id` the
-            # server issued, and the server still holds that image.
-            found = _IMAGE_ID.search(result_text)
-            png = image_lookup(found.group(1)) if found else None
-            urls = [_embeddable(png)] if png else []
-        images = [f"![Image]({url})" for url in urls]
-        reply = "\n\n".join([*images, result_text] if result_text else images)
+        saved = _SAVED_AS.search(result_text)
+        url = image_url(PurePath(saved.group(1).strip()).name) if saved and image_url is not None else None
+        reply = "\n\n".join(part for part in (f"![Image]({url})" if url else "", result_text) if part)
         return {"role": "assistant", "content": reply or _ACK_TEXT}, "stop"
 
     tool_name = _find_offered_tool_name(req.tools, GENERATE_IMAGE_TOOL_NAME)
@@ -179,8 +139,8 @@ def _completion_id() -> str:
     return f"chatcmpl-mfluxible-{uuid.uuid4().hex[:24]}"
 
 
-def non_streaming_response(req: ChatCompletionRequest, image_lookup=None) -> dict:
-    message, finish_reason = build_response_message(req, image_lookup)
+def non_streaming_response(req: ChatCompletionRequest, image_url=None) -> dict:
+    message, finish_reason = build_response_message(req, image_url)
     return {
         "id": _completion_id(),
         "object": "chat.completion",
@@ -190,11 +150,11 @@ def non_streaming_response(req: ChatCompletionRequest, image_lookup=None) -> dic
     }
 
 
-def stream_response_lines(req: ChatCompletionRequest, image_lookup=None):
+def stream_response_lines(req: ChatCompletionRequest, image_url=None):
     """Yields complete `data: ...\\n\\n` SSE lines for a streaming chat completion. Not
     async -- there's no I/O here, the whole response is computed up front rather than
     produced token by token."""
-    message, finish_reason = build_response_message(req, image_lookup)
+    message, finish_reason = build_response_message(req, image_url)
     cid = _completion_id()
     created = int(time.time())
 

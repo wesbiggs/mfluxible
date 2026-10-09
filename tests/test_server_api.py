@@ -632,3 +632,21 @@ def test_a_mismatched_mask_is_a_400_before_the_stream_starts(client):
     )
     assert resp.status_code == 400
     assert "same size" in resp.json()["message"]
+
+
+def test_output_serves_images_from_the_output_dir_and_nothing_else(client, monkeypatch, tmp_path):
+    import mfluxible.server as server_module
+
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "a.png").write_bytes(b"png")
+    (out / "notes.txt").write_text("secret")
+    (out / ".hidden.png").write_bytes(b"x")
+    (tmp_path / "outside.png").write_bytes(b"x")
+    (out / "link.png").symlink_to(tmp_path / "outside.png")
+    monkeypatch.setattr(server_module, "OUTPUT_DIR", out)
+
+    ok = client.get("/mfluxible/v1/output/a.png")
+    assert ok.status_code == 200 and ok.content == b"png" and ok.headers["content-type"] == "image/png"
+    for name in ["notes.txt", ".hidden.png", "link.png", "missing.png", "..%2Foutside.png", "%2e%2e/outside.png"]:
+        assert client.get(f"/mfluxible/v1/output/{name}").status_code == 404, name
