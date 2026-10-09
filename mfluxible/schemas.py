@@ -2,13 +2,25 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+# Ceilings, not recommendations. Nothing else bounds a request: a single one naming
+# 65536x65536 would take the one generation lock and the machine's memory with it, and
+# the other numeric fields below are handed to mflux and Pillow as they arrive. Generous
+# enough that no real use hits them (the largest model here is trained near 2048px).
+MIN_SIDE = 16  # mflux floors both sides to a multiple of 16, so less than this is 0
+MAX_SIDE = 4096
+MAX_STEPS = 200
+MAX_PREVIEW_EVERY = MAX_STEPS
+MAX_MASK_FEATHER = 256
+
 
 class GenerateRequest(BaseModel):
     prompt: str
-    width: int = 1024
-    height: int = 1024
+    width: int = Field(default=1024, ge=MIN_SIDE, le=MAX_SIDE)
+    height: int = Field(default=1024, ge=MIN_SIDE, le=MAX_SIDE)
     steps: int | None = Field(
         default=None,
+        ge=1,
+        le=MAX_STEPS,
         description="Denoising steps. Defaults to the configured model's own default (see /health).",
     )
     seed: int | None = None
@@ -29,6 +41,8 @@ class GenerateRequest(BaseModel):
     )
     preview_every: int = Field(
         default=0,
+        ge=0,
+        le=MAX_PREVIEW_EVERY,
         description="Decode and include an in-progress preview image every N steps. 0 disables previews.",
     )
     stream: bool = True
@@ -74,6 +88,7 @@ class GenerateRequest(BaseModel):
     mask_feather: int = Field(
         default=0,
         ge=0,
+        le=MAX_MASK_FEATHER,
         description=(
             "Gaussian blur radius, in input-image pixels, applied to `mask` before it is "
             "used. Its job is to hide the latent grid's 8-pixel staircase along a mask "
@@ -199,9 +214,9 @@ class A1111Txt2ImgRequest(BaseModel):
 
     prompt: str = ""
     negative_prompt: str | None = None
-    width: int = 512
-    height: int = 512
-    steps: int | None = None
+    width: int = Field(default=512, ge=MIN_SIDE, le=MAX_SIDE)
+    height: int = Field(default=512, ge=MIN_SIDE, le=MAX_SIDE)
+    steps: int | None = Field(default=None, ge=1, le=MAX_STEPS)
     cfg_scale: float | None = None
     # A1111 spells "random" as -1 here, where GenerateRequest spells it None; the
     # endpoint maps between them rather than passing -1 through as a literal seed.

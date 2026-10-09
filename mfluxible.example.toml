@@ -32,6 +32,9 @@
 # an image by URL. Set it to wherever the MCP tool saves (MFLUXIBLE_MCP_SAVE_DIR).
 # output_dir = "~/Pictures/mfluxible"
 
+# Largest request body accepted, in MB (default 64). 0 or "none" turns the limit off.
+# max_body_mb = 64
+
 # LoRAs are baked in at load time, so they are a startup choice rather than a
 # per-request one. Scales must line up one-to-one with the paths.
 # lora_paths = ["/path/to/style.safetensors"]

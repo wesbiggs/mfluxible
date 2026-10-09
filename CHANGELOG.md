@@ -17,6 +17,15 @@ this repository and always share a version number.
 - The chat stub also follows namespaced MCP tool names and polls `check_image` for
   generations that outlast the MCP tool's wait window.
 
+- **Requests are bounded.** `width`/`height` must be 16–4096, `steps` 1–200,
+  `preview_every` 0–200 and `mask_feather` 0–256 (a `422`; an out-of-range OpenAI `size` is
+  a `400`), and a request body over `MFLUXIBLE_MAX_BODY_MB` (default 64) gets a `413`.
+  Previously a single request could name a 65536px image, or send an arbitrarily large
+  body, while holding the one generation lock.
+- Object-detection stash pruning now deletes only the files the server wrote; it used to
+  remove anything over an hour old in `MFLUXIBLE_VLM_DIR`.
+- A numeric setting that doesn't parse now names the variable in the error.
+
 ## 0.9.2 — 2026-09-23
 
 Object detection no longer needs a sidecar. A vision model can now run inside the server

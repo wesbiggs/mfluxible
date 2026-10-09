@@ -57,6 +57,7 @@ KNOWN = frozenset(
         "quantize",
         "model_dir",
         "output_dir",
+        "max_body_mb",
         "lora_paths",
         "lora_scales",
         "mlx_cache_limit_mb",

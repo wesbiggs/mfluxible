@@ -5,6 +5,7 @@ import base64
 import io
 import json
 
+import pytest
 from PIL import Image
 
 from mfluxible.models import MODELS
@@ -650,3 +651,47 @@ def test_output_serves_images_from_the_output_dir_and_nothing_else(client, monke
     assert ok.status_code == 200 and ok.content == b"png" and ok.headers["content-type"] == "image/png"
     for name in ["notes.txt", ".hidden.png", "link.png", "missing.png", "..%2Foutside.png", "%2e%2e/outside.png"]:
         assert client.get(f"/mfluxible/v1/output/{name}").status_code == 404, name
+
+
+# --- request ceilings --------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("width", 65536), ("height", 4097), ("width", 0), ("steps", 0), ("steps", 10_000),
+     ("preview_every", -1), ("mask_feather", 100_000)],
+)
+def test_out_of_range_numbers_are_refused_before_any_work(client, field, value):
+    resp = client.post("/mfluxible/v1/images/generations", json={"prompt": "x", "stream": False, field: value})
+    assert resp.status_code == 422, (field, value)
+
+
+def test_an_out_of_range_openai_size_is_a_400_not_a_crash(client):
+    for size in ("65536x65536", "0x0", "1024x4097"):
+        resp = client.post("/v1/images/generations", json={"prompt": "x", "model": "toy", "size": size})
+        assert resp.status_code == 400, size
+
+
+def test_an_oversized_body_is_refused_with_a_413(client, monkeypatch):
+    import mfluxible.server as server_module
+
+    monkeypatch.setattr(server_module, "MAX_BODY_BYTES", 1000)
+    resp = client.post("/mfluxible/v1/images/generations", json={"prompt": "x" * 5000})
+    assert resp.status_code == 413
+    assert resp.json()["error"]["code"] == "request_too_large"
+    # And a chunked body, which declares no length, is counted as it is read.
+    resp = client.post(
+        "/mfluxible/v1/images/generations",
+        content=iter([b'{"prompt": "', b"x" * 5000, b'"}']),
+        headers={"content-type": "application/json"},
+    )
+    assert resp.status_code == 413
+
+
+def test_the_body_limit_is_checked_after_authentication(client, monkeypatch):
+    import mfluxible.server as server_module
+
+    monkeypatch.setattr(server_module, "MAX_BODY_BYTES", 10)
+    monkeypatch.setattr(server_module, "BASIC_AUTH", ("u", "p"))
+    resp = client.post("/mfluxible/v1/images/generations", json={"prompt": "x" * 100})
+    assert resp.status_code == 401

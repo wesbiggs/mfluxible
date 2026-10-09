@@ -23,10 +23,13 @@ from mfluxible import __version__, chat_stub
 from mfluxible.auth import BasicAuthMiddleware, credentials_from_env, resolve_bind_host, startup_warning
 from mfluxible.config import as_float, as_int
 from mfluxible.engine import MfluxEngine
+from mfluxible.limits import BodyLimitMiddleware, max_body_bytes_from_env
 from mfluxible.models import CFG_GUIDANCE_FLOOR, MODELS
 from mfluxible.schemas import (
     A1111Txt2ImgRequest,
     ChatCompletionRequest,
+    MAX_SIDE,
+    MIN_SIDE,
     GenerateRequest,
     OpenAIImageGenerationRequest,
     VlmRequest,
@@ -57,6 +60,8 @@ if LORA_PATHS and _raw_lora_scales:
         )
 else:
     LORA_SCALES = None
+
+MAX_BODY_BYTES = max_body_bytes_from_env()
 
 # (username, password) or None. Read once at import like every other setting here;
 # the middleware reads it back through a callable so the tests can swap it.
@@ -143,6 +148,10 @@ CORS_ORIGINS = [o.strip() for o in _raw_cors_origins.split(",") if o.strip()]
 # auth ever sees it, which it has to, because a preflight carries no credentials
 # by spec and a 401 there would make every cross-origin call fail with no way for
 # the page to send them. Pinned by test_cors_preflight_is_answered_without_credentials.
+# Innermost of the three: an unauthenticated caller is refused before this reads a byte.
+# Read through a callable for the same reason auth's credentials are.
+app.add_middleware(BodyLimitMiddleware, limit=lambda: MAX_BODY_BYTES)
+
 app.add_middleware(BasicAuthMiddleware, credentials=lambda: BASIC_AUTH)
 
 app.add_middleware(
@@ -512,13 +521,20 @@ def _parse_openai_size(size: str) -> tuple[int, int] | None:
     if size.strip().lower() == "auto":
         return 1024, 1024
     parts = size.lower().split("x")
-    if len(parts) != 2 or not all(p.isdigit() for p in parts):
+    if len(parts) != 2 or not all(p.isascii() and p.isdigit() for p in parts):
         return None
-    return int(parts[0]), int(parts[1])
+    width, height = int(parts[0]), int(parts[1])
+    # Out of range is "not a shape this understands" too: GenerateRequest would refuse it,
+    # and constructing one from an unchecked size would raise instead of returning a 400.
+    if not (MIN_SIDE <= width <= MAX_SIDE and MIN_SIDE <= height <= MAX_SIDE):
+        return None
+    return width, height
 
 
 def _bad_size_error(size: str) -> JSONResponse:
-    return _openai_error(400, f"size must look like '1024x1024', got {size!r}")
+    return _openai_error(
+        400, f"size must look like '1024x1024' with each side {MIN_SIDE}-{MAX_SIDE}, got {size!r}"
+    )
 
 
 def _preview_every_from_partial_images(partial_images: int) -> int:

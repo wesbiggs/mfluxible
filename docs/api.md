@@ -62,18 +62,18 @@ mfluxible's own, native endpoint — everything below (step-by-step `thinking` e
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `prompt` | string | required | |
-| `width` | int | 1024 | should be divisible by 16 — mflux floors it to a multiple of 16 rather than rejecting it, so anything else generates up to 15px smaller than asked |
+| `width` | int | 1024 | 16–4096. Should be divisible by 16 — mflux floors it to a multiple of 16 rather than rejecting it, so anything else generates up to 15px smaller than asked |
 | `height` | int | 1024 | same as `width` |
-| `steps` | int or null | the model's own default | 9 for Z-Image-Turbo, 4 for FLUX.1-schnell, 25 for FLUX.1-dev, 20 for Qwen-Image; see `default_steps` on [`/health`](#get-health) |
+| `steps` | int or null | the model's own default | 1–200. 9 for Z-Image-Turbo, 4 for FLUX.1-schnell, 25 for FLUX.1-dev, 20 for Qwen-Image; see `default_steps` on [`/health`](#get-health) |
 | `seed` | int or null | random | echoed back in the response so a run can be reproduced |
 | `guidance` | float or null | the model's own default | only on models that use guidance (3.5 for FLUX.1-dev and Qwen-Image). A **400** on guidance-distilled models rather than a silently ignored field — see [Models](server.md#models) |
 | `negative_prompt` | string or null | unset | Qwen-Image only; a **400** elsewhere, for the same reason |
-| `preview_every` | int | 0 | decode and stream an in-progress preview every N steps; 0 disables previews. Each preview is a full VAE decode, so this trades speed for visibility |
+| `preview_every` | int | 0 | decode and stream an in-progress preview every N steps; 0–200; 0 disables previews. Each preview is a full VAE decode, so this trades speed for visibility |
 | `stream` | bool | true | SSE stream vs a single JSON response |
 | `image` | string or null | unset | base64-encoded input image (no `data:` URI prefix) for image-to-image. Accepted by every model this server can run — see [Image-to-image](#image-to-image) below |
 | `image_strength` | float or null | `0.4` with `image`; `0.0` with `image` **and** `mask` | how strongly `image` constrains the output, `0.0`–`1.0`; only meaningful, and only accepted, alongside `image` — a **400** if set without it. The masked default differs because the field governs something else there; see [Inpainting a region](#inpainting-a-region) |
 | `mask` | string or null | unset | base64-encoded mask image (no `data:` URI prefix) selecting the region to regenerate — **white = change this, black = keep this**, greys crossfade. Must be the same pixel dimensions as `image`, and only accepted alongside it. Only on a model whose own scheduler is linear (`supports_mask` on [`/health`](#get-health)) — a **400** otherwise. See [Inpainting a region](#inpainting-a-region) |
-| `mask_feather` | int | 0 | Gaussian blur radius applied to `mask`, in base-image pixels, to hide the latent grid's 8px staircase along the mask edge. Useful range is 8–16; it is **not** a region blend — see below. A **400** without `mask` |
+| `mask_feather` | int | 0 | Gaussian blur radius (0–256) applied to `mask`, in base-image pixels, to hide the latent grid's 8px staircase along the mask edge. Useful range is 8–16; it is **not** a region blend — see below. A **400** without `mask` |
 | `mask_composite` | bool | `true` | paste the result back over the input through `mask`, so the pixels outside it are byte-identical to what was sent. A **400** without `mask` |
 | `fractional_start` | bool | `false` | start image-to-image *between* two steps of the sigma schedule instead of flooring to one, making `image_strength` continuous at no extra compute; only accepted alongside `image`, and only on a model that runs mflux's linear schedule (`supports_fractional_start` on [`/health`](#get-health)) — a **400** otherwise. See [Fractional start](#fractional-start) |
 
