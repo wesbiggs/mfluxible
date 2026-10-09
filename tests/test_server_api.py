@@ -333,12 +333,12 @@ _LEAKY_MESSAGE = "No such file: '/Users/someone/.cache/huggingface/hub/models--x
 
 
 def _make_generation_fail(client):
-    import mfluxible.server as server_module
+    import mfluxible.runtime as runtime_module
 
     def boom(*_args, **_kwargs):
         raise FileNotFoundError(_LEAKY_MESSAGE)
 
-    server_module.engine.model.generate_image = boom
+    runtime_module.engine.model.generate_image = boom
 
 
 def test_generate_failure_is_a_500_that_does_not_quote_the_exception(client):
@@ -506,7 +506,8 @@ def test_a1111_shim_never_builds_a_request_its_own_model_rejects(monkeypatch):
     No weights are touched: MfluxEngine resolves its spec in __init__ and downloads
     nothing until load().
     """
-    import mfluxible.server as server_module
+    import mfluxible.runtime as runtime_module
+    from mfluxible.routes import a1111 as a1111_routes
     from mfluxible.engine import MfluxEngine
     from mfluxible.schemas import A1111Txt2ImgRequest
 
@@ -516,7 +517,7 @@ def test_a1111_shim_never_builds_a_request_its_own_model_rejects(monkeypatch):
     # the field omitted entirely so the model's own default applies.
     for spec in MODELS:
         engine = MfluxEngine(model=spec.key, quantize=None, model_cache_dir=None)
-        monkeypatch.setattr(server_module, "engine", engine)
+        monkeypatch.setattr(runtime_module, "engine", engine)
         try:
             for cfg_scale in (7.0, 1.0, None):
                 req = A1111Txt2ImgRequest(
@@ -526,7 +527,7 @@ def test_a1111_shim_never_builds_a_request_its_own_model_rejects(monkeypatch):
                     steps=20,
                     seed=-1,
                 )
-                gen_req = server_module._a1111_to_generate_request(req)
+                gen_req = a1111_routes._a1111_to_generate_request(req)
                 problem = engine.request_problem(gen_req)
                 assert problem is None, f"{spec.key} (cfg_scale={cfg_scale}): {problem}"
         finally:
@@ -636,7 +637,7 @@ def test_a_mismatched_mask_is_a_400_before_the_stream_starts(client):
 
 
 def test_output_serves_images_from_the_output_dir_and_nothing_else(client, monkeypatch, tmp_path):
-    import mfluxible.server as server_module
+    import mfluxible.runtime as runtime_module
 
     out = tmp_path / "out"
     out.mkdir()
@@ -645,7 +646,7 @@ def test_output_serves_images_from_the_output_dir_and_nothing_else(client, monke
     (out / ".hidden.png").write_bytes(b"x")
     (tmp_path / "outside.png").write_bytes(b"x")
     (out / "link.png").symlink_to(tmp_path / "outside.png")
-    monkeypatch.setattr(server_module, "OUTPUT_DIR", out)
+    monkeypatch.setattr(runtime_module, "OUTPUT_DIR", out)
 
     ok = client.get("/mfluxible/v1/output/a.png")
     assert ok.status_code == 200 and ok.content == b"png" and ok.headers["content-type"] == "image/png"
@@ -673,9 +674,9 @@ def test_an_out_of_range_openai_size_is_a_400_not_a_crash(client):
 
 
 def test_an_oversized_body_is_refused_with_a_413(client, monkeypatch):
-    import mfluxible.server as server_module
+    import mfluxible.runtime as runtime_module
 
-    monkeypatch.setattr(server_module, "MAX_BODY_BYTES", 1000)
+    monkeypatch.setattr(runtime_module, "MAX_BODY_BYTES", 1000)
     resp = client.post("/mfluxible/v1/images/generations", json={"prompt": "x" * 5000})
     assert resp.status_code == 413
     assert resp.json()["error"]["code"] == "request_too_large"
@@ -689,9 +690,9 @@ def test_an_oversized_body_is_refused_with_a_413(client, monkeypatch):
 
 
 def test_the_body_limit_is_checked_after_authentication(client, monkeypatch):
-    import mfluxible.server as server_module
+    import mfluxible.runtime as runtime_module
 
-    monkeypatch.setattr(server_module, "MAX_BODY_BYTES", 10)
-    monkeypatch.setattr(server_module, "BASIC_AUTH", ("u", "p"))
+    monkeypatch.setattr(runtime_module, "MAX_BODY_BYTES", 10)
+    monkeypatch.setattr(runtime_module, "BASIC_AUTH", ("u", "p"))
     resp = client.post("/mfluxible/v1/images/generations", json={"prompt": "x" * 100})
     assert resp.status_code == 401

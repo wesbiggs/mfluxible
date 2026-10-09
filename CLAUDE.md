@@ -2,7 +2,7 @@
 
 ## Layout
 
-`mfluxible/` (server.py, engine.py, models.py, schemas.py, chat_stub.py, schedulers.py,
+`mfluxible/` (server.py + routes/ + runtime.py, engine.py, imaging.py, limits.py, models.py, schemas.py, chat_stub.py, schedulers.py,
 auth.py, vlm.py, vlm_local.py, vlm_reply.py, vlm_worker.py, config.py, cli.py) is the model + HTTP API, and is the
 package published as **`mfluxible`**. `clients/` (stream_client.py, stream_client.js,
 harness.html, mfluxible_mcp/, requirements.txt) is everything that *consumes* it over
@@ -97,7 +97,7 @@ the only conversions are the ones TOML forces (bool -> `"true"`/`"false"`, list 
 comma-joined, which is what `lora_paths` already took).
 
 **`apply()` runs in `mfluxible/__init__.py`, and it has to.** Every setting here is read
-at module import (`MODEL` in server.py, `MLX_CACHE_LIMIT_BYTES` in engine.py), so a file
+at module import (`MODEL` in runtime.py, `MLX_CACHE_LIMIT_BYTES` in engine.py), so a file
 loaded any later would be read after the values it sets had already been decided. Putting
 it in the package rather than in `cli.py` is what makes `mfluxible-server` and
 `uvicorn mfluxible.server:app` behave identically. The cost is one real piece of

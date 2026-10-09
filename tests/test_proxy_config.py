@@ -33,13 +33,30 @@ def _matches(pattern: str, path: str) -> bool:
 
 
 def _app_routes():
+    """(path, {METHODS}) for everything the app serves, read from its OpenAPI schema.
+
+    Not from `app.routes`: with routers included, newer FastAPI exposes an opaque wrapper
+    there with no `.path` or `.methods`, and a loop that skipped anything without them
+    would see no routes at all -- turning the "no POST is public" check below into a test
+    that cannot fail. The schema is the stable public view of the same thing, and the
+    guard on the result is what makes an empty answer loud.
+    """
     import mfluxible.server as server_module
 
-    return [
-        (route.path, methods)
-        for route in server_module.app.routes
-        if (methods := getattr(route, "methods", None))
+    routes = [
+        (path, {method.upper() for method in operations})
+        for path, operations in server_module.app.openapi()["paths"].items()
     ]
+    # FastAPI's own documentation routes serve but are not in the schema they describe.
+    app = server_module.app
+    for builtin in (app.docs_url, app.redoc_url, app.openapi_url, app.swagger_ui_oauth2_redirect_url):
+        if builtin:
+            routes.append((builtin, {"GET"}))
+    assert ("/mfluxible/v1/images/generations", {"POST"}) in routes, (
+        "the route list does not contain the generation endpoint; this helper has stopped "
+        "seeing the app's routes, and every check built on it would pass vacuously"
+    )
+    return routes
 
 
 def test_every_public_path_is_a_route_the_server_actually_serves():

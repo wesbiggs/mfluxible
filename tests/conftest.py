@@ -41,16 +41,16 @@ async def toy_engine():
 
 @pytest.fixture
 def client(monkeypatch):
-    """A TestClient for the real FastAPI app, with its module-level `engine` swapped
-    for a toy one before the ASGI lifespan's startup (engine.load()) runs. server.py
-    looks up `engine` from its own module globals each time lifespan()/generate() run,
-    so swapping the attribute is all it takes -- no dependency-injection wiring needed
-    in server.py itself."""
+    """A TestClient for the real FastAPI app, with its `engine` in mfluxible/runtime.py
+    swapped for a toy one before the ASGI lifespan's startup (engine.load()) runs. The
+    routes read it as `runtime.engine` at call time, so swapping the attribute is all it
+    takes -- no dependency-injection wiring needed."""
+    import mfluxible.runtime as runtime_module
     import mfluxible.server as server_module
     from mfluxible.engine import MfluxEngine
 
     monkeypatch.setattr(
-        server_module,
+        runtime_module,
         "engine",
         MfluxEngine(model=TOY_MODEL_SPEC, quantize=None, model_cache_dir=None),
     )

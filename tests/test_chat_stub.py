@@ -200,9 +200,9 @@ def test_the_closing_reply_passes_along_the_tool_results_caption(client):
 
 
 def test_the_closing_reply_links_an_image_the_server_serves(client, monkeypatch, tmp_path):
-    import mfluxible.server as server_module
+    import mfluxible.runtime as runtime_module
 
-    monkeypatch.setattr(server_module, "OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(runtime_module, "OUTPUT_DIR", tmp_path)
     (tmp_path / "20261001-1.png").write_bytes(b"png")
     caption = f"seed 1, 40.0s. Full-resolution PNG saved to {tmp_path}/20261001-1.png (shown as JPEG)"
     resp = client.post(
@@ -215,9 +215,9 @@ def test_the_closing_reply_links_an_image_the_server_serves(client, monkeypatch,
 
 
 def test_a_caption_naming_a_file_the_server_does_not_serve_gets_no_link(client, monkeypatch, tmp_path):
-    import mfluxible.server as server_module
+    import mfluxible.runtime as runtime_module
 
-    monkeypatch.setattr(server_module, "OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(runtime_module, "OUTPUT_DIR", tmp_path)
     caption = "seed 1. Full-resolution PNG saved to /Users/me/elsewhere/a.png (x)"
     resp = client.post(
         "/v1/chat/completions",
@@ -260,7 +260,7 @@ def test_the_failure_caption_is_not_mistaken_for_a_saved_file():
 def test_the_server_and_the_mcp_tool_default_to_the_same_directory():
     # Two distributions, two settings, one directory: the chat stub links a file the MCP
     # tool saved, so the defaults drifting apart breaks the link with no error anywhere.
-    import mfluxible.server as server_module
+    import mfluxible.runtime as runtime_module
     from mfluxible_mcp import server as mcp_server
 
-    assert server_module.OUTPUT_DIR == mcp_server.SAVE_DIR
+    assert runtime_module.OUTPUT_DIR == mcp_server.SAVE_DIR

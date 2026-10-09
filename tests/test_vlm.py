@@ -47,20 +47,21 @@ def vlm_client(monkeypatch, mailbox):
     answer jobs that were written for a sidecar. `local_client` further down is the
     fixture for the other one.
     """
+    import mfluxible.runtime as runtime_module
     import mfluxible.server as server_module
     from mfluxible.engine import MfluxEngine
     from mfluxible.vlm import BACKEND_WORKER
 
     monkeypatch.setattr(
-        server_module,
+        runtime_module,
         "engine",
         MfluxEngine(model=TOY_MODEL_SPEC, quantize=None, model_cache_dir=None),
     )
-    monkeypatch.setattr(server_module, "MAILBOX", mailbox)
-    monkeypatch.setattr(server_module, "VLM_BACKEND", BACKEND_WORKER)
-    monkeypatch.setattr(server_module, "DETECTOR", None)
-    monkeypatch.setattr(server_module, "VLM_TIMEOUT_S", 0.25)
-    monkeypatch.setattr(server_module, "VLM_POLL_S", 0.25)
+    monkeypatch.setattr(runtime_module, "MAILBOX", mailbox)
+    monkeypatch.setattr(runtime_module, "VLM_BACKEND", BACKEND_WORKER)
+    monkeypatch.setattr(runtime_module, "DETECTOR", None)
+    monkeypatch.setattr(runtime_module, "VLM_TIMEOUT_S", 0.25)
+    monkeypatch.setattr(runtime_module, "VLM_POLL_S", 0.25)
     with TestClient(server_module.app) as test_client:
         yield test_client
 
@@ -198,7 +199,7 @@ def test_nothing_is_loaded_when_the_feature_is_off(monkeypatch, client):
     the feature on. Wiring both entry points is what makes that a failure here rather
     than a surprise in someone's cache directory.
     """
-    import mfluxible.server as server_module
+    import mfluxible.runtime as runtime_module
     from mfluxible.vlm_local import LocalDetector
 
     tripped = []
@@ -210,9 +211,9 @@ def test_nothing_is_loaded_when_the_feature_is_off(monkeypatch, client):
             return _original(self, *args, **kwargs)
 
         monkeypatch.setattr(LocalDetector, name, wired)
-    monkeypatch.setattr(server_module, "DETECTOR", LocalDetector())
+    monkeypatch.setattr(runtime_module, "DETECTOR", LocalDetector())
 
-    assert server_module.MAILBOX is None
+    assert runtime_module.MAILBOX is None
     client.post("/mfluxible/v1/vlm/describe", json={"image": _b64(_png())})
     client.get("/mfluxible/v1/vlm/next")
     client.post("/mfluxible/v1/vlm/abc", json={"regions": []})
@@ -579,21 +580,22 @@ class _StandInDetector:
 @pytest.fixture
 def local_client(monkeypatch, mailbox):
     """The app with the in-process backend selected and a stand-in for the model."""
+    import mfluxible.runtime as runtime_module
     import mfluxible.server as server_module
     from mfluxible.engine import MfluxEngine
     from mfluxible.vlm import BACKEND_LOCAL
 
     detector = _StandInDetector()
     monkeypatch.setattr(
-        server_module,
+        runtime_module,
         "engine",
         MfluxEngine(model=TOY_MODEL_SPEC, quantize=None, model_cache_dir=None),
     )
-    monkeypatch.setattr(server_module, "MAILBOX", mailbox)
-    monkeypatch.setattr(server_module, "DETECTOR", detector)
-    monkeypatch.setattr(server_module, "VLM_BACKEND", BACKEND_LOCAL)
-    monkeypatch.setattr(server_module, "VLM_TIMEOUT_S", 5.0)
-    monkeypatch.setattr(server_module, "VLM_LOAD_TIMEOUT_S", 5.0)
+    monkeypatch.setattr(runtime_module, "MAILBOX", mailbox)
+    monkeypatch.setattr(runtime_module, "DETECTOR", detector)
+    monkeypatch.setattr(runtime_module, "VLM_BACKEND", BACKEND_LOCAL)
+    monkeypatch.setattr(runtime_module, "VLM_TIMEOUT_S", 5.0)
+    monkeypatch.setattr(runtime_module, "VLM_LOAD_TIMEOUT_S", 5.0)
     with TestClient(server_module.app) as test_client:
         yield test_client, detector
 
@@ -634,11 +636,11 @@ def test_the_local_backend_reports_a_detection_failure_as_an_error_event(local_c
 def test_a_local_job_is_claimed_so_a_timeout_names_the_right_thing(local_client, monkeypatch):
     """"nothing claimed the job" is the worker backend's message and would be a lie
     here: the thing that claims jobs under this backend is the request handler."""
-    import mfluxible.server as server_module
+    import mfluxible.runtime as runtime_module
 
     client, detector = local_client
-    monkeypatch.setattr(server_module, "VLM_TIMEOUT_S", 0.2)
-    monkeypatch.setattr(server_module, "VLM_LOAD_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(runtime_module, "VLM_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(runtime_module, "VLM_LOAD_TIMEOUT_S", 0.2)
 
     def never(path):
         import time as _time
@@ -658,21 +660,21 @@ def test_a_cold_model_waits_on_the_load_timeout_rather_than_the_detection_one(
     """A first detection downloads a few gigabytes. Failing that after three minutes
     would make a slow connection look like a broken server, which is why the two
     timeouts are separate rather than one generous number."""
-    import mfluxible.server as server_module
+    import mfluxible.runtime as runtime_module
 
     client, detector = local_client
     detector.loaded = False
     waited = []
 
-    original = server_module.MAILBOX.wait
+    original = runtime_module.MAILBOX.wait
 
     async def record(job, timeout):
         waited.append(timeout)
         return await original(job, timeout)
 
-    monkeypatch.setattr(server_module.MAILBOX, "wait", record)
-    monkeypatch.setattr(server_module, "VLM_TIMEOUT_S", 1.0)
-    monkeypatch.setattr(server_module, "VLM_LOAD_TIMEOUT_S", 99.0)
+    monkeypatch.setattr(runtime_module.MAILBOX, "wait", record)
+    monkeypatch.setattr(runtime_module, "VLM_TIMEOUT_S", 1.0)
+    monkeypatch.setattr(runtime_module, "VLM_LOAD_TIMEOUT_S", 99.0)
 
     events = _events(client.post("/mfluxible/v1/vlm/describe", json={"image": _b64(_png())}))
     assert waited == [99.0]

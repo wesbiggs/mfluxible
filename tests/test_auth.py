@@ -1,6 +1,6 @@
 """Coverage for the optional HTTP Basic auth in server/auth.py.
 
-Auth is configured by a module-level `BASIC_AUTH` in server.py, read back through
+Auth is configured by a module-level `BASIC_AUTH` in runtime.py, read back through
 a callable per request, so these swap that attribute the same way conftest's
 `client` fixture swaps `engine` -- no environment juggling, and no reimport.
 """
@@ -22,9 +22,9 @@ def _header(username: str, password: str) -> dict:
 @pytest.fixture
 def auth_client(client, monkeypatch):
     """The app fixture, with auth switched on."""
-    import mfluxible.server as server_module
+    import mfluxible.runtime as runtime_module
 
-    monkeypatch.setattr(server_module, "BASIC_AUTH", CREDS)
+    monkeypatch.setattr(runtime_module, "BASIC_AUTH", CREDS)
     return client
 
 
@@ -224,15 +224,17 @@ def _boot(monkeypatch, caplog, argv, basic_auth):
 
     from fastapi.testclient import TestClient
 
+    import mfluxible.runtime as runtime_module
+
     import mfluxible.server as server_module
     from mfluxible.engine import MfluxEngine
     from tests.doubles.toy_model import TOY_MODEL_SPEC
 
     # auth.resolve_bind_host reads sys.argv at call time, so patching it here reaches it.
     monkeypatch.setattr("sys.argv", argv)
-    monkeypatch.setattr(server_module, "BASIC_AUTH", basic_auth)
+    monkeypatch.setattr(runtime_module, "BASIC_AUTH", basic_auth)
     monkeypatch.setattr(
-        server_module,
+        runtime_module,
         "engine",
         MfluxEngine(model=TOY_MODEL_SPEC, quantize=None, model_cache_dir=None),
     )
