@@ -303,8 +303,31 @@ def test_regions_round_trip_through_the_schema(vlm_client, mailbox):
         json={"regions": [{"label": "sky", "box": [0.1, 0.2, 0.8, 0.9]}], "width": 64, "height": 48},
     )
     assert resp.json()["delivered"] is True
-    assert job.result["regions"][0]["box"] == (0.1, 0.2, 0.8, 0.9)
+    assert job.result["regions"][0]["box"] == [0.1, 0.2, 0.8, 0.9]
     assert (job.result["width"], job.result["height"]) == (64, 48)
+
+
+def test_a_worker_that_skipped_the_cleaner_is_still_held_to_it(vlm_client, mailbox):
+    """The endpoint is a third way in beside the two built-in backends. Boxes outside the
+    frame, inverted boxes, extra regions and a runaway prompt are dropped or cut here."""
+    from mfluxible.vlm_reply import MAX_PROMPT_CHARS, MAX_REGIONS
+
+    job = mailbox.submit(_png())
+    good = {"label": "ok", "box": [0.1, 0.1, 0.5, 0.5]}
+    resp = vlm_client.post(
+        f"/mfluxible/v1/vlm/{job.id}",
+        json={
+            "prompt": "p" * (MAX_PROMPT_CHARS + 500),
+            "regions": [
+                {"label": "outside", "box": [0.1, 0.1, 1.5, 0.5]},
+                {"label": "inverted", "box": [0.5, 0.5, 0.1, 0.1]},
+                *[good] * (MAX_REGIONS + 5),
+            ],
+        },
+    )
+    assert resp.json()["delivered"] is True
+    assert len(job.result["prompt"]) == MAX_PROMPT_CHARS
+    assert [r["label"] for r in job.result["regions"]] == ["ok"] * MAX_REGIONS
 
 
 # --- the shared reply contract ----------------------------------------------------

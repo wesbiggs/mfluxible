@@ -47,6 +47,7 @@ from PIL import Image, UnidentifiedImageError
 # unrotated bytes would be applied in a different frame to the one it was chosen in.
 # The worker sees what this reports, and the mask is built against the same numbers.
 from mfluxible.engine import _oriented
+from mfluxible.vlm_reply import clean_payload
 
 log = logging.getLogger("mfluxible.regions")
 
@@ -198,11 +199,18 @@ class VlmMailbox:
                 self._worker_seen = time.monotonic()
 
     def complete(self, job_id: str, result: dict) -> bool:
-        """Deliver the worker's answer. False if that job is gone or already done."""
+        """Deliver the worker's answer. False if that job is gone or already done.
+
+        A result is run through vlm_reply.clean_payload here, whoever sent it. The two
+        backends clean their own replies, but this is also the body of an HTTP endpoint,
+        and a worker that skipped the cleaner (a hand-rolled one, say) would otherwise
+        hand the harness boxes outside the frame or a prompt of any length. Idempotent on
+        what the built-in backends already cleaned; an error is passed through as is.
+        """
         job = self._pending
         if job is None or job.id != job_id or job.result is not None:
             return False
-        job.result = result
+        job.result = result if result.get("error") else {**result, **clean_payload(result)}
         job.done.set()
         return True
 
