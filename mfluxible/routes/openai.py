@@ -84,6 +84,46 @@ async def _openai_sse(req: GenerateRequest, created: int):
     # the raw wire format) -- don't add one on a guess.
 
 
+def _unsupported_request(model: str, n: int, response_format: str) -> JSONResponse | None:
+    """The 400 for a request shape this server can't honour, or None. The three checks the
+    generation and edit endpoints share: one model runs per process, one image comes back
+    per call, and only base64 is hosted (see the comment above `openai_generate`)."""
+    if model != rt.engine.spec.key:
+        return _openai_error(
+            400,
+            f"model {model!r} is not loaded -- this server is running "
+            f"{rt.engine.spec.key!r} ({rt.engine.spec.label}); one model runs per process (see /health).",
+        )
+    if n != 1:
+        return _openai_error(400, "n must be 1 -- mfluxible generates one image per request.")
+    if response_format != "b64_json":
+        return _openai_error(
+            400,
+            f"response_format {response_format!r} is not supported -- only 'b64_json' is "
+            "(mfluxible does not host images for a 'url' response).",
+        )
+    return None
+
+
+async def _generate_and_respond(gen_req: GenerateRequest):
+    """Validate, then answer in OpenAI's shapes: a stream of partial/completed events, or
+    one JSON body. Shared by the generation and edit endpoints, which differ only in how
+    they build `gen_req`."""
+    problem = rt.engine.request_problem(gen_req)
+    if problem is not None:
+        return _openai_error(400, problem)
+
+    created = int(time.time())
+    if gen_req.stream:
+        return StreamingResponse(_openai_sse(gen_req, created), media_type="text/event-stream")
+
+    final = await collect_final_image(gen_req)
+    if final["type"] == "error":
+        return _openai_error(500, final["message"], error_type="api_error")
+
+    return {"created": created, "data": [{"b64_json": final["data"]}]}
+
+
 def _openai_model_object() -> dict:
     return {
         "id": rt.engine.spec.key,
@@ -147,39 +187,16 @@ async def openai_generate_options() -> Response:
 # silently approximated.
 @router.post("/v1/images/generations")
 async def openai_generate(req: OpenAIImageGenerationRequest):
-    if req.model != rt.engine.spec.key:
-        return _openai_error(
-            400,
-            f"model {req.model!r} is not loaded -- this server is running "
-            f"{rt.engine.spec.key!r} ({rt.engine.spec.label}); one model runs per process (see /health).",
-        )
-    if req.n != 1:
-        return _openai_error(400, "n must be 1 -- mfluxible generates one image per request.")
-    if req.response_format != "b64_json":
-        return _openai_error(
-            400,
-            f"response_format {req.response_format!r} is not supported -- only 'b64_json' is "
-            "(mfluxible does not host images for a 'url' response).",
-        )
+    refusal = _unsupported_request(req.model, req.n, req.response_format)
+    if refusal is not None:
+        return refusal
 
     parsed_size = _parse_openai_size(req.size)
     if parsed_size is None:
         return _bad_size_error(req.size)
     gen_req = _openai_to_generate_request(req, *parsed_size)
 
-    problem = rt.engine.request_problem(gen_req)
-    if problem is not None:
-        return _openai_error(400, problem)
-
-    created = int(time.time())
-    if gen_req.stream:
-        return StreamingResponse(_openai_sse(gen_req, created), media_type="text/event-stream")
-
-    final = await collect_final_image(gen_req)
-    if final["type"] == "error":
-        return _openai_error(500, final["message"], error_type="api_error")
-
-    return {"created": created, "data": [{"b64_json": final["data"]}]}
+    return await _generate_and_respond(gen_req)
 
 
 # A genuine OpenAI Images-Edit-API-compatible endpoint (see
@@ -215,20 +232,9 @@ async def openai_edit_image(
     partial_images: int = Form(default=0, ge=0, le=3),
     image_strength: float | None = Form(default=None),
 ):
-    if model != rt.engine.spec.key:
-        return _openai_error(
-            400,
-            f"model {model!r} is not loaded -- this server is running "
-            f"{rt.engine.spec.key!r} ({rt.engine.spec.label}); one model runs per process (see /health).",
-        )
-    if n != 1:
-        return _openai_error(400, "n must be 1 -- mfluxible generates one image per request.")
-    if response_format != "b64_json":
-        return _openai_error(
-            400,
-            f"response_format {response_format!r} is not supported -- only 'b64_json' is "
-            "(mfluxible does not host images for a 'url' response).",
-        )
+    refusal = _unsupported_request(model, n, response_format)
+    if refusal is not None:
+        return refusal
     if mask is not None:
         return _openai_error(
             400,
@@ -255,16 +261,4 @@ async def openai_edit_image(
         image_strength=image_strength,
     )
 
-    problem = rt.engine.request_problem(gen_req)
-    if problem is not None:
-        return _openai_error(400, problem)
-
-    created = int(time.time())
-    if gen_req.stream:
-        return StreamingResponse(_openai_sse(gen_req, created), media_type="text/event-stream")
-
-    final = await collect_final_image(gen_req)
-    if final["type"] == "error":
-        return _openai_error(500, final["message"], error_type="api_error")
-
-    return {"created": created, "data": [{"b64_json": final["data"]}]}
+    return await _generate_and_respond(gen_req)
