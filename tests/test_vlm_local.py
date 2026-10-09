@@ -23,7 +23,6 @@ from mfluxible.vlm_local import (
 )
 from mfluxible.vlm_reply import MAX_REGIONS, clean_payload
 
-
 # --- the prompt template -------------------------------------------------------------
 
 

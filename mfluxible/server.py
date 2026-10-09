@@ -15,7 +15,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from mfluxible import __version__, runtime as rt
+from mfluxible import __version__
+from mfluxible import runtime as rt
 from mfluxible.auth import BasicAuthMiddleware, resolve_bind_host, startup_warning
 from mfluxible.limits import BodyLimitMiddleware
 from mfluxible.routes import a1111, chat, misc, native, openai, vlm

@@ -507,8 +507,8 @@ def test_a1111_shim_never_builds_a_request_its_own_model_rejects(monkeypatch):
     nothing until load().
     """
     import mfluxible.runtime as runtime_module
-    from mfluxible.routes import a1111 as a1111_routes
     from mfluxible.engine import MfluxEngine
+    from mfluxible.routes import a1111 as a1111_routes
     from mfluxible.schemas import A1111Txt2ImgRequest
 
     # The maximal payload SillyTavern can send, across the cfg_scale values that

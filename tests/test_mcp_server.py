@@ -13,13 +13,13 @@ import base64
 import io
 
 import pytest
-from PIL import Image
-
-from mfluxible_mcp import server as mcp_server
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp_types import TextContent
+from PIL import Image
+
 from mfluxible.models import MODELS
 from mfluxible.schemas import GenerateRequest
+from mfluxible_mcp import server as mcp_server
 
 BOX = [0.385, 0.195, 0.964, 0.794]
 """The cup in a 768x768 test scene, as the tool takes it. Its pixel form (296, 150,

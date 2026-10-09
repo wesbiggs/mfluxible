@@ -225,7 +225,6 @@ def _boot(monkeypatch, caplog, argv, basic_auth):
     from fastapi.testclient import TestClient
 
     import mfluxible.runtime as runtime_module
-
     import mfluxible.server as server_module
     from mfluxible.engine import MfluxEngine
     from tests.doubles.toy_model import TOY_MODEL_SPEC

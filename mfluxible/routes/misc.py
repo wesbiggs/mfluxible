@@ -6,7 +6,8 @@ import mlx.core as mx
 from fastapi import APIRouter
 from fastapi.responses import FileResponse
 
-from mfluxible import __version__, runtime as rt
+from mfluxible import __version__
+from mfluxible import runtime as rt
 from mfluxible.models import MODELS
 
 router = APIRouter()

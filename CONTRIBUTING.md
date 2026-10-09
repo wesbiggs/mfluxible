@@ -6,6 +6,8 @@ Contributions to this project are welcome! This file is a guide for developers w
 
 No additional setup beyond what is documented in [README.md](README.md) is needed.
 
+CI also runs `ruff` (rules in `pyproject.toml`: pyflakes errors, import order, bugbear -- nothing about style). Locally: `uvx ruff check mfluxible clients tests`, and add `--fix` for the import-order findings.
+
 ### Adding a model
 
 Usually a new entry in `mfluxible/models.py` and nothing else: six of mflux's variant classes (`ZImage`, `Flux1`, `QwenImage`, `Krea2`, `ErnieImage`, `Flux2Klein`) share a constructor signature, a `generate_image()` signature and a `save_model()`, which is what keeps `mfluxible/engine.py` free of per-model branching.
@@ -20,7 +22,7 @@ A `ModelSpec` is inert data — its mflux imports are deferred into a `load()` f
 Then verify the whole table still resolves before downloading anything:
 
 ```bash
-uv run python -c "import sys; sys.path.insert(0, 'server'); from models import MODELS; [print(s.key, s.load()[0].__name__) for s in MODELS]"
+uv run python -c "from mfluxible.models import MODELS; [print(s.key, s.load()[0].__name__) for s in MODELS]"
 ```
 
 That imports every loader and every `ModelConfig` without fetching a single weight, so a typo in a config name or an import path fails in a second rather than after a multi-gigabyte download. Follow it with one real generation against the new model — the test suite cannot cover that (see [Testing](#testing) below).

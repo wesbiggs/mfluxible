@@ -6,7 +6,8 @@ from urllib.parse import quote
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
-from mfluxible import chat_stub, runtime as rt
+from mfluxible import chat_stub
+from mfluxible import runtime as rt
 from mfluxible.schemas import ChatCompletionRequest
 
 router = APIRouter()

@@ -116,3 +116,22 @@ include = [
     "/CONTRIBUTING.md",
     "/mfluxible.example.toml",
 ]
+
+# ---------------------------------------------------------------------------------
+# Lint: pyflakes-class errors, import order and bugbear, and nothing about style. The
+# codebase's comments are long on purpose (see CLAUDE.md), so E501 and formatting rules
+# stay off. B904 (raise-from) is off because several handlers raise a fresh, curated
+# message deliberately -- see the no-exception-in-a-response invariant. B008 is how
+# FastAPI declares Form()/File() parameters; B905 (zip strict) buys nothing on the
+# short fixed-length tuples zipped here.
+# ---------------------------------------------------------------------------------
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["F", "I", "B"]
+ignore = ["B904", "B008", "B905"]
+
+[tool.ruff.lint.isort]
+# mfluxible_mcp lives in clients/ and is the second distribution; tests import it by name.
+known-first-party = ["mfluxible", "mfluxible_mcp", "tests"]

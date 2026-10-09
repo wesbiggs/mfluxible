@@ -35,11 +35,10 @@ from pathlib import Path
 
 import mlx.core as mx
 import numpy as np
-from PIL import Image
-
 from mflux.models.common.latent_creator.latent_creator import LatentCreator
 from mflux.models.common.vae.vae_util import VAEUtil
 from mflux.utils.image_util import ImageUtil
+from PIL import Image
 
 from mfluxible.config import as_int, cache_home
 from mfluxible.imaging import (

@@ -18,17 +18,17 @@ import io
 import json
 import os
 import time
+import urllib.parse
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-
-import urllib.parse
 
 import httpx
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp_types import Annotations, ImageContent, TextContent
-from PIL import Image as PILImage, ImageChops, ImageDraw, ImageFilter, ImageOps
+from PIL import Image as PILImage
+from PIL import ImageChops, ImageDraw, ImageFilter, ImageOps
 
 MFLUXIBLE_URL = os.environ.get("MFLUXIBLE_URL", "http://127.0.0.1:8420/mfluxible/v1/images/generations")
 
@@ -814,10 +814,10 @@ async def preview_mask(
             # The smaller the window, the further the full-frame composition is from what
             # fits in it -- see the prompt note in generate_image's docstring.
             lines.append(
-                f"That is a small selection, which is where prompt scope starts to matter: "
-                f"prompt generate_image with the whole finished frame rather than with the "
-                f"new object alone, or it comes back several times too large and cut off at "
-                f"the mask edge."
+                "That is a small selection, which is where prompt scope starts to matter: "
+                "prompt generate_image with the whole finished frame rather than with the "
+                "new object alone, or it comes back several times too large and cut off at "
+                "the mask edge."
             )
 
     data, mime, note = _fit_result(_mask_overlay_png(image_raw, mask_raw))
