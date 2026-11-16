@@ -25,7 +25,7 @@ One server process runs one model, chosen at startup with `MFLUXIBLE_MODEL`:
 | `flux3-image-klein` | [black-forest-labs/flux-3-image-klein](https://huggingface.co/black-forest-labs/flux-3-image-klein) † | not measured | 20.3 GB | 16 | — | — | — |
 | `flux3-image-klein-base` | [black-forest-labs/flux-3-image-klein-base](https://huggingface.co/black-forest-labs/flux-3-image-klein-base) † | not measured | 20.3 GB | 50 | default 3.5 | — | — |
 | `fibo` | [briaai/FIBO](https://huggingface.co/briaai/FIBO) † | not measured | 25.5 GB | 50 | default 4.0 | — | — |
-| `iris-3b` | [speridlabs/iris-3b](https://huggingface.co/speridlabs/iris-3b) | not measured | 6.0 GB | 4 | — | — | — |
+| `iris-3b` | [speridlabs/iris-3b](https://huggingface.co/speridlabs/iris-3b) | 7.9 / not measured ‡ | 6.0 GB | 4 | — | — | — |
 | `iris-3b-base` | [speridlabs/iris-3b](https://huggingface.co/speridlabs/iris-3b) | not measured | 12.0 GB | 100 | default 3.0 | yes | — |
 | `boogu-image-turbo` | [Boogu/Boogu-Image-0.1-Turbo](https://huggingface.co/Boogu/Boogu-Image-0.1-Turbo) | not measured | 38.5 GB | 4 | — | — | — |
 | `ming-image-design` | [inclusionAI/Ming-Image-0.1-Design](https://huggingface.co/inclusionAI/Ming-Image-0.1-Design) | not measured | 52.9 GB | 12 | default 1.0 | — | — |
@@ -34,6 +34,8 @@ One server process runs one model, chosen at startup with `MFLUXIBLE_MODEL`:
 | `flux2-klein-9b-kv` | [black-forest-labs/FLUX.2-klein-9b-kv](https://huggingface.co/black-forest-labs/FLUX.2-klein-9b-kv) † | 18.5 / 9.9 GB | 34.7 GB | 4 | — | — | — |
 | `flux2-klein-base-4b` | [black-forest-labs/FLUX.2-klein-base-4B](https://huggingface.co/black-forest-labs/FLUX.2-klein-base-4B) | 8.6 / 4.6 GB | 16.0 GB | 50 | default 1.5 | — | — |
 | `flux2-klein-base-9b` | [black-forest-labs/FLUX.2-klein-base-9B](https://huggingface.co/black-forest-labs/FLUX.2-klein-base-9B) † | 18.5 / 9.9 GB | 34.7 GB | 50 | default 1.5 | — | — |
+
+‡ Measured rather than derived: 7.9 GB of active MLX memory once the weights have loaded (lazily, on the first request), 9.45 GB peak, at `MFLUXIBLE_QUANTIZE=8`. That is about 2.5× what the formula below predicts for this checkpoint, and the cause is not yet explained.
 
 † Gated on Hugging Face — needs an account, an accepted licence and a token before the weights will download. See [Gated weights](#gated-weights-and-hf_token).
 
