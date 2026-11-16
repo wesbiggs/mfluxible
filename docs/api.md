@@ -17,7 +17,7 @@ Returns:
 ```json
 {
   "status": "ok",
-  "version": "0.9.2",
+  "version": "0.9.3",
   "model_loaded": true,
   "available": ["z-image-turbo", "z-image", "flux-schnell", "flux-dev", "krea-dev", "qwen-image", "qwen-image-2.1", "qwen-image-2.1-turbo", "krea-2", "krea-2-raw", "ernie-image-turbo", "ernie-image", "flux2-klein-4b", "flux2-klein-9b", "flux2-klein-9b-kv", "flux2-klein-base-4b", "flux2-klein-base-9b", "anima-turbo", "anima-aesthetic", "anima-base", "fibo2", "flux3-image-klein", "flux3-image-klein-base", "fibo", "ming-image-design", "iris-3b", "iris-3b-base", "boogu-image-turbo"],
   "model": {
