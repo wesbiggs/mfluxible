@@ -4,38 +4,42 @@ Which checkpoints the server can run, what differs between them, and what each o
 
 One server process runs one model, chosen at startup with `MFLUXIBLE_MODEL`:
 
-| `MFLUXIBLE_MODEL` | Weights | RAM q8 / q4 | Default steps | Guidance | Negative prompt | Fractional start |
-|---|---|---|---|---|---|---|
-| `z-image-turbo` (default) | [Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | 11.0 / 5.9 GB | 9 | — | — | yes |
-| `z-image` | [Tongyi-MAI/Z-Image](https://huggingface.co/Tongyi-MAI/Z-Image) | 11.0 / 5.9 GB | 50 | default 4.0 | yes | — |
-| `flux-schnell` | [black-forest-labs/FLUX.1-schnell](https://huggingface.co/black-forest-labs/FLUX.1-schnell) † | 18.0 / 9.6 GB | 4 | — | — | yes |
-| `flux-dev` | [black-forest-labs/FLUX.1-dev](https://huggingface.co/black-forest-labs/FLUX.1-dev) † | 18.0 / 9.6 GB | 25 | default 3.5 | — | yes |
-| `krea-dev` | [black-forest-labs/FLUX.1-Krea-dev](https://huggingface.co/black-forest-labs/FLUX.1-Krea-dev) † | 18.0 / 9.6 GB | 25 | default 3.5 | — | yes |
-| `qwen-image` | [Qwen/Qwen-Image-2512](https://huggingface.co/Qwen/Qwen-Image-2512) | 30.8 / 16.4 GB | 20 | default 3.5 | yes | yes |
-| `qwen-image-2.1` | [Qwen/Qwen-Image-2.1](https://huggingface.co/Qwen/Qwen-Image-2.1) | not measured | 40 | default 1.0 | above guidance 1.0 | yes |
-| `qwen-image-2.1-turbo` | [Qwen/Qwen-Image-2.1-Turbo](https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo) | not measured | 8 | — | — | — |
-| `krea-2` | [krea/Krea-2-Turbo](https://huggingface.co/krea/Krea-2-Turbo) † | 18.8 / 10.2 GB | 8 | default 1.0 | above guidance 1.0 | — |
-| `krea-2-raw` | [krea/Krea-2-Raw](https://huggingface.co/krea/Krea-2-Raw) † | 18.8 / 10.2 GB | 25 | default 1.0 | above guidance 1.0 | — |
-| `ernie-image-turbo` | [baidu/ERNIE-Image-Turbo](https://huggingface.co/baidu/ERNIE-Image-Turbo) | 12.8 / 6.9 GB | 8 | — | — | yes |
-| `ernie-image` | [baidu/ERNIE-Image](https://huggingface.co/baidu/ERNIE-Image) | 12.8 / 6.9 GB | 50 | default 4.0 | yes | yes |
-| `anima-turbo` | [circlestone-labs/Anima](https://huggingface.co/circlestone-labs/Anima) | not measured | 10 | default 1.0 | above guidance 1.0 | — |
-| `anima-aesthetic` | [circlestone-labs/Anima](https://huggingface.co/circlestone-labs/Anima) | not measured | 30 | default 4.0 | yes | — |
-| `anima-base` | [circlestone-labs/Anima](https://huggingface.co/circlestone-labs/Anima) | not measured | 30 | default 4.0 | yes | — |
-| `fibo2` | [briaai/Fibo-2.0-dev](https://huggingface.co/briaai/Fibo-2.0-dev) † | not measured | 50 | default 5.0 | yes | — |
-| `flux3-image-klein` | [black-forest-labs/flux-3-image-klein](https://huggingface.co/black-forest-labs/flux-3-image-klein) † | not measured | 16 | — | — | — |
-| `flux3-image-klein-base` | [black-forest-labs/flux-3-image-klein-base](https://huggingface.co/black-forest-labs/flux-3-image-klein-base) † | not measured | 50 | default 3.5 | — | — |
-| `fibo` | [briaai/FIBO](https://huggingface.co/briaai/FIBO) † | not measured | 50 | default 4.0 | — | — |
-| `iris-3b` | [speridlabs/iris-3b](https://huggingface.co/speridlabs/iris-3b) | not measured | 4 | — | — | — |
-| `iris-3b-base` | [speridlabs/iris-3b](https://huggingface.co/speridlabs/iris-3b) | not measured | 100 | default 3.0 | yes | — |
-| `boogu-image-turbo` | [Boogu/Boogu-Image-0.1-Turbo](https://huggingface.co/Boogu/Boogu-Image-0.1-Turbo) | not measured | 4 | — | — | — |
-| `ming-image-design` | [inclusionAI/Ming-Image-0.1-Design](https://huggingface.co/inclusionAI/Ming-Image-0.1-Design) | not measured | 12 | default 1.0 | — | — |
-| `flux2-klein-4b` | [black-forest-labs/FLUX.2-klein-4B](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B) | 8.6 / 4.6 GB | 4 | — | — | — |
-| `flux2-klein-9b` | [black-forest-labs/FLUX.2-klein-9B](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B) † | 18.5 / 9.9 GB | 4 | — | — | — |
-| `flux2-klein-9b-kv` | [black-forest-labs/FLUX.2-klein-9b-kv](https://huggingface.co/black-forest-labs/FLUX.2-klein-9b-kv) † | 18.5 / 9.9 GB | 4 | — | — | — |
-| `flux2-klein-base-4b` | [black-forest-labs/FLUX.2-klein-base-4B](https://huggingface.co/black-forest-labs/FLUX.2-klein-base-4B) | 8.6 / 4.6 GB | 50 | default 1.5 | — | — |
-| `flux2-klein-base-9b` | [black-forest-labs/FLUX.2-klein-base-9B](https://huggingface.co/black-forest-labs/FLUX.2-klein-base-9B) † | 18.5 / 9.9 GB | 50 | default 1.5 | — | — |
+| `MFLUXIBLE_MODEL` | Weights | RAM q8 / q4 | Download | Default steps | Guidance | Negative prompt | Fractional start |
+|---|---|---|---|---|---|---|---|
+| `z-image-turbo` (default) | [Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | 11.0 / 5.9 GB | 32.8 GB | 9 | — | — | yes |
+| `z-image` | [Tongyi-MAI/Z-Image](https://huggingface.co/Tongyi-MAI/Z-Image) | 11.0 / 5.9 GB | 20.5 GB | 50 | default 4.0 | yes | — |
+| `flux-schnell` | [black-forest-labs/FLUX.1-schnell](https://huggingface.co/black-forest-labs/FLUX.1-schnell) † | 18.0 / 9.6 GB | 33.7 GB | 4 | — | — | yes |
+| `flux-dev` | [black-forest-labs/FLUX.1-dev](https://huggingface.co/black-forest-labs/FLUX.1-dev) † | 18.0 / 9.6 GB | 33.7 GB | 25 | default 3.5 | — | yes |
+| `krea-dev` | [black-forest-labs/FLUX.1-Krea-dev](https://huggingface.co/black-forest-labs/FLUX.1-Krea-dev) † | 18.0 / 9.6 GB | 33.7 GB | 25 | default 3.5 | — | yes |
+| `qwen-image` | [Qwen/Qwen-Image-2512](https://huggingface.co/Qwen/Qwen-Image-2512) | 30.8 / 16.4 GB | 57.7 GB | 20 | default 3.5 | yes | yes |
+| `qwen-image-2.1` | [Qwen/Qwen-Image-2.1](https://huggingface.co/Qwen/Qwen-Image-2.1) | not measured | 33.1 GB | 40 | default 1.0 | above guidance 1.0 | yes |
+| `qwen-image-2.1-turbo` | [Qwen/Qwen-Image-2.1-Turbo](https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo) | not measured | 32.5 GB | 8 | — | — | — |
+| `krea-2` | [krea/Krea-2-Turbo](https://huggingface.co/krea/Krea-2-Turbo) † | 18.8 / 10.2 GB | 35.7 GB | 8 | default 1.0 | above guidance 1.0 | — |
+| `krea-2-raw` | [krea/Krea-2-Raw](https://huggingface.co/krea/Krea-2-Raw) † | 18.8 / 10.2 GB | 35.7 GB | 25 | default 1.0 | above guidance 1.0 | — |
+| `ernie-image-turbo` | [baidu/ERNIE-Image-Turbo](https://huggingface.co/baidu/ERNIE-Image-Turbo) | 12.8 / 6.9 GB | 23.9 GB | 8 | — | — | yes |
+| `ernie-image` | [baidu/ERNIE-Image](https://huggingface.co/baidu/ERNIE-Image) | 12.8 / 6.9 GB | 23.9 GB | 50 | default 4.0 | yes | yes |
+| `anima-turbo` | [circlestone-labs/Anima](https://huggingface.co/circlestone-labs/Anima) | not measured | 5.6 GB | 10 | default 1.0 | above guidance 1.0 | — |
+| `anima-aesthetic` | [circlestone-labs/Anima](https://huggingface.co/circlestone-labs/Anima) | not measured | 5.6 GB | 30 | default 4.0 | yes | — |
+| `anima-base` | [circlestone-labs/Anima](https://huggingface.co/circlestone-labs/Anima) | not measured | 5.6 GB | 30 | default 4.0 | yes | — |
+| `fibo2` | [briaai/Fibo-2.0-dev](https://huggingface.co/briaai/Fibo-2.0-dev) † | not measured | 25.5 GB | 50 | default 5.0 | yes | — |
+| `flux3-image-klein` | [black-forest-labs/flux-3-image-klein](https://huggingface.co/black-forest-labs/flux-3-image-klein) † | not measured | 20.3 GB | 16 | — | — | — |
+| `flux3-image-klein-base` | [black-forest-labs/flux-3-image-klein-base](https://huggingface.co/black-forest-labs/flux-3-image-klein-base) † | not measured | 20.3 GB | 50 | default 3.5 | — | — |
+| `fibo` | [briaai/FIBO](https://huggingface.co/briaai/FIBO) † | not measured | 25.5 GB | 50 | default 4.0 | — | — |
+| `iris-3b` | [speridlabs/iris-3b](https://huggingface.co/speridlabs/iris-3b) | 7.9 / not measured ‡ | 6.0 GB | 4 | — | — | — |
+| `iris-3b-base` | [speridlabs/iris-3b](https://huggingface.co/speridlabs/iris-3b) | not measured | 12.0 GB | 100 | default 3.0 | yes | — |
+| `boogu-image-turbo` | [Boogu/Boogu-Image-0.1-Turbo](https://huggingface.co/Boogu/Boogu-Image-0.1-Turbo) | not measured | 38.5 GB | 4 | — | — | — |
+| `ming-image-design` | [inclusionAI/Ming-Image-0.1-Design](https://huggingface.co/inclusionAI/Ming-Image-0.1-Design) | not measured | 52.9 GB | 12 | default 1.0 | — | — |
+| `flux2-klein-4b` | [black-forest-labs/FLUX.2-klein-4B](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B) | 8.6 / 4.6 GB | 16.0 GB | 4 | — | — | — |
+| `flux2-klein-9b` | [black-forest-labs/FLUX.2-klein-9B](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B) † | 18.5 / 9.9 GB | 34.7 GB | 4 | — | — | — |
+| `flux2-klein-9b-kv` | [black-forest-labs/FLUX.2-klein-9b-kv](https://huggingface.co/black-forest-labs/FLUX.2-klein-9b-kv) † | 18.5 / 9.9 GB | 34.7 GB | 4 | — | — | — |
+| `flux2-klein-base-4b` | [black-forest-labs/FLUX.2-klein-base-4B](https://huggingface.co/black-forest-labs/FLUX.2-klein-base-4B) | 8.6 / 4.6 GB | 16.0 GB | 50 | default 1.5 | — | — |
+| `flux2-klein-base-9b` | [black-forest-labs/FLUX.2-klein-base-9B](https://huggingface.co/black-forest-labs/FLUX.2-klein-base-9B) † | 18.5 / 9.9 GB | 34.7 GB | 50 | default 1.5 | — | — |
+
+‡ Measured rather than derived: 7.9 GB of active MLX memory once the weights have loaded (lazily, on the first request), 9.45 GB peak, at `MFLUXIBLE_QUANTIZE=8`. That is about 2.5× what the formula below predicts for this checkpoint, and the cause is not yet explained.
 
 † Gated on Hugging Face — needs an account, an accepted licence and a token before the weights will download. See [Gated weights](#gated-weights-and-hf_token).
+
+**Download** is the size of the files mflux fetches for that checkpoint: the transformer, text encoder and VAE, plus the extra files a few models need (Ming's and Boogu's `mllm/` folder, Iris's `turbo/` file for the turbo row, and the one Anima variant's file). It is summed from the Hugging Face file tree, so it excludes the rest of the repository (assets, samples, alternate precisions). Repos get re-sharded, so treat it as approximate.
 
 **RAM q8 / q4** is the quantized weights at `MFLUXIBLE_QUANTIZE=8` (the default) and at `4`, summed across the directories mflux downloads (`transformer/`, `text_encoder*/`, `vae/`). MLX quantizes in groups of 64 weights and stores an fp16 scale and bias per group, so a weight costs `bits/8 + 0.0625` bytes, and the VAE is not quantized at all — which is why **q4 lands at ~53% of q8 rather than half**: that 0.0625 is fixed, so it is a larger share of a 4-bit weight than an 8-bit one. `none` gives full precision, roughly twice the q8 figure.
 
@@ -45,11 +49,11 @@ These are derived from each checkpoint's published parameter count rather than m
 
 Base and turbo variants of the same family share an architecture, so they share a footprint: `z-image` and `z-image-turbo` are both 6.2B parameters, as are `ernie-image` and its turbo, and the three 9B Klein checkpoints. What separates them is step count and guidance behaviour, not size.
 
-Disk costs more than RAM on the first run, and it's the download that dominates: every checkpoint here publishes bf16 weights, about 1.9× the q8 figure, *except* `z-image-turbo`, whose transformer ships fp32 — 33 GB downloaded to cache 10 GB. The quantized copy is then written separately, so peak disk is roughly 3× the q8 figure (4× for `z-image-turbo`). Once that quantized cache exists the Hugging Face download under `~/.cache/huggingface/hub/` can be deleted — it's only needed again if you change `MFLUXIBLE_QUANTIZE` or the LoRA configuration, both of which quantize afresh into their own cache directory.
+Disk costs more than RAM on the first run, and it's the download that dominates (see the Download column): every checkpoint here publishes bf16 weights, about 1.9× the q8 figure, *except* `z-image-turbo`, whose transformer ships fp32 — 33 GB downloaded to cache 10 GB. The quantized copy is then written separately, so peak disk is roughly 3× the q8 figure (4× for `z-image-turbo`). Once that quantized cache exists the Hugging Face download under `~/.cache/huggingface/hub/` can be deleted — it's only needed again if you change `MFLUXIBLE_QUANTIZE` or the LoRA configuration, both of which quantize afresh into their own cache directory.
 
 mflux's own aliases work too (`schnell`, `dev`, `qwen`, `zimage`, `klein-4b`, `krea2`, …), and an unrecognised name fails at startup with the list of valid ones — before anything is downloaded.
 
-**Only the model you select is ever fetched.** All twenty-seven are named in `mfluxible/models.py`, but an entry there is inert data: its mflux imports are deferred into a loader function that runs at load time, and mflux downloads weights inside the model's constructor, not at import. The twenty-six you aren't running cost nothing beyond their row in that table.
+**Only the model you select is ever fetched.** Every model in the table is named in `mfluxible/models.py`, but an entry there is inert data: its mflux imports are deferred into a loader function that runs at load time, and mflux downloads weights inside the model's constructor, not at import. The models you aren't running cost nothing beyond their row in that table.
 
 Switching models means restarting the server, the same way `MFLUXIBLE_QUANTIZE` and LoRAs do. Each model + quantization + LoRA combination keeps its own quantized cache directory, so switching back doesn't re-quantize.
 
@@ -66,9 +70,9 @@ All the bundled clients leave `steps` to the server unless you set it, so they f
 
 ### Gated weights and `HF_TOKEN`
 
-Twelve of the twenty-seven repos above are gated († in the table). Getting at those takes an account, an accepted licence *and* a token — the token on its own is not enough:
+Some of the repos above are gated († in the table). Getting at those takes an account, an accepted licence *and* a token — the token on its own is not enough:
 
-1. Open the model page signed in and click **Agree and access repository**. All eight are `gated: auto`, so access lands the moment you accept — there's no queue waiting on a human.
+1. Open the model page signed in and click **Agree and access repository**. All of those are `gated: auto`, so access lands the moment you accept — there's no queue waiting on a human.
 2. Create a **Read** token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens). A fine-grained token works too, but it needs *"Read access to contents of all public gated repos you can access"* ticked, or it will 401 on exactly these models.
 3. Store it once with `hf auth login` (which writes `~/.cache/huggingface/token`), or export `HF_TOKEN` in the shell that starts the server. Either way it's `huggingface_hub` that reads it, not mfluxible — which is why there's no `MFLUXIBLE_*` variable for it, and why a dedicated machine needs its own copy (see [Running on a dedicated machine](server.md#running-on-a-dedicated-machine)).
 
