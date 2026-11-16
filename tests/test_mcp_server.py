@@ -532,6 +532,7 @@ async def test_the_mcp_tool_never_builds_a_request_its_own_server_rejects(
                 "supports_negative_prompt": spec.supports_negative_prompt,
                 "supports_fractional_start": spec.supports_fractional_start,
                 "supports_mask": spec.supports_mask,
+                "supports_image": spec.supports_image,
             }
 
         monkeypatch.setattr(mcp_server, "_model_info", _health)
@@ -539,6 +540,18 @@ async def test_the_mcp_tool_never_builds_a_request_its_own_server_rejects(
         try:
             sent.clear()
             await mcp_server.generate_image(prompt="a cat")
+
+            if not spec.supports_image:
+                # Refused up front, so no body is sent for an image on this model.
+                with pytest.raises(ToolError, match="text-to-image only"):
+                    await mcp_server.generate_image(
+                        prompt="a cat", image_path=str(base_image), image_strength=0.4
+                    )
+                for body in sent:
+                    problem = engine.request_problem(GenerateRequest(**body))
+                    assert problem is None, f"{spec.key}: {problem}"
+                continue
+
             await mcp_server.generate_image(
                 prompt="a cat", image_path=str(base_image), image_strength=0.4
             )

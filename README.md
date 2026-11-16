@@ -1,6 +1,6 @@
 # mfluxible
 
-A minimal streaming HTTP API for image generation on Apple Silicon, built on [mflux](https://github.com/filipstrand/mflux). Runs most of the image models mflux supports — fifteen checkpoints across Z-Image, FLUX.1, FLUX.2 Klein, Qwen-Image, Krea-2 and ERNIE-Image — one model per server process, configured at startup (see [Models](docs/server.md#models); Z-Image-Turbo is the default).
+A minimal streaming HTTP API for image generation on Apple Silicon, built on [mflux](https://github.com/filipstrand/mflux). Runs most of the image models mflux supports — twenty-seven checkpoints across Z-Image, FLUX.1, FLUX.2 Klein, FLUX.3 Klein, Qwen-Image (2512 and 2.1), Krea-2, ERNIE-Image, Anima, FIBO and FIBO-2, Ming-Image, Iris and Boogu — one model per server process, configured at startup (see [Models](docs/models.md); Z-Image-Turbo is the default).
 
 Rather than a full node-graph tool (ComfyUI) or a proprietary format (Draw Things), this exposes a small API in the same spirit as a chat-completions endpoint: each denoising step streams as a "thinking" event while generation happens, with optional in-progress preview images (Draw Things-style), followed by the final image.
 
@@ -53,7 +53,7 @@ Note that `pyproject.toml` here is a packaging manifest, not a uv project: it se
 
 The model loads on startup, before the server accepts any requests. On first run this downloads its weights from Hugging Face — expect a sizable one-time download — then quantizes them and caches the quantized copy (see [Model cache](docs/server.md#model-cache)); both only happen once.
 
-The default model is Z-Image-Turbo ([Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo)). To run something else, set `MFLUXIBLE_MODEL` (or `model` in a config file) before starting the server — fifteen checkpoints across Z-Image, FLUX.1, FLUX.2 Klein, Qwen-Image, Krea-2 and ERNIE-Image are supported; only the model you select is ever downloaded. See [Models](docs/server.md#models) for the full table, what differs between them, and roughly how much memory each needs — 8.6 GB to 31 GB of weights at the default quantization, about half that at `MFLUXIBLE_QUANTIZE=4`.
+The default model is Z-Image-Turbo ([Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo)). To run something else, set `MFLUXIBLE_MODEL` (or `model` in a config file) before starting the server — twenty-seven checkpoints across Z-Image, FLUX.1, FLUX.2 Klein, FLUX.3 Klein, Qwen-Image (2512 and 2.1), Krea-2, ERNIE-Image, Anima, FIBO and FIBO-2, Ming-Image, Iris and Boogu are supported; only the model you select is ever downloaded. See [Models](docs/models.md) for the full table, what differs between them, and roughly how much memory each needs — 8.6 GB to 31 GB of weights at the default quantization, about half that at `MFLUXIBLE_QUANTIZE=4`.
 
 Once it's running:
 
@@ -70,7 +70,8 @@ or use one of the [clients](docs/clients.md) for something more visual.
 - **[Clients](docs/clients.md)** — the bundled terminal scripts, the browser harness, and pointing a third-party frontend (OpenAI-compatible, or SillyTavern) at the server.
 - **[MCP tool](docs/mcp.md)** — generating images from an MCP client: what the tool does, how to register it with each tested client, and its own environment variables.
 - **[API](docs/api.md)** — every endpoint: the native streaming endpoint and its SSE event schema, image-to-image and fractional start, the OpenAI-compatible `/v1` endpoints, and the AUTOMATIC1111-shaped `txt2img` shim SillyTavern needs.
-- **[Server](docs/server.md)** — running it: how a synchronous mflux call is streamed out of an async server, environment variables (memory, model cache, LoRAs, CORS), the models it can run, binding to the network, authentication, and troubleshooting.
+- **[Server](docs/server.md)** — running it: how a synchronous mflux call is streamed out of an async server, environment variables (memory, model cache, LoRAs, CORS), binding to the network, authentication, and troubleshooting.
+- **[Models](docs/models.md)** — the checkpoints it can run: what differs between them, the defaults and capability flags for each, memory, and gated weights.
 - **[Contributing](CONTRIBUTING.md)** — for developers: the weight-free test suite and CI, what it takes to add another mflux model, and how a release is cut.
 - **[Changelog](CHANGELOG.md)** — what changed in each version.
 

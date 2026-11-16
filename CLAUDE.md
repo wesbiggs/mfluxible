@@ -53,10 +53,16 @@ puts the repo root on `sys.path`. The run command is `mfluxible-server`, or
 
 ## Docs
 
+Every non-trivial change adds an entry under `## Unreleased` in `CHANGELOG.md`, in the same change.
+A change is non-trivial if a user, operator or client could notice it: a setting, an endpoint or
+`/health` field, a model, a behaviour, or a dependency or CI change. Typos and internal refactors
+don't need one.
+
 Always update `docs/api.md` when changing the API (endpoints, request/response shapes, SSE
 event schema). `README.md` is only an overview + quickstart + index; the rest of the prose
-lives in four pages under `docs/`, split by who the reader is: `server.md` (running the
-server -- env vars, models, remote hosting, troubleshooting), `clients.md` (terminal scripts,
+lives in five pages under `docs/`, split by who the reader is: `server.md` (running the
+server -- env vars, remote hosting, troubleshooting), `models.md` (the checkpoints it can run),
+`clients.md` (terminal scripts,
 the harness, OpenAI-compatible frontends), `mcp.md` (the MCP tool and its own env vars) and
 `api.md`. A server env var goes in `server.md` and an MCP one in `mcp.md`, even though both
 are "configuration". `docs/` is for people *running* it, `CONTRIBUTING.md` says what to *do*

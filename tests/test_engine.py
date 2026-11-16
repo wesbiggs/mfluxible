@@ -35,6 +35,52 @@ def test_check_request_rejects_negative_prompt_when_unsupported(bare_engine):
         bare_engine.check_request(GenerateRequest(prompt="x", negative_prompt="blurry"))
 
 
+def test_check_request_rejects_an_image_on_a_text_to_image_only_model():
+    # Anima, FIBO-2 and FLUX.3 take no image_path, so an image can only ever be a 400.
+    engine = _engine(supports_image=False)
+    with pytest.raises(ValueError, match="text-to-image only"):
+        engine.check_request(GenerateRequest(prompt="x", image=_b64_png()))
+
+
+def test_check_request_rejects_previews_on_a_model_that_cannot_decode_them():
+    # Every endpoint reaches the decode path through request_problem, so refusing here
+    # covers native, OpenAI (partial_images) and the a1111 shim alike.
+    engine = _engine(supports_preview=False)
+    with pytest.raises(ValueError, match="cannot stream step previews"):
+        engine.check_request(GenerateRequest(prompt="x", preview_every=2))
+
+
+def test_check_request_accepts_no_previews_on_a_model_that_cannot_decode_them():
+    _engine(supports_preview=False).check_request(GenerateRequest(prompt="x", preview_every=0))
+
+
+def test_engine_refuses_a_lora_on_a_model_mflux_builds_without_one():
+    # Failing at construction, before any download, is the point: a LoRA that was never
+    # going to be applied must not start a server that quietly ignores it.
+    with pytest.raises(ValueError, match="without LoRA support"):
+        MfluxEngine(model=_spec(supports_lora=False), lora_paths=["style.safetensors"], model_cache_dir=None)
+
+
+def test_fresh_load_leaves_lora_keywords_out_when_the_model_takes_none():
+    # Records what the constructor is called with, so the TypeError an unsupported
+    # keyword would raise before any weight loads is caught here instead of on a GPU.
+    seen = {}
+
+    class NoLoraModel:
+        bits = None
+
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+        def save_model(self, base_path):
+            pass
+
+    spec = _spec(supports_lora=False, load=lambda: (NoLoraModel, None, None))
+    engine = MfluxEngine(model=spec, model_cache_dir=None)
+    engine._load_sync()
+    assert "lora_paths" not in seen and "lora_scales" not in seen
+
+
 def test_check_request_accepts_a_plain_request(bare_engine):
     bare_engine.check_request(GenerateRequest(prompt="x"))  # must not raise
 

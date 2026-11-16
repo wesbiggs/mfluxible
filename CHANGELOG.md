@@ -9,6 +9,32 @@ this repository and always share a version number.
 
 ## Unreleased
 
+- **mflux 0.24.** The dependency floor is now `mflux>=0.24.0`. The constructor and `generate_image()`
+  surfaces the six original families rely on are unchanged, the `model.callbacks` hooks and
+  `VAEUtil.decode` are where `engine.py` expects them, and the guidance rules in the models table
+  still hold.
+- **Per-model capability flags.** `ModelSpec` gains three flags, each on `/health` as a `supports_*`
+  key. Each one turns a request the model cannot honour into a 400 from `request_problem`, instead of
+  a failure inside `generate_image()` after the stream has started:
+  - `supports_image` is `False` for text-to-image-only models; `image` is refused.
+  - `supports_lora` is `False` where mflux's constructor takes no `lora_paths`. The fresh load leaves
+    those keywords out, and `MFLUXIBLE_LORA_PATHS` with such a model stops the server at startup.
+  - `supports_preview` is `False` where a step preview cannot be decoded; `preview_every`, and
+    OpenAI's `partial_images`, are refused.
+  The bundled harness hides the base-image section and the preview control when `/health` says the
+  loaded model cannot take them, and sends neither.
+- **New models.** Qwen-Image-2.1 and Qwen-Image-2.1-Turbo (`qwen-image-2.1`, `qwen-image-2.1-turbo`);
+  Anima (`anima-turbo`, `anima-aesthetic`, `anima-base`); FIBO-2 (`fibo2`) and the legacy FIBO (`fibo`);
+  FLUX.3 Klein (`flux3-image-klein`, `flux3-image-klein-base`); Ming-Image-Design
+  (`ming-image-design`); Iris (`iris-3b`, `iris-3b-base`); and Boogu (`boogu-image-turbo`). FIBO-2 and
+  FLUX.3 are gated on Hugging Face. Not added: MOSS-Image, whose constructor defaults `bake_lora` to
+  `False` so a LoRA would drop out of the quantized cache; Lens, which has no `save_model()`; Ideogram 4;
+  and the edit and control variants, which take inputs the text-to-image path does not have. None of
+  the new rows has been run on a real checkpoint yet, and their weight sizes in `docs/models.md` are
+  not measured.
+- **The model table moved** from `docs/server.md` to `docs/models.md`.
+- **CI runs on macOS 15.** The test workflow's runner moved from `macos-14`, which GitHub no longer
+  provides, to `macos-15`.
 - **`GET /mfluxible/v1/output/{name}`** serves a finished image from `MFLUXIBLE_OUTPUT_DIR`
   (default `~/Pictures/mfluxible`, the MCP tool's own save directory), read-only and by bare
   filename only. The chat endpoint now answers a tool result with `![Image](<that url>)`

@@ -15,9 +15,9 @@ permissions:
 jobs:
   test:
     # mlx (mflux's own dependency) only ships wheels for Apple Silicon macOS -- there
-    # is no Linux or Intel build -- so this can't run on ubuntu-latest. macos-14 is
+    # is no Linux or Intel build -- so this can't run on ubuntu-latest. macos-15 is
     # GitHub's Apple Silicon (M1) runner.
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
 
@@ -56,7 +56,7 @@ jobs:
         run: uvx ruff check mfluxible clients tests
 
   build:
-    # Deliberately not macos-14: building a wheel runs no project code and needs none
+    # Deliberately not macos-15: building a wheel runs no project code and needs none
     # of its dependencies, only hatchling, so this is the one job that doesn't need
     # Apple Silicon. It exists to catch packaging breakage on the PR that causes it
     # rather than on the tag that tries to publish it.

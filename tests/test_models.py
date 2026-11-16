@@ -1,3 +1,5 @@
+import inspect
+
 import pytest
 
 from mfluxible.models import CFG_GUIDANCE_FLOOR, MODELS, resolve
@@ -88,18 +90,38 @@ def test_fractional_start_is_offered_only_on_the_linear_schedule(spec):
     assert spec.supports_fractional_start is (spec.default_scheduler == "linear")
 
 
+@pytest.mark.parametrize("spec", MODELS, ids=lambda s: s.key)
+def test_supports_image_matches_whether_the_variant_takes_an_input_image(spec):
+    # The flag is the only thing standing between an `image` request and a TypeError
+    # raised from generate_image() mid-stream, so pin it to the signature it describes.
+    variant, _, _ = spec.load()
+    takes_image = "image_path" in inspect.signature(variant.generate_image).parameters
+    assert takes_image is spec.supports_image, spec.key
+
+
+@pytest.mark.parametrize("spec", MODELS, ids=lambda s: s.key)
+def test_supports_lora_matches_whether_the_constructor_takes_lora_paths(spec):
+    # Same reasoning as supports_image: the flag decides whether engine.py passes
+    # lora_paths to the constructor, so it must agree with the constructor's signature.
+    variant, _, _ = spec.load()
+    takes_lora = "lora_paths" in inspect.signature(variant.__init__).parameters
+    assert takes_lora is spec.supports_lora, spec.key
+
+
 def test_krea_2_is_the_documented_exception_on_the_cfg_floor():
     # Every other CFG model here defaults above the floor. Krea-2 sits exactly on it
     # because that is mflux's own DEFAULT_GUIDANCE, and models.py deliberately keeps
     # mflux's recommendation rather than inventing a higher one -- so a negative prompt
-    # there needs guidance raised with it. If this ever stops being the only exception,
-    # the comment in models.py explaining why needs updating too.
+    # there needs guidance raised with it. Qwen-Image-2.1 base is the same shape: mflux's
+    # qwen21 CLI defaults guidance to 1.0 and recommends running without CFG. Anima-Turbo
+    # defaults to guidance 1.0 too (Anima.DEFAULT_GUIDANCE). If another model joins this
+    # set, the comments in models.py explaining it need updating too.
     on_the_floor = {
         spec.key
         for spec in MODELS
         if spec.supports_negative_prompt and spec.default_guidance <= CFG_GUIDANCE_FLOOR
     }
-    assert on_the_floor == {"krea-2", "krea-2-raw"}
+    assert on_the_floor == {"krea-2", "krea-2-raw", "qwen-image-2.1", "anima-turbo"}
 
 
 def test_every_spec_resolves_its_mflux_classes_without_loading_weights():
@@ -107,5 +129,10 @@ def test_every_spec_resolves_its_mflux_classes_without_loading_weights():
     # constructor. So this runs in CI and catches a dotted path that mflux renamed.
     for spec in MODELS:
         variant, model_config, latent_creator = spec.load()
-        assert isinstance(variant, type) and isinstance(latent_creator, type), spec.key
+        assert isinstance(variant, type), spec.key
+        # Only a model whose previews are decodable has to have a latent creator to decode
+        # them with; Iris and Boogu legitimately have none the preview path can use.
+        assert latent_creator is None or isinstance(latent_creator, type), spec.key
+        if spec.supports_preview:
+            assert latent_creator is not None, spec.key
         assert model_config is not None, spec.key

@@ -1038,7 +1038,7 @@
           <label><span>API token <span class="opt">(only if an auth proxy is in front)</span></span>
             <input type="password" id="token" autocomplete="off" placeholder="none">
           </label>
-          <label><span>Preview every N steps <span class="opt">(0 disables)</span></span>
+          <label id="previewEveryWrap"><span>Preview every N steps <span class="opt">(0 disables)</span></span>
             <input type="number" id="previewEvery" value="0">
           </label>
         </div>
@@ -1202,6 +1202,13 @@ function log(line) {
 // rejects them outright on a model that can't act on them). /health lives alongside
 // the generations endpoint, so it is derived from whatever URL is in the box.
 let modelInfo = null;
+// False on a text-to-image-only model (supports_image false on /health). The server 400s
+// on any `image`, so the base-image section, the drop target and "Use as Base Image" are
+// hidden and nothing is ever sent as one. Starts true: "unknown" lets the server decide.
+let modelTakesImage = true;
+// Same convention for step previews (supports_preview on /health): hidden, and sent as 0,
+// on a model whose latents cannot be decoded for one.
+let modelShowsPreviews = true;
 
 // Bumped every time the base image changes. A detection captures it on the way out and
 // checks it on the way back: regions describe one particular image, and the stream is
@@ -1524,6 +1531,10 @@ async function handleImageFile(file) {
     log("error: that file doesn't look like an image");
     return;
   }
+  if (!modelTakesImage) {
+    log("this model is text-to-image only, so the image was not used");
+    return;
+  }
   setBaseImage(await fileToBase64(file), file.type);
   showInputImage();
   if (file.type === "image/png") applyEmbeddedMetadata(new Uint8Array(await file.arrayBuffer()));
@@ -1553,7 +1564,7 @@ document.addEventListener("drop", (e) => {
 });
 
 useLastBtn.addEventListener("click", () => {
-  if (!lastResultB64) return;
+  if (!lastResultB64 || !modelTakesImage) return;
   setBaseImage(lastResultB64, "image/png");
   applyEmbeddedMetadata(base64ToBytes(lastResultB64));
 });
@@ -1659,6 +1670,18 @@ async function refreshModel() {
     syncBasePane();
   }
   inpaintWrap.classList.toggle("hidden", noMask);
+  // Text-to-image-only models (ModelSpec.supports_image): the whole base-image section
+  // goes, and so does the result pane's "Use as Base Image", which would feed one back in.
+  // `=== false` for the same reason as the fields above. Clearing an image that was already
+  // loaded (a model switch on a live page) runs before the request body reads it.
+  const noImage = modelInfo ? modelInfo.supports_image === false : false;
+  modelTakesImage = !noImage;
+  if (noImage && baseImageB64) clearBaseImage();
+  document.getElementById("baseSection").classList.toggle("hidden", noImage);
+  useLastBtn.classList.toggle("hidden", noImage);
+  const noPreview = modelInfo ? modelInfo.supports_preview === false : false;
+  modelShowsPreviews = !noPreview;
+  document.getElementById("previewEveryWrap").classList.toggle("hidden", noPreview);
   // Must follow noMask's declaration, not just read it: both live in this function's
   // scope, so hoisting this above the `const` is a temporal-dead-zone ReferenceError
   // that takes the whole of refreshModel with it -- and every model-dependent control
@@ -2423,7 +2446,9 @@ form.addEventListener("submit", async (e) => {
   syncBasePane();
   // Captured on the way out rather than read off the form when the result lands: a
   // generation is long enough for someone to drop a different image meanwhile.
-  pendingCompareSrc = baseImageB64 ? imagePreview.src : null;
+  // The image this request will send, or null on a text-to-image-only model.
+  const sendImage = modelTakesImage ? baseImageB64 : null;
+  pendingCompareSrc = sendImage ? imagePreview.src : null;
   submitBtn.disabled = true;
   resetBtn.disabled = true;
   submitBtn.textContent = "Generating...";
@@ -2441,13 +2466,13 @@ form.addEventListener("submit", async (e) => {
     seed: seedVal === "" ? null : Number(seedVal),
     guidance: guidanceVal === "" ? null : Number(guidanceVal),
     negative_prompt: negativeVal === "" ? null : negativeVal,
-    preview_every: Number(document.getElementById("previewEvery").value),
+    preview_every: modelShowsPreviews ? Number(document.getElementById("previewEvery").value) : 0,
     stream: true,
-    image: baseImageB64,
-    image_strength: baseImageB64 ? Number(imageStrengthEl.value) : null,
+    image: sendImage,
+    image_strength: sendImage ? Number(imageStrengthEl.value) : null,
     // Gated on the image the same way image_strength is: the server 400s on either
     // without one, and an unchecked box shouldn't be able to produce that.
-    fractional_start: baseImageB64 ? fractionalStartEl.checked : false,
+    fractional_start: sendImage ? fractionalStartEl.checked : false,
     // All three gated together on `masked`, not just on the image: the server 400s on
     // mask_feather or a false mask_composite arriving without a mask, so an unchecked
     // box must send the defaults rather than whatever the hidden fields still hold.

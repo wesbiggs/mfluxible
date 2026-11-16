@@ -16,7 +16,7 @@ uv run clients/stream_client.py "a puffin on a cliff at sunset" --preview-every 
 node clients/stream_client.js "a puffin on a cliff at sunset" --preview-every 2 --out puffin.png
 ```
 
-Both take `--steps`, `--seed`, `--guidance` and `--negative-prompt`, and leave all four to the server when you don't pass them — so `--steps` is only worth setting to override the loaded model's own default. `--guidance` and `--negative-prompt` are refused (with a message naming the model) on models that can't act on them; see [Models](server.md#models).
+Both take `--steps`, `--seed`, `--guidance` and `--negative-prompt`, and leave all four to the server when you don't pass them — so `--steps` is only worth setting to override the loaded model's own default. `--guidance` and `--negative-prompt` are refused (with a message naming the model) on models that can't act on them; see [Models](models.md).
 
 If the server is behind [authentication](server.md#authentication), both scripts carry it the same way. For a bearer token (a proxy in front), `export MFLUXIBLE_BEARER_TOKEN=...` — environment rather than a flag, so the secret stays out of shell history and out of `ps` for the length of a generation. For the server's own HTTP Basic, put the credentials in the URL: `--url http://user:pass@host:8420/mfluxible/v1/images/generations`. Setting `MFLUXIBLE_BEARER_TOKEN` *and* passing a URL with credentials is refused with a message rather than silently resolved — the two would collide in the request, and which one wins isn't worth leaving to the HTTP library.
 
