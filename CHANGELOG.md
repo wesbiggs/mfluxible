@@ -9,6 +9,8 @@ this repository and always share a version number.
 
 ## Unreleased
 
+## 0.9.3 — 2026-11-16
+
 - **mflux 0.24.** The dependency floor is now `mflux>=0.24.0`. The constructor and `generate_image()`
   surfaces the six original families rely on are unchanged, the `model.callbacks` hooks and
   `VAEUtil.decode` are where `engine.py` expects them, and the guidance rules in the models table
