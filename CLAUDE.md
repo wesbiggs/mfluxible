@@ -53,6 +53,11 @@ puts the repo root on `sys.path`. The run command is `mfluxible-server`, or
 
 ## Docs
 
+Every non-trivial change adds an entry under `## Unreleased` in `CHANGELOG.md`, in the same change.
+A change is non-trivial if a user, operator or client could notice it: a setting, an endpoint or
+`/health` field, a model, a behaviour, or a dependency or CI change. Typos and internal refactors
+don't need one.
+
 Always update `docs/api.md` when changing the API (endpoints, request/response shapes, SSE
 event schema). `README.md` is only an overview + quickstart + index; the rest of the prose
 lives in five pages under `docs/`, split by who the reader is: `server.md` (running the

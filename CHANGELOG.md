@@ -9,37 +9,32 @@ this repository and always share a version number.
 
 ## Unreleased
 
-- **mflux 0.24.** The dependency floor is now `mflux>=0.24.0`. Re-checked against the installed
-  0.24 source: the constructor and `generate_image()` surfaces the six existing families rely
-  on are unchanged, the `model.callbacks` hooks and `VAEUtil.decode` are still where
-  `engine.py` expects them, and the guidance rules the models table documents still hold.
-  The 429-test suite passes unchanged.
-- **Text-to-image-only models get a flag, not a 500.** `ModelSpec.supports_image` (on `/health` as
-  `supports_image`) is `False` for models whose `generate_image()` takes no input image. A request
-  with `image` to one is a 400, rather than a `TypeError` mid-stream; the MCP tool refuses it before
-  sending. It is `True` for every earlier row.
-- **Anima** (`anima-turbo`, `anima-aesthetic`, `anima-base`), **FIBO-2** (`fibo2`) and **FLUX.3 Klein**
-  (`flux3-image-klein`, `flux3-image-klein-base`) are new, text-to-image only. Their repos for FIBO-2
-  and FLUX.3 are gated. **MOSS-Image** is not added: its mflux constructor defaults `bake_lora` to
-  `False`, so a quantized cache written with a LoRA configured would load without it.
-- **`ModelSpec.supports_lora`** (on `/health` as `supports_lora`) is `False` where mflux's
-  constructor takes no `lora_paths`. The fresh load then leaves those keywords out instead of
-  failing before any weight loads, and `MFLUXIBLE_LORA_PATHS` with such a model is refused at
-  startup. **FIBO** (`fibo`, legacy, with its image path) and **Ming-Image-Design**
-  (`ming-image-design`, text-only) are new rows on this basis. Iris and BooguImage are not added:
-  Iris has no VAE for step previews, and BooguImage has no latent creator.
-- **The harness hides the base image on text-to-image-only models**: the base-image section, the
-  drop target and "Use as Base Image" go when `/health` says `supports_image` is false, and no
-  `image` is sent. Checked for syntax only; not yet run against a live text-to-image-only model.
-- **`ModelSpec.supports_preview`** (on `/health` as `supports_preview`) is `False` where a step
-  preview cannot be decoded. A request with `preview_every` (or OpenAI's `partial_images`) is a 400
-  there, from `request_problem`, so every endpoint refuses it the same way; the harness hides the
-  control and sends 0. **Iris** (`iris-3b`, `iris-3b-base`) and **Boogu** (`boogu-image-turbo`) are
-  new on this basis: text-only, no LoRA, no previews.
-- **Qwen-Image-2.1 and Qwen-Image-2.1-Turbo** are new `MFLUXIBLE_MODEL` values (`qwen-image-2.1`,
-  `qwen-image-2.1-turbo`). They reuse the QwenImage-style path with no engine change. Base runs
-  true CFG above guidance 1.0 and accepts a negative prompt; Turbo runs its own fixed 8-step
-  schedule without CFG. Their weight sizes in `docs/models.md` are not measured yet.
+- **mflux 0.24.** The dependency floor is now `mflux>=0.24.0`. The constructor and `generate_image()`
+  surfaces the six original families rely on are unchanged, the `model.callbacks` hooks and
+  `VAEUtil.decode` are where `engine.py` expects them, and the guidance rules in the models table
+  still hold.
+- **Per-model capability flags.** `ModelSpec` gains three flags, each on `/health` as a `supports_*`
+  key. Each one turns a request the model cannot honour into a 400 from `request_problem`, instead of
+  a failure inside `generate_image()` after the stream has started:
+  - `supports_image` is `False` for text-to-image-only models; `image` is refused.
+  - `supports_lora` is `False` where mflux's constructor takes no `lora_paths`. The fresh load leaves
+    those keywords out, and `MFLUXIBLE_LORA_PATHS` with such a model stops the server at startup.
+  - `supports_preview` is `False` where a step preview cannot be decoded; `preview_every`, and
+    OpenAI's `partial_images`, are refused.
+  The bundled harness hides the base-image section and the preview control when `/health` says the
+  loaded model cannot take them, and sends neither.
+- **New models.** Qwen-Image-2.1 and Qwen-Image-2.1-Turbo (`qwen-image-2.1`, `qwen-image-2.1-turbo`);
+  Anima (`anima-turbo`, `anima-aesthetic`, `anima-base`); FIBO-2 (`fibo2`) and the legacy FIBO (`fibo`);
+  FLUX.3 Klein (`flux3-image-klein`, `flux3-image-klein-base`); Ming-Image-Design
+  (`ming-image-design`); Iris (`iris-3b`, `iris-3b-base`); and Boogu (`boogu-image-turbo`). FIBO-2 and
+  FLUX.3 are gated on Hugging Face. Not added: MOSS-Image, whose constructor defaults `bake_lora` to
+  `False` so a LoRA would drop out of the quantized cache; Lens, which has no `save_model()`; Ideogram 4;
+  and the edit and control variants, which take inputs the text-to-image path does not have. None of
+  the new rows has been run on a real checkpoint yet, and their weight sizes in `docs/models.md` are
+  not measured.
+- **The model table moved** from `docs/server.md` to `docs/models.md`.
+- **CI runs on macOS 15.** The test workflow's runner moved from `macos-14`, which GitHub no longer
+  provides, to `macos-15`.
 - **`GET /mfluxible/v1/output/{name}`** serves a finished image from `MFLUXIBLE_OUTPUT_DIR`
   (default `~/Pictures/mfluxible`, the MCP tool's own save directory), read-only and by bare
   filename only. The chat endpoint now answers a tool result with `![Image](<that url>)`
