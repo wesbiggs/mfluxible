@@ -120,6 +120,16 @@ async def health():
             # would come back a 400, since holding the unmasked region in place
             # means replacing the variant's scheduler (see ModelSpec.supports_mask).
             "supports_mask": spec.supports_mask,
+            # False on text-to-image-only models (ModelSpec.supports_image): a request
+            # carrying `image` is a 400 there. Missing means unknown, as for the fields above.
+            "supports_image": spec.supports_image,
+            # False where mflux builds the model without LoRA support (ModelSpec.supports_lora).
+            # The server refuses MFLUXIBLE_LORA_PATHS for such a model at startup, so this is
+            # for a client that wants to say so up front. Missing means unknown.
+            "supports_lora": spec.supports_lora,
+            # False where a step preview cannot be decoded (ModelSpec.supports_preview); a
+            # request with preview_every (or OpenAI's partial_images) is a 400 there.
+            "supports_preview": spec.supports_preview,
         },
         # Whether the VLM mailbox is configured, and whether anything is currently
         # listening on it. The harness draws its "Find objects" button off `enabled` and

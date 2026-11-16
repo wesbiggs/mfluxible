@@ -19,7 +19,7 @@ Returns:
   "status": "ok",
   "version": "0.9.2",
   "model_loaded": true,
-  "available": ["z-image-turbo", "z-image", "flux-schnell", "flux-dev", "krea-dev", "qwen-image", "krea-2", "krea-2-raw", "ernie-image-turbo", "ernie-image", "flux2-klein-4b", "flux2-klein-9b", "flux2-klein-9b-kv", "flux2-klein-base-4b", "flux2-klein-base-9b"],
+  "available": ["z-image-turbo", "z-image", "flux-schnell", "flux-dev", "krea-dev", "qwen-image", "qwen-image-2.1", "qwen-image-2.1-turbo", "krea-2", "krea-2-raw", "ernie-image-turbo", "ernie-image", "flux2-klein-4b", "flux2-klein-9b", "flux2-klein-9b-kv", "flux2-klein-base-4b", "flux2-klein-base-9b", "anima-turbo", "anima-aesthetic", "anima-base", "fibo2", "flux3-image-klein", "flux3-image-klein-base", "fibo", "ming-image-design", "iris-3b", "iris-3b-base", "boogu-image-turbo"],
   "model": {
     "name": "z-image-turbo",
     "label": "Z-Image-Turbo",
@@ -30,7 +30,10 @@ Returns:
     "default_guidance": null,
     "supports_negative_prompt": false,
     "supports_fractional_start": true,
-    "supports_mask": true
+    "supports_mask": true,
+    "supports_image": true,
+    "supports_lora": true,
+    "supports_preview": true
   },
   "vlm": {"enabled": false, "worker_attached": false, "model_loaded": false},
   "memory": {"active_bytes": 10307921920, "cache_bytes": 1073741824, "peak_bytes": 12884901888}
@@ -39,9 +42,9 @@ Returns:
 
 `version` is the release of mfluxible answering, and is the one field here a client can use to tell two deployments apart. `model_loaded` is useful for waiting on startup (weight download + quantization can take a while the first time) before sending a generation request.
 
-`model` describes what this process is running and which request fields it will accept, so a client can fill in sensible defaults without being told how the server was configured: `default_steps` is what `steps` falls back to, and `supports_guidance` / `supports_negative_prompt` / `supports_fractional_start` / `supports_mask` say whether `guidance` / `negative_prompt` / `fractional_start` / `mask` are accepted or rejected with a 400. `available` lists every model this build knows how to run — all but `model.name` would need a restart (and a download) to use.
+`model` describes what this process is running and which request fields it will accept, so a client can fill in sensible defaults without being told how the server was configured: `default_steps` is what `steps` falls back to, and `supports_guidance` / `supports_negative_prompt` / `supports_fractional_start` / `supports_mask` / `supports_image` / `supports_lora` / `supports_preview` say whether `guidance` / `negative_prompt` / `fractional_start` / `mask` / `image` / `preview_every` are accepted or rejected with a 400. `available` lists every model this build knows how to run — all but `model.name` would need a restart (and a download) to use.
 
-Treat any of those `supports_*` keys being **absent** as "unknown, let the server decide" rather than as `false` — that is what a server predating the key means, and it is how the bundled harness and MCP tool read them. Note also that `supports_negative_prompt` is necessary but not sufficient: a negative prompt also needs classifier-free guidance switched on, so on a model whose `default_guidance` is `1.0` (Krea-2) sending one without raising `guidance` is still a 400. See [Models](server.md#models).
+Treat any of those `supports_*` keys being **absent** as "unknown, let the server decide" rather than as `false` — that is what a server predating the key means, and it is how the bundled harness and MCP tool read them. Note also that `supports_negative_prompt` is necessary but not sufficient: a negative prompt also needs classifier-free guidance switched on, so on a model whose `default_guidance` is `1.0` (Krea-2) sending one without raising `guidance` is still a 400. See [Models](models.md).
 
 `vlm` describes object detection (see [`POST /mfluxible/v1/vlm/describe`](#post-mfluxiblev1vlmdescribe)). `enabled` is whether `MFLUXIBLE_VLM_DIR` was set. `worker_attached` is whether a detection worker has long-polled recently. `model_loaded` is whether the local model has been loaded yet, so a client can warn that the next detection includes a multi-gigabyte download. The harness draws its **Find objects** button off `enabled` and picks its waiting message off the rest.
 
@@ -66,11 +69,11 @@ mfluxible's own, native endpoint — everything below (step-by-step `thinking` e
 | `height` | int | 1024 | same as `width` |
 | `steps` | int or null | the model's own default | 1–200. 9 for Z-Image-Turbo, 4 for FLUX.1-schnell, 25 for FLUX.1-dev, 20 for Qwen-Image; see `default_steps` on [`/health`](#get-health) |
 | `seed` | int or null | random | echoed back in the response so a run can be reproduced |
-| `guidance` | float or null | the model's own default | only on models that use guidance (3.5 for FLUX.1-dev and Qwen-Image). A **400** on guidance-distilled models rather than a silently ignored field — see [Models](server.md#models) |
+| `guidance` | float or null | the model's own default | only on models that use guidance (3.5 for FLUX.1-dev and Qwen-Image). A **400** on guidance-distilled models rather than a silently ignored field — see [Models](models.md) |
 | `negative_prompt` | string or null | unset | Qwen-Image only; a **400** elsewhere, for the same reason |
-| `preview_every` | int | 0 | decode and stream an in-progress preview every N steps; 0–200; 0 disables previews. Each preview is a full VAE decode, so this trades speed for visibility |
+| `preview_every` | int | 0 | decode and stream an in-progress preview every N steps; 0–200; 0 disables previews. Each preview is a full VAE decode, so this trades speed for visibility. A **400** on a model whose `supports_preview` is `false` (Iris and Boogu) |
 | `stream` | bool | true | SSE stream vs a single JSON response |
-| `image` | string or null | unset | base64-encoded input image (no `data:` URI prefix) for image-to-image. Accepted by every model this server can run — see [Image-to-image](#image-to-image) below |
+| `image` | string or null | unset | base64-encoded input image (no `data:` URI prefix) for image-to-image. Accepted by every model except the text-to-image-only ones (`supports_image` on [`/health`](#get-health) is `false`: Anima, FIBO-2, FLUX.3 Klein and Ming-Image-Design), where it is a **400** — see [Image-to-image](#image-to-image) below |
 | `image_strength` | float or null | `0.4` with `image`; `0.0` with `image` **and** `mask` | how strongly `image` constrains the output, `0.0`–`1.0`; only meaningful, and only accepted, alongside `image` — a **400** if set without it. The masked default differs because the field governs something else there; see [Inpainting a region](#inpainting-a-region) |
 | `mask` | string or null | unset | base64-encoded mask image (no `data:` URI prefix) selecting the region to regenerate — **white = change this, black = keep this**, greys crossfade. Must be the same pixel dimensions as `image`, and only accepted alongside it. Only on a model whose own scheduler is linear (`supports_mask` on [`/health`](#get-health)) — a **400** otherwise. See [Inpainting a region](#inpainting-a-region) |
 | `mask_feather` | int | 0 | Gaussian blur radius (0–256) applied to `mask`, in base-image pixels, to hide the latent grid's 8px staircase along the mask edge. Useful range is 8–16; it is **not** a region blend — see below. A **400** without `mask` |
@@ -109,7 +112,7 @@ Returns the same `image` event object as a single JSON body (or a 500 with the `
 
 ## Image-to-image
 
-Set `image` (and, optionally, `image_strength`) to seed generation from an existing image instead of pure noise, using mflux's own `image_path`/`image_strength` support. Unlike `guidance`/`negative_prompt`, this isn't model-specific — mflux's `ZImage`, `Flux1` and `QwenImage` all share the same `generate_image(image_path=..., image_strength=...)` parameters, so it works on every model this server can run, with no `/health` check needed first.
+Set `image` (and, optionally, `image_strength`) to seed generation from an existing image instead of pure noise, using mflux's own `image_path`/`image_strength` support. Unlike `guidance`/`negative_prompt`, this isn't model-specific — mflux's `ZImage`, `Flux1` and `QwenImage` all share the same `generate_image(image_path=..., image_strength=...)` parameters, so it works on every model that takes an input image, which is every model here except Anima, FIBO-2, FLUX.3 Klein and Ming-Image-Design (`supports_image` on [`/health`](#get-health) says which). On those it is a 400, with no `/health` check needed first otherwise.
 
 `image_strength` follows **mflux's own convention, not the "denoising strength" convention** used by tools like Stable Diffusion/A1111/diffusers, where a *higher* value means *more* change from the input. mflux's is the other way round: it's how strongly the input image constrains the output. `0.0` means the image has no influence at all (equivalent to plain text-to-image); `1.0` means maximum influence, which can mean very few — or even zero — denoising steps actually run, so the output stays close to the input. The default, `0.4`, is a middle ground (and matches mflux's own CLI default). If you're used to the inverted convention, mentally flip the slider. That default is for a plain image-to-image request — send a `mask` as well and an omitted `image_strength` defaults to `0.0` instead, for the reason in [Inpainting a region](#inpainting-a-region).
 
@@ -286,7 +289,7 @@ A genuine [OpenAI Images API](https://platform.openai.com/docs/api-reference/ima
 | `n` | int | 1 | must be 1 — a 400 otherwise, rather than silently generating just one |
 | `response_format` | string | `"b64_json"` | only `"b64_json"` is supported — a 400 for `"url"`, since this server doesn't host images |
 | `stream` | bool | false | |
-| `partial_images` | int | 0 | 0–3; how many in-progress previews to emit while streaming. OpenAI's semantics are a *total count*; mflux's `preview_every` is a *stride*, so this is translated by dividing it into the loaded model's `default_steps` — an approximation, not an exact per-step mapping |
+| `partial_images` | int | 0 | 0–3; how many in-progress previews to emit while streaming. OpenAI's semantics are a *total count*; mflux's `preview_every` is a *stride*, so this is translated by dividing it into the loaded model's `default_steps` — an approximation, not an exact per-step mapping. A **400** unless non-zero is accepted (`supports_preview` on [`/health`](#get-health)) |
 
 Every other field OpenAI's schema defines (`quality`, `style`, `background`, `output_format`, `output_compression`, `moderation`, `user`) is accepted and silently ignored — there's no mflux equivalent to act on it with, and OpenAI clients send these with their own defaults regardless of whether the server does anything with them.
 
@@ -406,8 +409,8 @@ Response (A1111's shape; `info` is a JSON **string**, parsed a second time by th
 
 ### Why this endpoint drops what the native API rejects
 
-Everywhere else, a field the loaded model can't act on is a **400** rather than a silent no-op — see [Models](server.md#models) for that reasoning. This endpoint inverts it, for one caller-specific reason: SillyTavern's `sdcpp` routes answer every upstream failure with a bare `500` and no body, logging the real message only to its own server console. A 400 from here reaches the user as a failed generation with no reason attached, so the careful wording of a rejection buys nothing — and since SillyTavern sends `cfg_scale` and `steps` on *every* request from its own sliders (whose defaults, 7 and 20, suit neither a guidance-distilled model nor a 9-step one), rejecting them would make the source unusable rather than correcting anyone.
+Everywhere else, a field the loaded model can't act on is a **400** rather than a silent no-op — see [Models](models.md) for that reasoning. This endpoint inverts it, for one caller-specific reason: SillyTavern's `sdcpp` routes answer every upstream failure with a bare `500` and no body, logging the real message only to its own server console. A 400 from here reaches the user as a failed generation with no reason attached, so the careful wording of a rejection buys nothing — and since SillyTavern sends `cfg_scale` and `steps` on *every* request from its own sliders (whose defaults, 7 and 20, suit neither a guidance-distilled model nor a 9-step one), rejecting them would make the source unusable rather than correcting anyone.
 
 The line between ignoring and rejecting is whether the caller could otherwise detect the difference. A dropped `cfg_scale` changes the image, but the caller named no specific image and has nothing to compare against. `batch_size: 4` answered with one image is a concretely wrong result to a request that named a number — so that one is still a 400.
 
-A negative prompt is dropped under exactly the conditions that would otherwise reject it: no negative branch on this model, *or* classifier-free guidance not actually switched on above the floor, which is the "necessary but not sufficient" case described in [Models](server.md#models). The drops mirror those rules rather than sharing code with them, so the endpoint re-checks its own output against the real validator — a rule this ever fails to mirror surfaces as a 400 instead of a silently wrong image.
+A negative prompt is dropped under exactly the conditions that would otherwise reject it: no negative branch on this model, *or* classifier-free guidance not actually switched on above the floor, which is the "necessary but not sufficient" case described in [Models](models.md). The drops mirror those rules rather than sharing code with them, so the endpoint re-checks its own output against the real validator — a rule this ever fails to mirror surfaces as a 400 instead of a silently wrong image.

@@ -678,6 +678,10 @@ async def generate_image(
                 f"{info.get('label', 'this model')} does not run the linear schedule fractional_start "
                 "extends; omit the fractional_start argument (image_strength still works)."
             )
+        if image_path is not None and not info.get("supports_image", True):
+            raise ToolError(
+                f"{info.get('label', 'this model')} is text-to-image only; omit the image_path argument."
+            )
         if (mask_boxes is not None or mask_path is not None) and not info.get("supports_mask", True):
             raise ToolError(
                 f"{info.get('label', 'this model')} does not run the linear schedule masking needs; "

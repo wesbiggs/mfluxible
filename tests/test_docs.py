@@ -30,7 +30,7 @@ def _health_sample() -> dict:
 
 def test_documented_health_sample_lists_every_model_in_table_order():
     # Order matters as well as membership: `available` is built by iterating MODELS, and
-    # server.md's model table is written in that same order, so a reader comparing the
+    # models.md's model table is written in that same order, so a reader comparing the
     # two should see them line up.
     assert _health_sample()["available"] == [spec.key for spec in MODELS]
 

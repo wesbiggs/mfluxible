@@ -317,6 +317,11 @@ class MfluxEngine:
         self.spec = model if isinstance(model, ModelSpec) else resolve(model)
         self.quantize = quantize
         self.model_cache_dir = model_cache_dir
+        if lora_paths and not self.spec.supports_lora:
+            raise ValueError(
+                f"{self.spec.label} is built by mflux without LoRA support; unset "
+                "MFLUXIBLE_LORA_PATHS (and MFLUXIBLE_LORA_SCALES) or pick another model."
+            )
         self.lora_paths = lora_paths
         self.lora_scales = lora_scales
         self.model = None
@@ -377,11 +382,15 @@ class MfluxEngine:
             # defaults to schnell, so a flux-dev cache would load as schnell).
             self.model = model_cls(model_path=str(saved_dir), quantize=self.quantize, model_config=model_config)
         else:
+            # Only passed where mflux's constructor takes them: on FIBO, Ming-Image and Iris
+            # the keywords are a TypeError before a weight loads (ModelSpec.supports_lora).
+            lora_kwargs = (
+                {"lora_paths": self.lora_paths, "lora_scales": self.lora_scales} if self.spec.supports_lora else {}
+            )
             self.model = model_cls(
                 quantize=self.quantize,
-                lora_paths=self.lora_paths,
-                lora_scales=self.lora_scales,
                 model_config=model_config,
+                **lora_kwargs,
             )
             if saved_dir is not None:
                 saved_dir.mkdir(parents=True, exist_ok=True)
@@ -504,6 +513,10 @@ class MfluxEngine:
         body, so no path from an exception to a response is the invariant, and
         server.py holds the other end of it (nothing there does str(exc) either).
         """
+        if req.preview_every and not self.spec.supports_preview:
+            return (
+                f"{self.spec.label} cannot stream step previews; set preview_every (or partial_images) to 0."
+            )
         if req.guidance is not None and not self.spec.supports_guidance:
             return f"{self.spec.label} ignores guidance (it is guidance-distilled); omit the field."
         if req.negative_prompt is not None:
@@ -523,6 +536,8 @@ class MfluxEngine:
                     f"{CFG_GUIDANCE_FLOOR} (classifier-free guidance is off at or below it, and "
                     f"this request's guidance is {guidance}); raise guidance or omit negative_prompt."
                 )
+        if req.image is not None and not self.spec.supports_image:
+            return f"{self.spec.label} is text-to-image only; omit image."
         if req.image_strength is not None and req.image is None:
             return "image_strength requires image to also be set."
         if req.image is not None:

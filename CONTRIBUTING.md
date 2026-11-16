@@ -66,9 +66,9 @@ The corollary of a weight-free suite is what it can't tell you: it exercises the
 
 Always update `docs/api.md` when changing the API (endpoints, request/response shapes, SSE event schema).
 
-`README.md` is an overview, a quickstart and an index into `docs/`. The prose there is split by use case: `server.md` (running the server), `clients.md` (the terminal scripts, the browser harness, OpenAI-compatible frontends), `mcp.md` (the MCP tool) and `api.md`. So a server environment variable is documented in `server.md` and an MCP one in `mcp.md`, even though both are "configuration". Anything aimed at someone changing the code, rather than running it, belongs in this file.
+`README.md` is an overview, a quickstart and an index into `docs/`. The prose there is split by use case: `server.md` (running the server), `models.md` (the checkpoints it can run, and what each needs), `clients.md` (the terminal scripts, the browser harness, OpenAI-compatible frontends), `mcp.md` (the MCP tool) and `api.md`. So a server environment variable is documented in `server.md` and an MCP one in `mcp.md`, even though both are "configuration". Anything aimed at someone changing the code, rather than running it, belongs in this file.
 
-A new setting needs three places, not one: the module that reads it, `config.KNOWN` in `mfluxible/config.py`, and the table in `docs/server.md`. `tests/test_config.py` fails if the first two disagree — it scans the package for the variables actually read — so the one that can silently rot is the table.
+A new setting needs three places, not one: the module that reads it, `config.KNOWN` in `mfluxible/config.py`, and the table in `docs/server.md`. A new model is a row in `docs/models.md` as well. `tests/test_config.py` fails if the first two disagree — it scans the package for the variables actually read — so the one that can silently rot is the table.
 
 ## Releasing
 
