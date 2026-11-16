@@ -51,7 +51,7 @@ Disk costs more than RAM on the first run, and it's the download that dominates 
 
 mflux's own aliases work too (`schnell`, `dev`, `qwen`, `zimage`, `klein-4b`, `krea2`, …), and an unrecognised name fails at startup with the list of valid ones — before anything is downloaded.
 
-**Only the model you select is ever fetched.** All twenty-eight are named in `mfluxible/models.py`, but an entry there is inert data: its mflux imports are deferred into a loader function that runs at load time, and mflux downloads weights inside the model's constructor, not at import. The twenty-seven you aren't running cost nothing beyond their row in that table.
+**Only the model you select is ever fetched.** Every model in the table is named in `mfluxible/models.py`, but an entry there is inert data: its mflux imports are deferred into a loader function that runs at load time, and mflux downloads weights inside the model's constructor, not at import. The models you aren't running cost nothing beyond their row in that table.
 
 Switching models means restarting the server, the same way `MFLUXIBLE_QUANTIZE` and LoRAs do. Each model + quantization + LoRA combination keeps its own quantized cache directory, so switching back doesn't re-quantize.
 
@@ -68,9 +68,9 @@ All the bundled clients leave `steps` to the server unless you set it, so they f
 
 ### Gated weights and `HF_TOKEN`
 
-Twelve of the twenty-five repos above are gated († in the table). Getting at those takes an account, an accepted licence *and* a token — the token on its own is not enough:
+Some of the repos above are gated († in the table). Getting at those takes an account, an accepted licence *and* a token — the token on its own is not enough:
 
-1. Open the model page signed in and click **Agree and access repository**. All twelve are `gated: auto`, so access lands the moment you accept — there's no queue waiting on a human.
+1. Open the model page signed in and click **Agree and access repository**. All of those are `gated: auto`, so access lands the moment you accept — there's no queue waiting on a human.
 2. Create a **Read** token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens). A fine-grained token works too, but it needs *"Read access to contents of all public gated repos you can access"* ticked, or it will 401 on exactly these models.
 3. Store it once with `hf auth login` (which writes `~/.cache/huggingface/token`), or export `HF_TOKEN` in the shell that starts the server. Either way it's `huggingface_hub` that reads it, not mfluxible — which is why there's no `MFLUXIBLE_*` variable for it, and why a dedicated machine needs its own copy (see [Running on a dedicated machine](server.md#running-on-a-dedicated-machine)).
 

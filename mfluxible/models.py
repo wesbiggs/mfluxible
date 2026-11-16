@@ -20,7 +20,7 @@ quantized-weight cache to write. Adding any of
 those means a capability flag here *and* engine.py learning to honour it -- not a new row.
 
 Every mflux import here is deferred into the loader functions on purpose. A spec is
-inert data until `load()` is called on it, so naming twenty-eight models costs nothing at
+inert data until `load()` is called on it, so naming every model costs nothing at
 import time, and mflux only downloads weights inside the variant's constructor
 (`WeightLoader.load` -> `PathResolution.resolve` -> a HF snapshot download). One
 server process therefore fetches, quantizes and caches exactly the one model it was

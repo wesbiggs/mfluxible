@@ -31,7 +31,7 @@ worker is co-configured with it and runs on the same machine — see
 
 | Variable | Config key | Default | Purpose |
 |---|---|---|---|
-| `MFLUXIBLE_MODEL` | `model` | `z-image-turbo` | Which model to run — any of the twenty-eight in [Models](models.md) |
+| `MFLUXIBLE_MODEL` | `model` | `z-image-turbo` | Which model to run — any of the models in [Models](models.md) |
 | `MFLUXIBLE_QUANTIZE` | `quantize` | `8` | Quantization bits; try `4` for less memory, `none` for full precision |
 | `MFLUXIBLE_MODEL_DIR` | `model_dir` | `$XDG_CACHE_HOME/mfluxible` | Where quantized weights are cached (see [Model cache](#model-cache)) |
 | `MFLUXIBLE_OUTPUT_DIR` | `output_dir` | `~/Pictures/mfluxible` | Directory of finished images served read-only at `GET /mfluxible/v1/output/<name>`; set it to the MCP tool's `MFLUXIBLE_MCP_SAVE_DIR` (see [`POST /v1/chat/completions`](api.md#post-v1chatcompletions)) |
